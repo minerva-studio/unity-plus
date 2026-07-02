@@ -319,9 +319,9 @@ function hasCompatibleRenameTypes(
 }
 
 function getRenameClassFileSyncMode(runtimeVscode: typeof vscode): RenameClassFileSyncMode {
-  const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.classFileSyncMode', 'unity-object');
+  const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.classFileSyncMode', 'any');
 
-  return isRenameClassFileSyncMode(mode) ? mode : 'unity-object';
+  return isRenameClassFileSyncMode(mode) ? mode : 'any';
 }
 
 function isRenameClassFileSyncMode(mode: string | undefined): mode is RenameClassFileSyncMode {
