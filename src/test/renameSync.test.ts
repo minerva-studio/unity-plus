@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
-import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
 import { CSharpClassSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
@@ -470,6 +470,174 @@ describe('renameSync', () => {
     assert.strictEqual(warnings.some(line => line.includes('Unity Plus: Unity script rename sync did not apply')), true);
   });
 
+  it('applies atomic class rename with C# edit plus script and Unity meta rename', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    let appliedEdit: FakeWorkspaceEdit | undefined;
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async edit => {
+        appliedEdit = edit as unknown as FakeWorkspaceEdit;
+        return true;
+      },
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.strictEqual(appliedEdit, csharpEdit);
+    assert.deepStrictEqual(csharpEdit.fileRenames, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
+  });
+
+  it('applies atomic class rename without Unity meta when the old meta is missing', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => true,
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(csharpEdit.fileRenames, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath }
+    ]);
+  });
+
+  it('falls back from atomic rename when the cursor is not on the primary class name', async () => {
+    const plan = createSyncPlan();
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 8, character: 4 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), new FakeWorkspaceEdit()),
+      fileExists: async () => true,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => true,
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'fallback');
+  });
+
+  it('falls back from atomic rename in unity-object mode for non-Unity classes', async () => {
+    const plan = createSyncPlan();
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: ordinaryClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(ordinaryClassAt(plan.oldClassName, 2, 14), new FakeWorkspaceEdit()),
+      fileExists: async () => true,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => true,
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'fallback');
+  });
+
+  it('fails atomic rename preflight when the target script already exists', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    let applyCalled = false;
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.newFilePath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => {
+        applyCalled = true;
+        return true;
+      },
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'failed');
+    assert.strictEqual(applyCalled, false);
+    assert.deepStrictEqual(csharpEdit.fileRenames, []);
+  });
+
+  it('fails atomic rename preflight when the target Unity meta already exists', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    let applyCalled = false;
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath || path === plan.newMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => {
+        applyCalled = true;
+        return true;
+      },
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'failed');
+    assert.strictEqual(applyCalled, false);
+    assert.deepStrictEqual(csharpEdit.fileRenames, []);
+  });
+
+  it('fails atomic rename when applyEdit returns false', async () => {
+    const plan = createSyncPlan();
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newClassName: plan.newClassName,
+      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), new FakeWorkspaceEdit()),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => false,
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'failed');
+  });
+
   it('inverts a class-to-file rename plan for undo', () => {
     const plan = createSyncPlan();
     const undoPlan = invertScriptFilenameSyncPlan(plan);
@@ -532,6 +700,17 @@ function unityClass(className: string): CSharpClassSnapshot {
   };
 }
 
+function unityClassAt(className: string, line: number, character: number): CSharpClassSnapshot {
+  return {
+    ...unityClass(className),
+    position: { line, character },
+    nameRange: {
+      start: { line, character },
+      end: { line, character: character + className.length }
+    }
+  };
+}
+
 function ordinaryClass(className: string): CSharpClassSnapshot {
   return {
     name: className,
@@ -540,7 +719,21 @@ function ordinaryClass(className: string): CSharpClassSnapshot {
   };
 }
 
-function createFakeLanguageService(primaryClass: CSharpClassSnapshot | undefined): CSharpLanguageService {
+function ordinaryClassAt(className: string, line: number, character: number): CSharpClassSnapshot {
+  return {
+    ...ordinaryClass(className),
+    position: { line, character },
+    nameRange: {
+      start: { line, character },
+      end: { line, character: character + className.length }
+    }
+  };
+}
+
+function createFakeLanguageService(
+  primaryClass: CSharpClassSnapshot | undefined,
+  renameEdit?: unknown
+): CSharpLanguageService {
   return {
     async getPrimaryClass() {
       return primaryClass;
@@ -549,7 +742,7 @@ function createFakeLanguageService(primaryClass: CSharpClassSnapshot | undefined
       return [];
     },
     async buildRenameEdit() {
-      return undefined;
+      return renameEdit as never;
     }
   };
 }
@@ -578,6 +771,17 @@ function fakeUri(path: string) {
     path,
     toString: () => path
   } as never;
+}
+
+class FakeWorkspaceEdit {
+  public readonly fileRenames: { oldPath: string; newPath: string }[] = [];
+
+  renameFile(oldUri: { fsPath: string }, newUri: { fsPath: string }): void {
+    this.fileRenames.push({
+      oldPath: oldUri.fsPath,
+      newPath: newUri.fsPath
+    });
+  }
 }
 
 function createSyncPlan(): ScriptFilenameSyncPlan {

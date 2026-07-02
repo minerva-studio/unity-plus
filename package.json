@@ -38,7 +38,7 @@
       },
       {
         "command": "unityPlus.syncClassName",
-        "title": "Unity Plus: Sync Class Name"
+        "title": "Unity Plus: Rename Class and Script File"
       },
       {
         "command": "unityPlus.showUnityEventReferences",
@@ -49,9 +49,21 @@
         "title": "Unity Plus: Rescan Unity Project"
       }
     ],
+    "keybindings": [
+      {
+        "command": "unityPlus.syncClassName",
+        "key": "f2",
+        "when": "editorTextFocus && editorLangId == csharp && config.unityPlus.rename.overrideF2"
+      }
+    ],
     "configuration": {
       "title": "Unity Plus",
       "properties": {
+        "unityPlus.rename.overrideF2": {
+          "type": "boolean",
+          "default": true,
+          "description": "Controls whether F2 in C# files uses Unity Plus class/script rename before falling back to VS Code Rename Symbol."
+        },
         "unityPlus.rename.classFileSyncMode": {
           "type": "string",
           "default": "any",

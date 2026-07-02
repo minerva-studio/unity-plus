@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
-import { createVscodeCSharpLanguageService, CSharpClassSnapshot, CSharpLanguageService } from '../../unity/csharpLanguageService';
+import { createVscodeCSharpLanguageService, CSharpClassSnapshot, CSharpLanguageService, CSharpPosition } from '../../unity/csharpLanguageService';
 import { UnityPlusLogger } from '../../unity/logger';
 
 export type RenameClassFileSyncMode = 'unity-object' | 'any' | 'off';
@@ -54,6 +54,25 @@ export interface ScriptRenameSyncRuntime {
   logger: UnityPlusLogger;
 }
 
+export interface AtomicScriptRenameRuntime {
+  uri: vscode.Uri;
+  filePath: string;
+  mode: RenameClassFileSyncMode;
+  currentClass: CSharpClassSnapshot | undefined;
+  cursor: CSharpPosition;
+  newClassName: string;
+  languageService: CSharpLanguageService;
+  fileExists(path: string): Promise<boolean>;
+  createFileUri(path: string): vscode.Uri;
+  applyWorkspaceEdit(edit: vscode.WorkspaceEdit): Promise<boolean>;
+  logger: UnityPlusLogger;
+}
+
+export type AtomicScriptRenameResult =
+  | { kind: 'applied'; oldClassName: string; newClassName: string }
+  | { kind: 'fallback' }
+  | { kind: 'failed'; message: string };
+
 export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposable {
   const runtimeVscode = loadVscode();
   const languageService = createVscodeCSharpLanguageService(runtimeVscode);
@@ -68,8 +87,73 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
   }));
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.syncClassName', async () => {
-    logger.info('Class name sync is planned but not implemented yet.');
-    runtimeVscode.window.showInformationMessage('Unity Plus: class name sync is planned for v0.2.');
+    const editor = runtimeVscode.window.activeTextEditor;
+    if (!editor || editor.document.languageId !== 'csharp') {
+      await executeNativeRename(runtimeVscode);
+      return;
+    }
+
+    const mode = getRenameClassFileSyncMode(runtimeVscode);
+    if (mode === 'off') {
+      await executeNativeRename(runtimeVscode);
+      return;
+    }
+
+    const currentClass = await getPrimaryClass(languageService, editor.document.uri, mode, logger);
+    if (!canAttemptAtomicScriptRename(editor.document.uri.fsPath, currentClass, editor.selection.active, mode)) {
+      await executeNativeRename(runtimeVscode);
+      return;
+    }
+
+    const newClassName = await runtimeVscode.window.showInputBox({
+      value: currentClass.name,
+      prompt: 'Rename C# class, script file, and Unity meta file',
+      validateInput: value => isValidCSharpIdentifier(value) ? undefined : 'Enter a valid C# class name.'
+    });
+
+    if (!newClassName || newClassName === currentClass.name) {
+      return;
+    }
+
+    syncingScriptRenameFiles.add(editor.document.uri.fsPath);
+    try {
+      const result = await runtimeVscode.window.withProgress({
+        location: runtimeVscode.ProgressLocation.Notification,
+        title: 'Unity Plus: Renaming class and script file...'
+      }, async () => await executeAtomicScriptRename({
+        uri: editor.document.uri,
+        filePath: editor.document.uri.fsPath,
+        mode,
+        currentClass,
+        cursor: {
+          line: editor.selection.active.line,
+          character: editor.selection.active.character
+        },
+        newClassName,
+        languageService,
+        fileExists: async path => await fileExists(runtimeVscode, path),
+        createFileUri: path => runtimeVscode.Uri.file(path),
+        applyWorkspaceEdit: async edit => await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true }),
+        logger
+      }));
+
+      if (result.kind === 'fallback') {
+        await executeNativeRename(runtimeVscode);
+      } else if (result.kind === 'failed') {
+        logger.warn(result.message);
+        void runtimeVscode.window.showWarningMessage(`Unity Plus: ${result.message}`);
+      } else {
+        const message = `Unity Plus: Renamed ${result.oldClassName} -> ${result.newClassName}`;
+        logger.info(message);
+        void runtimeVscode.window.showInformationMessage(message);
+      }
+    } catch (error) {
+      const message = `Could not rename Unity script class: ${errorMessage(error)}`;
+      logger.warn(message);
+      void runtimeVscode.window.showWarningMessage(`Unity Plus: ${message}`);
+    } finally {
+      syncingScriptRenameFiles.delete(editor.document.uri.fsPath);
+    }
   }));
 
   disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
@@ -177,6 +261,56 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
   return runtimeVscode.Disposable.from(...disposables);
 }
 
+export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRuntime): Promise<AtomicScriptRenameResult> {
+  if (!canAttemptAtomicScriptRename(runtime.filePath, runtime.currentClass, runtime.cursor, runtime.mode)) {
+    return { kind: 'fallback' };
+  }
+
+  const currentClass = runtime.currentClass;
+  if (!currentClass.position) {
+    return { kind: 'fallback' };
+  }
+
+  const renameEdit = await runtime.languageService.buildRenameEdit(
+    runtime.uri,
+    currentClass.position,
+    runtime.newClassName
+  );
+
+  if (!renameEdit) {
+    return { kind: 'failed', message: 'C# rename provider did not return a rename edit.' };
+  }
+
+  const plan = createScriptFilenameSyncPlan(runtime.filePath, currentClass.name, runtime.newClassName);
+  const renameOperations = await buildScriptFilenameSyncOperations(plan, {
+    fileExists: runtime.fileExists,
+    logger: runtime.logger
+  });
+
+  if (renameOperations.length === 0) {
+    return { kind: 'failed', message: `Script file rename preflight failed for ${basename(runtime.filePath)}.` };
+  }
+
+  for (const operation of renameOperations) {
+    renameEdit.renameFile(
+      runtime.createFileUri(operation.oldPath),
+      runtime.createFileUri(operation.newPath),
+      { overwrite: false }
+    );
+  }
+
+  const applied = await runtime.applyWorkspaceEdit(renameEdit);
+  if (!applied) {
+    return { kind: 'failed', message: `Atomic rename did not apply for ${basename(runtime.filePath)}.` };
+  }
+
+  return {
+    kind: 'applied',
+    oldClassName: currentClass.name,
+    newClassName: runtime.newClassName
+  };
+}
+
 export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSyncRuntime): Promise<{
   newClass?: CSharpClassSnapshot;
   appliedPlan?: ScriptFilenameSyncPlan;
@@ -205,6 +339,22 @@ export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSync
   runtime.logger.info(message);
   runtime.showInformationMessage(message);
   return { newClass, appliedPlan: plan };
+}
+
+function createScriptFilenameSyncPlan(
+  filePath: string,
+  oldClassName: string,
+  newClassName: string
+): ScriptFilenameSyncPlan {
+  return {
+    oldClassName,
+    newClassName,
+    oldFilePath: filePath,
+    newFilePath: join(dirname(filePath), `${newClassName}.cs`),
+    oldMetaPath: `${filePath}.meta`,
+    newMetaPath: `${join(dirname(filePath), `${newClassName}.cs`)}.meta`,
+    isUndo: false
+  };
 }
 
 async function waitForScriptRenamePlan(runtime: ScriptRenameSyncRuntime): Promise<{
@@ -466,6 +616,51 @@ function errorMessage(error: unknown): string {
 
 function isCSharpScriptMove(move: ScriptFileMove): boolean {
   return move.oldPath.endsWith('.cs') && move.newPath.endsWith('.cs');
+}
+
+function canAttemptAtomicScriptRename(
+  filePath: string,
+  currentClass: CSharpClassSnapshot | undefined,
+  cursor: CSharpPosition,
+  mode: RenameClassFileSyncMode
+): currentClass is CSharpClassSnapshot & { position: CSharpPosition } {
+  if (mode === 'off' || !currentClass?.position || !currentClass.nameRange) {
+    return false;
+  }
+
+  if (mode === 'unity-object' && currentClass.isUnityObject !== true) {
+    return false;
+  }
+
+  if (basename(filePath) !== `${currentClass.name}.cs`) {
+    return false;
+  }
+
+  return isPositionInRange(cursor, currentClass.nameRange);
+}
+
+function isPositionInRange(position: CSharpPosition, range: NonNullable<CSharpClassSnapshot['nameRange']>): boolean {
+  if (position.line < range.start.line || position.line > range.end.line) {
+    return false;
+  }
+
+  if (position.line === range.start.line && position.character < range.start.character) {
+    return false;
+  }
+
+  if (position.line === range.end.line && position.character > range.end.character) {
+    return false;
+  }
+
+  return true;
+}
+
+function isValidCSharpIdentifier(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+}
+
+async function executeNativeRename(runtimeVscode: typeof vscode): Promise<void> {
+  await runtimeVscode.commands.executeCommand('editor.action.rename');
 }
 
 function scriptMoveKey(oldPath: string, newPath: string): string {

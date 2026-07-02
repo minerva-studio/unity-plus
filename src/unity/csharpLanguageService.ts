@@ -4,12 +4,18 @@ export interface CSharpClassSnapshot {
   name: string;
   namespace?: string;
   position?: CSharpPosition;
+  nameRange?: CSharpRange;
   isUnityObject?: boolean;
 }
 
 export interface CSharpPosition {
   line: number;
   character: number;
+}
+
+export interface CSharpRange {
+  start: CSharpPosition;
+  end: CSharpPosition;
 }
 
 export interface CSharpReferenceLocation {
@@ -34,6 +40,7 @@ interface ClassSymbolCandidate {
   name: string;
   namespace?: string;
   position: vscode.Position;
+  range: vscode.Range;
 }
 
 export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode): CSharpLanguageService {
@@ -51,6 +58,16 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
         position: {
           line: primaryClass.position.line,
           character: primaryClass.position.character
+        },
+        nameRange: {
+          start: {
+            line: primaryClass.range.start.line,
+            character: primaryClass.range.start.character
+          },
+          end: {
+            line: primaryClass.range.end.line,
+            character: primaryClass.range.end.character
+          }
         }
       };
 
@@ -120,7 +137,8 @@ function collectTopLevelClassSymbols(
       classes.push({
         name: symbol.name,
         namespace: symbol.containerName,
-        position: symbol.location.range.start
+        position: symbol.location.range.start,
+        range: symbol.location.range
       });
     }
     return;
@@ -131,7 +149,8 @@ function collectTopLevelClassSymbols(
     classes.push({
       name: symbol.name,
       namespace: findNearestNamespace(runtimeVscode, ancestors),
-      position: symbol.selectionRange.start
+      position: symbol.selectionRange.start,
+      range: symbol.selectionRange
     });
     return;
   }
