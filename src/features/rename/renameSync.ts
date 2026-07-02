@@ -36,11 +36,28 @@ export interface RecentScriptFilenameSync {
   plan: ScriptFilenameSyncPlan;
 }
 
+export interface ScriptRenameSyncRuntime {
+  uri: vscode.Uri;
+  filePath: string;
+  mode: RenameClassFileSyncMode;
+  oldClass: CSharpClassSnapshot | undefined;
+  recentSync?: RecentScriptFilenameSync;
+  languageService: CSharpLanguageService;
+  operations: ScriptFilenameSyncOperations;
+  showProgress<T>(title: string, task: () => Promise<T>): Promise<T>;
+  showInformationMessage(message: string): void;
+  showWarningMessage(message: string): void;
+  wait(ms: number): Promise<void>;
+  debounceMs: number;
+  logger: UnityPlusLogger;
+}
+
 export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposable {
   const runtimeVscode = loadVscode();
   const languageService = createVscodeCSharpLanguageService(runtimeVscode);
   const disposables: vscode.Disposable[] = [];
   const previousCsharpClasses = new Map<string, CSharpClassSnapshot>();
+  const syncingScriptRenameFiles = new Set<string>();
   let recentSync: RecentScriptFilenameSync | undefined;
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.syncScriptFilename', async () => {
@@ -90,7 +107,8 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
   }));
 
   disposables.push(runtimeVscode.workspace.onDidChangeTextDocument(async event => {
-    if (!event.document.uri.fsPath.endsWith('.cs')) {
+    const filePath = event.document.uri.fsPath;
+    if (!filePath.endsWith('.cs')) {
       return;
     }
 
@@ -99,42 +117,97 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
       return;
     }
 
-    const oldClass = previousCsharpClasses.get(event.document.uri.fsPath);
-    const newClass = await getPrimaryClass(languageService, event.document.uri, mode, logger);
-    if (newClass) {
-      previousCsharpClasses.set(event.document.uri.fsPath, newClass);
-    } else {
-      previousCsharpClasses.delete(event.document.uri.fsPath);
-    }
-
-    const plan = planScriptFilenameSync(
-      event.document.uri.fsPath,
-      oldClass,
-      newClass,
-      mode,
-      recentSync
-    );
-
-    if (!plan) {
+    if (syncingScriptRenameFiles.has(filePath)) {
+      logger.debug(`Script rename sync is already running for ${basename(filePath)}.`);
       return;
     }
 
+    syncingScriptRenameFiles.add(filePath);
+
     try {
-      const applied = await applyScriptFilenameSyncPlan(plan, {
-        fileExists: async path => await fileExists(runtimeVscode, path),
-        applyRenameOperations: async operations => await applyRenameOperations(runtimeVscode, operations),
+      const result = await syncScriptRenameAfterClassChange({
+        uri: event.document.uri,
+        filePath,
+        mode,
+        oldClass: previousCsharpClasses.get(filePath),
+        recentSync,
+        languageService,
+        operations: {
+          fileExists: async path => await fileExists(runtimeVscode, path),
+          applyRenameOperations: async operations => await applyRenameOperations(runtimeVscode, operations),
+          logger
+        },
+        showProgress: async (title, task) => await runtimeVscode.window.withProgress({
+          location: runtimeVscode.ProgressLocation.Notification,
+          title
+        }, task),
+        showInformationMessage: message => {
+          void runtimeVscode.window.showInformationMessage(message);
+        },
+        showWarningMessage: message => {
+          void runtimeVscode.window.showWarningMessage(message);
+        },
+        wait,
+        debounceMs: 400,
         logger
       });
-      if (applied) {
-        recentSync = { plan };
-        logger.info(`Renamed Unity script file from ${basename(event.document.uri.fsPath)} to ${basename(plan.newFilePath)}.`);
+
+      if (result.newClass) {
+        previousCsharpClasses.set(filePath, result.newClass);
+      } else {
+        previousCsharpClasses.delete(filePath);
+      }
+
+      if (result.appliedPlan) {
+        recentSync = { plan: result.appliedPlan };
       }
     } catch (error) {
-      logger.warn(`Could not rename Unity script file: ${errorMessage(error)}`);
+      const message = `Could not rename Unity script file: ${errorMessage(error)}`;
+      logger.warn(message);
+      void runtimeVscode.window.showWarningMessage(`Unity Plus: ${message}`);
+    } finally {
+      syncingScriptRenameFiles.delete(filePath);
     }
   }));
 
   return runtimeVscode.Disposable.from(...disposables);
+}
+
+export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSyncRuntime): Promise<{
+  newClass?: CSharpClassSnapshot;
+  appliedPlan?: ScriptFilenameSyncPlan;
+}> {
+  // Let the C# provider settle after a Rename Symbol edit before reading document symbols.
+  await runtime.wait(runtime.debounceMs);
+
+  const newClass = await getPrimaryClass(runtime.languageService, runtime.uri, runtime.mode, runtime.logger);
+  const plan = planScriptFilenameSync(
+    runtime.filePath,
+    runtime.oldClass,
+    newClass,
+    runtime.mode,
+    runtime.recentSync
+  );
+
+  if (!plan) {
+    return { newClass };
+  }
+
+  const applied = await runtime.showProgress('Unity Plus: Syncing script rename...', async () =>
+    await applyScriptFilenameSyncPlan(plan, runtime.operations)
+  );
+
+  if (!applied) {
+    const message = `Unity script rename sync did not apply for ${basename(runtime.filePath)}. See Unity Plus output for details.`;
+    runtime.logger.warn(message);
+    runtime.showWarningMessage(`Unity Plus: ${message}`);
+    return { newClass };
+  }
+
+  const message = `Unity Plus: Renamed ${basename(plan.oldFilePath)} -> ${basename(plan.newFilePath)}`;
+  runtime.logger.info(message);
+  runtime.showInformationMessage(message);
+  return { newClass, appliedPlan: plan };
 }
 
 export function planScriptFilenameSync(
@@ -415,4 +488,8 @@ function isRenameClassFileSyncMode(mode: string | undefined): mode is RenameClas
 
 function loadVscode(): typeof vscode {
   return createRequire(__filename)('vscode') as typeof vscode;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

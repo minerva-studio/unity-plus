@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
-import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan } from '../features/rename/renameSync';
-import { CSharpClassSnapshot } from '../unity/csharpLanguageService';
+import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { CSharpClassSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
 describe('renameSync', () => {
@@ -296,6 +296,137 @@ describe('renameSync', () => {
     assert.deepStrictEqual(metaOperations, []);
   });
 
+  it('syncs class rename through progress and shows success message', async () => {
+    const plan = createSyncPlan();
+    const progressTitles: string[] = [];
+    const messages: string[] = [];
+    const appliedOperations: unknown[] = [];
+
+    const result = await syncScriptRenameAfterClassChange({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      oldClass: unityClass(plan.oldClassName),
+      languageService: createFakeLanguageService(unityClass(plan.newClassName)),
+      operations: {
+        fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+        applyRenameOperations: async operations => {
+          appliedOperations.push(...operations);
+          return true;
+        },
+        logger: createTestLogger()
+      },
+      showProgress: async (title, task) => {
+        progressTitles.push(title);
+        return await task();
+      },
+      showInformationMessage: message => messages.push(message),
+      showWarningMessage: () => undefined,
+      wait: async () => undefined,
+      debounceMs: 400,
+      logger: createTestLogger()
+    });
+
+    assert.deepStrictEqual(progressTitles, ['Unity Plus: Syncing script rename...']);
+    assert.deepStrictEqual(appliedOperations, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
+    assert.strictEqual(messages[0], 'Unity Plus: Renamed PlayerController.cs -> HeroController.cs');
+    assert.strictEqual(result.appliedPlan?.newClassName, plan.newClassName);
+  });
+
+  it('waits before reading the C# language service for class rename sync', async () => {
+    const waited: number[] = [];
+    const plan = createSyncPlan();
+
+    await syncScriptRenameAfterClassChange({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      oldClass: unityClass(plan.oldClassName),
+      languageService: createFakeLanguageService(unityClass(plan.oldClassName)),
+      operations: {
+        fileExists: async () => true,
+        applyRenameOperations: async () => true,
+        logger: createTestLogger()
+      },
+      showProgress: async (_title, task) => await task(),
+      showInformationMessage: () => undefined,
+      showWarningMessage: () => undefined,
+      wait: async ms => {
+        waited.push(ms);
+      },
+      debounceMs: 450,
+      logger: createTestLogger()
+    });
+
+    assert.deepStrictEqual(waited, [450]);
+  });
+
+  it('does not show progress when class rename sync has no plan', async () => {
+    const plan = createSyncPlan();
+    const progressTitles: string[] = [];
+
+    const result = await syncScriptRenameAfterClassChange({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      oldClass: unityClass(plan.oldClassName),
+      languageService: createFakeLanguageService(unityClass(plan.oldClassName)),
+      operations: {
+        fileExists: async () => true,
+        applyRenameOperations: async () => true,
+        logger: createTestLogger()
+      },
+      showProgress: async (title, task) => {
+        progressTitles.push(title);
+        return await task();
+      },
+      showInformationMessage: () => undefined,
+      showWarningMessage: () => undefined,
+      wait: async () => undefined,
+      debounceMs: 400,
+      logger: createTestLogger()
+    });
+
+    assert.deepStrictEqual(progressTitles, []);
+    assert.strictEqual(result.appliedPlan, undefined);
+  });
+
+  it('warns when class rename sync apply path returns false', async () => {
+    const plan = createSyncPlan();
+    const output = createMemoryOutput();
+    const logger = createLogger({
+      output,
+      getLevel: () => 'debug'
+    });
+    const warnings: string[] = [];
+
+    const result = await syncScriptRenameAfterClassChange({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      oldClass: unityClass(plan.oldClassName),
+      languageService: createFakeLanguageService(unityClass(plan.newClassName)),
+      operations: {
+        fileExists: async path => path === plan.oldFilePath || path === plan.newFilePath,
+        applyRenameOperations: async () => true,
+        logger
+      },
+      showProgress: async (_title, task) => await task(),
+      showInformationMessage: () => undefined,
+      showWarningMessage: message => warnings.push(message),
+      wait: async () => undefined,
+      debounceMs: 400,
+      logger
+    });
+
+    assert.strictEqual(result.appliedPlan, undefined);
+    assert.strictEqual(output.lines.some(line => line.includes('Unity script rename sync did not apply')), true);
+    assert.strictEqual(warnings.some(line => line.includes('Unity Plus: Unity script rename sync did not apply')), true);
+  });
+
   it('inverts a class-to-file rename plan for undo', () => {
     const plan = createSyncPlan();
     const undoPlan = invertScriptFilenameSyncPlan(plan);
@@ -364,6 +495,28 @@ function ordinaryClass(className: string): CSharpClassSnapshot {
     namespace: 'Minerva.Tools',
     isUnityObject: false
   };
+}
+
+function createFakeLanguageService(primaryClass: CSharpClassSnapshot | undefined): CSharpLanguageService {
+  return {
+    async getPrimaryClass() {
+      return primaryClass;
+    },
+    async findReferences() {
+      return [];
+    },
+    async buildRenameEdit() {
+      return undefined;
+    }
+  };
+}
+
+function fakeUri(path: string) {
+  return {
+    fsPath: path,
+    path,
+    toString: () => path
+  } as never;
 }
 
 function createSyncPlan(): ScriptFilenameSyncPlan {
