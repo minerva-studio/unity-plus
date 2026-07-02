@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
-import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, RenameClassFileSyncMode, runRenameClassCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
 import { CSharpClassSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
@@ -638,6 +638,102 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'failed');
   });
 
+  it('shows preparing progress before falling back outside C# editors', async () => {
+    const runtime = createRenameCommandRuntime({
+      editor: {
+        languageId: 'typescript',
+        uri: fakeUri('/Project/Assets/tool.ts'),
+        filePath: normalize('/Project/Assets/tool.ts'),
+        cursor: { line: 1, character: 2 }
+      }
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.progressTitles, ['Unity Plus: Preparing rename...']);
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.strictEqual(runtime.messages.some(message => message.includes('this is not a C# editor')), true);
+  });
+
+  it('falls back with a visible message when rename sync mode is off', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      mode: 'off',
+      editor: createCSharpEditor(plan.oldFilePath)
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.strictEqual(runtime.messages.some(message => message.includes('Rename sync mode is off')), true);
+  });
+
+  it('falls back with a visible message when the cursor is not on the primary class name', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 8, character: 2 }),
+      primaryClass: unityClassAt(plan.oldClassName, 2, 14)
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the script class name')), true);
+  });
+
+  it('falls back with a visible message when class and file names do not match', async () => {
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(normalize('/Project/Assets/CustomName.cs'), { line: 2, character: 18 }),
+      primaryClass: unityClassAt('PlayerController', 2, 14)
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.strictEqual(runtime.messages.some(message => message.includes('class/file names do not match')), true);
+  });
+
+  it('shows preparing and renaming progress for valid atomic class rename command', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryClass: unityClassAt(plan.oldClassName, 2, 14),
+      inputValue: plan.newClassName
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(runtime.progressTitles, [
+      'Unity Plus: Preparing rename...',
+      'Unity Plus: Renaming class and script file...'
+    ]);
+    assert.deepStrictEqual(runtime.nativeRenameCalls, []);
+    assert.strictEqual(runtime.messages.length, 0);
+    assert.strictEqual(runtime.markedSyncing.includes(plan.oldFilePath), true);
+    assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
+  });
+
+  it('cancels visible rename command without applying or falling back when input is cancelled', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryClass: unityClassAt(plan.oldClassName, 2, 14),
+      inputValue: undefined
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'cancelled');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, []);
+    assert.deepStrictEqual(runtime.appliedEdits, []);
+    assert.deepStrictEqual(runtime.warnings, []);
+  });
+
   it('inverts a class-to-file rename plan for undo', () => {
     const plan = createSyncPlan();
     const undoPlan = invertScriptFilenameSyncPlan(plan);
@@ -782,6 +878,93 @@ class FakeWorkspaceEdit {
       newPath: newUri.fsPath
     });
   }
+}
+
+interface RenameCommandRuntimeOptions {
+  editor?: {
+    languageId: string;
+    uri: ReturnType<typeof fakeUri>;
+    filePath: string;
+    cursor: { line: number; character: number };
+  };
+  mode?: RenameClassFileSyncMode;
+  primaryClass?: CSharpClassSnapshot;
+  inputValue?: string;
+}
+
+function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
+  const plan = createSyncPlan();
+  const progressTitles: string[] = [];
+  const messages: string[] = [];
+  const warnings: string[] = [];
+  const nativeRenameCalls: string[] = [];
+  const markedSyncing: string[] = [];
+  const unmarkedSyncing: string[] = [];
+  const appliedEdits: unknown[] = [];
+
+  const runtime = {
+    editor: options.editor,
+    mode: options.mode ?? 'unity-object',
+    languageService: createFakeLanguageService(
+      options.primaryClass,
+      new FakeWorkspaceEdit()
+    ),
+    async showInputBox() {
+      return options.inputValue;
+    },
+    async showProgress<T>(title: string, task: () => Promise<T>): Promise<T> {
+      progressTitles.push(title);
+      return await task();
+    },
+    showInformationMessage(message: string): void {
+      messages.push(message);
+    },
+    showWarningMessage(message: string): void {
+      warnings.push(message);
+    },
+    async executeNativeRename(): Promise<void> {
+      nativeRenameCalls.push('editor.action.rename');
+    },
+    async executeAtomicRename(request: Parameters<typeof executeAtomicScriptRename>[0]) {
+      return await executeAtomicScriptRename(request);
+    },
+    async fileExists(path: string): Promise<boolean> {
+      return path === plan.oldFilePath || path === plan.oldMetaPath;
+    },
+    createFileUri: fakeUri,
+    async applyWorkspaceEdit(edit: unknown): Promise<boolean> {
+      appliedEdits.push(edit);
+      return true;
+    },
+    markSyncing(filePath: string): void {
+      markedSyncing.push(filePath);
+    },
+    unmarkSyncing(filePath: string): void {
+      unmarkedSyncing.push(filePath);
+    },
+    logger: createTestLogger(),
+    progressTitles,
+    messages,
+    warnings,
+    nativeRenameCalls,
+    markedSyncing,
+    unmarkedSyncing,
+    appliedEdits
+  };
+
+  return runtime;
+}
+
+function createCSharpEditor(
+  filePath: string,
+  cursor: { line: number; character: number } = { line: 2, character: 18 }
+) {
+  return {
+    languageId: 'csharp',
+    uri: fakeUri(filePath),
+    filePath,
+    cursor
+  };
 }
 
 function createSyncPlan(): ScriptFilenameSyncPlan {
