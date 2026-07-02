@@ -27,6 +27,11 @@ export interface ScriptFileRenameOperation {
   newPath: string;
 }
 
+export interface ScriptFileMove {
+  oldPath: string;
+  newPath: string;
+}
+
 export interface RecentScriptFilenameSync {
   plan: ScriptFilenameSyncPlan;
 }
@@ -61,6 +66,11 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
         previousCsharpClasses.delete(file.oldUri.fsPath);
       }
     }
+
+    void moveScriptMetaFilesForDirectRename(runtimeVscode, event.files.map(file => ({
+      oldPath: file.oldUri.fsPath,
+      newPath: file.newUri.fsPath
+    })), logger);
   }));
 
   runtimeVscode.workspace.textDocuments
@@ -251,6 +261,45 @@ export async function buildScriptFilenameSyncOperations(
   return renameOperations;
 }
 
+export async function buildScriptMetaRenameOperations(
+  moves: readonly ScriptFileMove[],
+  operations: Pick<ScriptFilenameSyncOperations, 'fileExists' | 'logger'>
+): Promise<ScriptFileRenameOperation[]> {
+  const eventMoveKeys = new Set(moves.map(move => scriptMoveKey(move.oldPath, move.newPath)));
+  const renameOperations: ScriptFileRenameOperation[] = [];
+
+  for (const move of moves) {
+    if (!isCSharpScriptMove(move)) {
+      continue;
+    }
+
+    const oldMetaPath = `${move.oldPath}.meta`;
+    const newMetaPath = `${move.newPath}.meta`;
+
+    // VS Code may report a paired .meta rename in the same batch; do not duplicate it.
+    if (eventMoveKeys.has(scriptMoveKey(oldMetaPath, newMetaPath))) {
+      continue;
+    }
+
+    if (!await operations.fileExists(oldMetaPath)) {
+      operations.logger.debug(`Unity script meta file was not found for ${basename(oldMetaPath)}.`);
+      continue;
+    }
+
+    if (await operations.fileExists(newMetaPath)) {
+      operations.logger.warn(`Unity script meta rename skipped because ${basename(newMetaPath)} already exists.`);
+      continue;
+    }
+
+    renameOperations.push({
+      oldPath: oldMetaPath,
+      newPath: newMetaPath
+    });
+  }
+
+  return renameOperations;
+}
+
 async function fileExists(runtimeVscode: typeof vscode, path: string): Promise<boolean> {
   try {
     await runtimeVscode.workspace.fs.stat(runtimeVscode.Uri.file(path));
@@ -277,8 +326,36 @@ async function applyRenameOperations(
   return await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true });
 }
 
+async function moveScriptMetaFilesForDirectRename(
+  runtimeVscode: typeof vscode,
+  moves: readonly ScriptFileMove[],
+  logger: UnityPlusLogger
+): Promise<void> {
+  const renameOperations = await buildScriptMetaRenameOperations(moves, {
+    fileExists: async path => await fileExists(runtimeVscode, path),
+    logger
+  });
+
+  if (renameOperations.length === 0) {
+    return;
+  }
+
+  const applied = await applyRenameOperations(runtimeVscode, renameOperations);
+  if (applied) {
+    logger.info(`Moved ${renameOperations.length} Unity script meta file(s) after C# file rename.`);
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isCSharpScriptMove(move: ScriptFileMove): boolean {
+  return move.oldPath.endsWith('.cs') && move.newPath.endsWith('.cs');
+}
+
+function scriptMoveKey(oldPath: string, newPath: string): string {
+  return `${oldPath}\n${newPath}`;
 }
 
 function hasCompatibleRenameTypes(
