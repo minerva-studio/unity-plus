@@ -4,7 +4,7 @@
   "description": "A Unity workflow repair kit for VS Code.",
   "version": "0.0.1",
   "private": true,
-  "publisher": "minerva-studio",
+  "publisher": "minerva-game-studio",
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -88,7 +88,9 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint \"src/**/*.ts\"",
-    "test": "npm run compile && mocha \"out/test/**/*.test.js\""
+    "test": "npm run compile && mocha \"out/test/**/*.test.js\"",
+    "package:vsix": "node scripts/package-extension.mjs",
+    "package:install": "node scripts/package-extension.mjs --install"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -96,6 +98,7 @@
     "@types/vscode": "^1.88.0",
     "@typescript-eslint/eslint-plugin": "^7.16.0",
     "@typescript-eslint/parser": "^7.16.0",
+    "@vscode/vsce": "^3.9.2",
     "eslint": "^8.57.0",
     "mocha": "^10.7.0",
     "typescript": "^5.5.3"

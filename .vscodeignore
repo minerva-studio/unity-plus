@@ -1,0 +1,12 @@
+.github/**
+docs/**
+node_modules/**
+scripts/**
+src/**
+out/test/**
+.gitignore
+.eslintrc.json
+package-lock.json
+tsconfig.json
+*.vsix
+*.log

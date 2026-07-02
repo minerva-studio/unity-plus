@@ -30,3 +30,9 @@ Unity Plus exists because this should not be every Unity developer's private mai
 ## Contributing
 
 This repository starts private while the first working prototype is built. The issue tracker is the source of truth for planned work.
+
+## Local Packaging
+
+- Run `npm run package:vsix` to build `dist/unity-plus-<version>.vsix`.
+- Run `npm run package:install` to build the VSIX and install it into VS Code for local testing.
+- Set `CODE_CLI` to a custom VS Code CLI path if `code` is not available on `PATH`.
