@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
-import { applyScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan } from '../features/rename/renameSync';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
 describe('renameSync', () => {
@@ -17,6 +17,7 @@ describe('renameSync', () => {
     assert.strictEqual(plan?.newFilePath, normalize('/Project/Assets/HeroController.cs'));
     assert.strictEqual(plan?.oldMetaPath, normalize('/Project/Assets/PlayerController.cs.meta'));
     assert.strictEqual(plan?.newMetaPath, normalize('/Project/Assets/HeroController.cs.meta'));
+    assert.strictEqual(plan?.isUndo, false);
   });
 
   it('does not rename files that do not match the old class name', () => {
@@ -94,6 +95,35 @@ describe('renameSync', () => {
     ]);
     assert.strictEqual(output.lines.some(line => line.includes('Unity script meta file was not found')), true);
   });
+
+  it('inverts a class-to-file rename plan for undo', () => {
+    const plan = createSyncPlan();
+    const undoPlan = invertScriptFilenameSyncPlan(plan);
+
+    assert.strictEqual(undoPlan.oldClassName, plan.newClassName);
+    assert.strictEqual(undoPlan.newClassName, plan.oldClassName);
+    assert.strictEqual(undoPlan.oldFilePath, plan.newFilePath);
+    assert.strictEqual(undoPlan.newFilePath, plan.oldFilePath);
+    assert.strictEqual(undoPlan.oldMetaPath, plan.newMetaPath);
+    assert.strictEqual(undoPlan.newMetaPath, plan.oldMetaPath);
+    assert.strictEqual(undoPlan.isUndo, true);
+  });
+
+  it('plans undo from the last applied class-to-file rename', () => {
+    const previousPlan = createSyncPlan();
+    const undoPlan = planScriptFilenameSync(
+      previousPlan.newFilePath,
+      unityScript(previousPlan.newClassName),
+      unityScript(previousPlan.oldClassName),
+      { plan: previousPlan }
+    );
+
+    assert.strictEqual(undoPlan?.oldFilePath, previousPlan.newFilePath);
+    assert.strictEqual(undoPlan?.newFilePath, previousPlan.oldFilePath);
+    assert.strictEqual(undoPlan?.oldMetaPath, previousPlan.newMetaPath);
+    assert.strictEqual(undoPlan?.newMetaPath, previousPlan.oldMetaPath);
+    assert.strictEqual(undoPlan?.isUndo, true);
+  });
 });
 
 function unityScript(className: string): string {
@@ -107,7 +137,8 @@ function createSyncPlan(): ScriptFilenameSyncPlan {
     oldFilePath: normalize('/Project/Assets/PlayerController.cs'),
     newFilePath: normalize('/Project/Assets/HeroController.cs'),
     oldMetaPath: normalize('/Project/Assets/PlayerController.cs.meta'),
-    newMetaPath: normalize('/Project/Assets/HeroController.cs.meta')
+    newMetaPath: normalize('/Project/Assets/HeroController.cs.meta'),
+    isUndo: false
   };
 }
 

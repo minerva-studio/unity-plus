@@ -11,6 +11,7 @@ export interface ScriptFilenameSyncPlan {
   newFilePath: string;
   oldMetaPath: string;
   newMetaPath: string;
+  isUndo: boolean;
 }
 
 export interface ScriptFilenameSyncOperations {
@@ -19,10 +20,15 @@ export interface ScriptFilenameSyncOperations {
   logger: UnityPlusLogger;
 }
 
+export interface RecentScriptFilenameSync {
+  plan: ScriptFilenameSyncPlan;
+}
+
 export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposable {
   const runtimeVscode = loadVscode();
   const disposables: vscode.Disposable[] = [];
   const previousCsharpText = new Map<string, string>();
+  let recentSync: RecentScriptFilenameSync | undefined;
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.syncScriptFilename', async () => {
     logger.info('Script filename sync is planned but not implemented yet.');
@@ -75,7 +81,8 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
     const plan = planScriptFilenameSync(
       event.document.uri.fsPath,
       oldSource,
-      newSource
+      newSource,
+      recentSync
     );
 
     if (!plan) {
@@ -94,6 +101,7 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
         },
         logger
       });
+      recentSync = { plan };
       logger.info(`Renamed Unity script file from ${basename(event.document.uri.fsPath)} to ${basename(plan.newFilePath)}.`);
     } catch (error) {
       logger.warn(`Could not rename Unity script file: ${errorMessage(error)}`);
@@ -106,7 +114,8 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
 export function planScriptFilenameSync(
   filePath: string,
   oldSource: string,
-  newSource: string
+  newSource: string,
+  recentSync?: RecentScriptFilenameSync
 ): ScriptFilenameSyncPlan | undefined {
   const oldDetection = detectUnityScriptTypes(oldSource);
   const newDetection = detectUnityScriptTypes(newSource);
@@ -120,6 +129,11 @@ export function planScriptFilenameSync(
 
   if (!oldType || !newType || oldType.name === newType.name) {
     return undefined;
+  }
+
+  const undoPlan = planUndoScriptFilenameSync(filePath, oldType.name, newType.name, recentSync);
+  if (undoPlan) {
+    return undoPlan;
   }
 
   if (oldType.kind !== newType.kind || oldType.namespace !== newType.namespace) {
@@ -136,8 +150,44 @@ export function planScriptFilenameSync(
     oldFilePath: filePath,
     newFilePath: join(dirname(filePath), `${newType.name}.cs`),
     oldMetaPath: `${filePath}.meta`,
-    newMetaPath: `${join(dirname(filePath), `${newType.name}.cs`)}.meta`
+    newMetaPath: `${join(dirname(filePath), `${newType.name}.cs`)}.meta`,
+    isUndo: false
   };
+}
+
+export function invertScriptFilenameSyncPlan(plan: ScriptFilenameSyncPlan): ScriptFilenameSyncPlan {
+  return {
+    oldClassName: plan.newClassName,
+    newClassName: plan.oldClassName,
+    oldFilePath: plan.newFilePath,
+    newFilePath: plan.oldFilePath,
+    oldMetaPath: plan.newMetaPath,
+    newMetaPath: plan.oldMetaPath,
+    isUndo: !plan.isUndo
+  };
+}
+
+function planUndoScriptFilenameSync(
+  filePath: string,
+  oldClassName: string,
+  newClassName: string,
+  recentSync?: RecentScriptFilenameSync
+): ScriptFilenameSyncPlan | undefined {
+  if (!recentSync) {
+    return undefined;
+  }
+
+  const undoPlan = invertScriptFilenameSyncPlan(recentSync.plan);
+
+  if (
+    filePath === undoPlan.oldFilePath &&
+    oldClassName === undoPlan.oldClassName &&
+    newClassName === undoPlan.newClassName
+  ) {
+    return undoPlan;
+  }
+
+  return undefined;
 }
 
 export async function applyScriptFilenameSyncPlan(
