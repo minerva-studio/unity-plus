@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { detectUnityScriptTypes } from '../unity/csharpTypeDetector';
+import { detectCSharpClasses, detectUnityScriptTypes } from '../unity/csharpTypeDetector';
 
 describe('csharpTypeDetector', () => {
   it('detects MonoBehaviour classes', () => {
@@ -78,6 +78,36 @@ describe('csharpTypeDetector', () => {
     ].join('\n'));
 
     assert.strictEqual(result.types.length, 0);
+    assert.strictEqual(result.isSafeForAutomaticRename, false);
+  });
+
+  it('detects ordinary C# classes for any-file rename mode', () => {
+    const result = detectCSharpClasses([
+      'namespace Minerva.Tools;',
+      'public class PlainUtility',
+      '{',
+      '}'
+    ].join('\n'));
+
+    assert.strictEqual(result.classes.length, 1);
+    assert.strictEqual(result.classes[0].name, 'PlainUtility');
+    assert.strictEqual(result.classes[0].namespace, 'Minerva.Tools');
+    assert.deepStrictEqual(result.classes[0].baseTypes, []);
+    assert.strictEqual(result.classes[0].unityKind, undefined);
+    assert.strictEqual(result.isSafeForAutomaticRename, true);
+  });
+
+  it('handles multiple ordinary C# classes conservatively', () => {
+    const result = detectCSharpClasses([
+      'public class FirstUtility',
+      '{',
+      '}',
+      'public class SecondUtility',
+      '{',
+      '}'
+    ].join('\n'));
+
+    assert.strictEqual(result.classes.length, 2);
     assert.strictEqual(result.isSafeForAutomaticRename, false);
   });
 });

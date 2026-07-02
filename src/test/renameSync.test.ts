@@ -20,6 +20,58 @@ describe('renameSync', () => {
     assert.strictEqual(plan?.isUndo, false);
   });
 
+  it('does not plan class-to-file rename when sync mode is off', () => {
+    const plan = planScriptFilenameSync(
+      normalize('/Project/Assets/PlayerController.cs'),
+      unityScript('PlayerController'),
+      unityScript('HeroController'),
+      'off'
+    );
+
+    assert.strictEqual(plan, undefined);
+  });
+
+  it('does not plan ordinary C# class rename in unity-object mode', () => {
+    const plan = planScriptFilenameSync(
+      normalize('/Project/Assets/PlainUtility.cs'),
+      ordinaryScript('PlainUtility'),
+      ordinaryScript('RenamedUtility'),
+      'unity-object'
+    );
+
+    assert.strictEqual(plan, undefined);
+  });
+
+  it('plans ordinary C# class rename in any mode', () => {
+    const plan = planScriptFilenameSync(
+      normalize('/Project/Assets/PlainUtility.cs'),
+      ordinaryScript('PlainUtility'),
+      ordinaryScript('RenamedUtility'),
+      'any'
+    );
+
+    assert.strictEqual(plan?.oldClassName, 'PlainUtility');
+    assert.strictEqual(plan?.newClassName, 'RenamedUtility');
+    assert.strictEqual(plan?.newFilePath, normalize('/Project/Assets/RenamedUtility.cs'));
+  });
+
+  it('does not plan ordinary C# class rename in any mode for multi-class files', () => {
+    const plan = planScriptFilenameSync(
+      normalize('/Project/Assets/PlainUtility.cs'),
+      [
+        'public class PlainUtility { }',
+        'public class OtherUtility { }'
+      ].join('\n'),
+      [
+        'public class RenamedUtility { }',
+        'public class OtherUtility { }'
+      ].join('\n'),
+      'any'
+    );
+
+    assert.strictEqual(plan, undefined);
+  });
+
   it('does not rename files that do not match the old class name', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/CustomName.cs'),
@@ -171,6 +223,7 @@ describe('renameSync', () => {
       previousPlan.newFilePath,
       unityScript(previousPlan.newClassName),
       unityScript(previousPlan.oldClassName),
+      'unity-object',
       { plan: previousPlan }
     );
 
@@ -180,10 +233,37 @@ describe('renameSync', () => {
     assert.strictEqual(undoPlan?.newMetaPath, previousPlan.oldMetaPath);
     assert.strictEqual(undoPlan?.isUndo, true);
   });
+
+  it('plans undo for ordinary C# class rename in any mode', () => {
+    const previousPlan: ScriptFilenameSyncPlan = {
+      oldClassName: 'PlainUtility',
+      newClassName: 'RenamedUtility',
+      oldFilePath: normalize('/Project/Assets/PlainUtility.cs'),
+      newFilePath: normalize('/Project/Assets/RenamedUtility.cs'),
+      oldMetaPath: normalize('/Project/Assets/PlainUtility.cs.meta'),
+      newMetaPath: normalize('/Project/Assets/RenamedUtility.cs.meta'),
+      isUndo: false
+    };
+    const undoPlan = planScriptFilenameSync(
+      previousPlan.newFilePath,
+      ordinaryScript(previousPlan.newClassName),
+      ordinaryScript(previousPlan.oldClassName),
+      'any',
+      { plan: previousPlan }
+    );
+
+    assert.strictEqual(undoPlan?.oldFilePath, previousPlan.newFilePath);
+    assert.strictEqual(undoPlan?.newFilePath, previousPlan.oldFilePath);
+    assert.strictEqual(undoPlan?.isUndo, true);
+  });
 });
 
 function unityScript(className: string): string {
   return `namespace Minerva.Gameplay { public class ${className} : MonoBehaviour { } }`;
+}
+
+function ordinaryScript(className: string): string {
+  return `namespace Minerva.Tools { public class ${className} { } }`;
 }
 
 function createSyncPlan(): ScriptFilenameSyncPlan {

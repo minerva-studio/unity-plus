@@ -1,8 +1,10 @@
 import type * as vscode from 'vscode';
 import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
-import { detectUnityScriptTypes } from '../../unity/csharpTypeDetector';
+import { CSharpClassInfo, detectCSharpClasses, detectUnityScriptTypes } from '../../unity/csharpTypeDetector';
 import { UnityPlusLogger } from '../../unity/logger';
+
+export type RenameClassFileSyncMode = 'unity-object' | 'any' | 'off';
 
 export interface ScriptFilenameSyncPlan {
   oldClassName: string;
@@ -47,7 +49,7 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
 
   disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
     const csharpMoves = event.files.filter(file => file.oldUri.path.endsWith('.cs') || file.newUri.path.endsWith('.cs'));
-    if (csharpMoves.length > 0 && runtimeVscode.workspace.getConfiguration('unityPlus').get('rename.syncClassAndFile') === true) {
+    if (csharpMoves.length > 0 && getRenameClassFileSyncMode(runtimeVscode) !== 'off') {
       logger.debug(`Observed ${csharpMoves.length} C# rename operation(s).`);
     }
   }));
@@ -79,7 +81,8 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
       return;
     }
 
-    if (runtimeVscode.workspace.getConfiguration('unityPlus').get('rename.syncClassAndFile') !== true) {
+    const mode = getRenameClassFileSyncMode(runtimeVscode);
+    if (mode === 'off') {
       return;
     }
 
@@ -87,6 +90,7 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
       event.document.uri.fsPath,
       oldSource,
       newSource,
+      mode,
       recentSync
     );
 
@@ -116,10 +120,15 @@ export function planScriptFilenameSync(
   filePath: string,
   oldSource: string,
   newSource: string,
+  mode: RenameClassFileSyncMode = 'unity-object',
   recentSync?: RecentScriptFilenameSync
 ): ScriptFilenameSyncPlan | undefined {
-  const oldDetection = detectUnityScriptTypes(oldSource);
-  const newDetection = detectUnityScriptTypes(newSource);
+  if (mode === 'off') {
+    return undefined;
+  }
+
+  const oldDetection = detectScriptRenameTypes(oldSource, mode);
+  const newDetection = detectScriptRenameTypes(newSource, mode);
 
   if (!oldDetection.isSafeForAutomaticRename || !newDetection.isSafeForAutomaticRename) {
     return undefined;
@@ -137,7 +146,7 @@ export function planScriptFilenameSync(
     return undoPlan;
   }
 
-  if (oldType.kind !== newType.kind || oldType.namespace !== newType.namespace) {
+  if (!hasCompatibleRenameTypes(oldType, newType, mode)) {
     return undefined;
   }
 
@@ -269,6 +278,54 @@ async function applyRenameOperations(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function detectScriptRenameTypes(source: string, mode: RenameClassFileSyncMode) {
+  if (mode === 'any') {
+    const detection = detectCSharpClasses(source);
+    return {
+      types: detection.classes,
+      isSafeForAutomaticRename: detection.isSafeForAutomaticRename
+    };
+  }
+
+  const detection = detectUnityScriptTypes(source);
+  return {
+    types: detection.types.map(type => ({
+      name: type.name,
+      namespace: type.namespace,
+      baseTypes: [],
+      unityKind: type.kind,
+      isPartial: type.isPartial
+    })),
+    isSafeForAutomaticRename: detection.isSafeForAutomaticRename
+  };
+}
+
+function hasCompatibleRenameTypes(
+  oldType: CSharpClassInfo,
+  newType: CSharpClassInfo,
+  mode: RenameClassFileSyncMode
+): boolean {
+  if (oldType.namespace !== newType.namespace) {
+    return false;
+  }
+
+  if (mode === 'unity-object') {
+    return oldType.unityKind !== undefined && oldType.unityKind === newType.unityKind;
+  }
+
+  return true;
+}
+
+function getRenameClassFileSyncMode(runtimeVscode: typeof vscode): RenameClassFileSyncMode {
+  const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.classFileSyncMode', 'unity-object');
+
+  return isRenameClassFileSyncMode(mode) ? mode : 'unity-object';
+}
+
+function isRenameClassFileSyncMode(mode: string | undefined): mode is RenameClassFileSyncMode {
+  return mode === 'unity-object' || mode === 'any' || mode === 'off';
 }
 
 function loadVscode(): typeof vscode {

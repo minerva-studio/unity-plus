@@ -48,10 +48,15 @@
     "configuration": {
       "title": "Unity Plus",
       "properties": {
-        "unityPlus.rename.syncClassAndFile": {
-          "type": "boolean",
-          "default": true,
-          "description": "Keep Unity script file names and primary Unity class names synchronized."
+        "unityPlus.rename.classFileSyncMode": {
+          "type": "string",
+          "default": "unity-object",
+          "enum": [
+            "unity-object",
+            "any",
+            "off"
+          ],
+          "description": "Controls automatic C# class/file name synchronization. Use unity-object for direct MonoBehaviour or ScriptableObject classes, any for safe single-class C# files, or off to disable sync."
         },
         "unityPlus.projectFiles.autoRefresh": {
           "type": "boolean",

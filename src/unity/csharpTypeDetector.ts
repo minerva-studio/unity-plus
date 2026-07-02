@@ -7,8 +7,21 @@ export interface UnityScriptType {
   isPartial: boolean;
 }
 
+export interface CSharpClassInfo {
+  name: string;
+  namespace?: string;
+  baseTypes: string[];
+  unityKind?: UnityScriptKind;
+  isPartial: boolean;
+}
+
 export interface UnityScriptDetection {
   types: UnityScriptType[];
+  isSafeForAutomaticRename: boolean;
+}
+
+export interface CSharpClassDetection {
+  classes: CSharpClassInfo[];
   isSafeForAutomaticRename: boolean;
 }
 
@@ -16,30 +29,43 @@ const classDeclarationPattern = /(?:^|[;{}\s])(?:(?:public|private|protected|int
 const namespacePattern = /namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:\{|;)/g;
 
 export function detectUnityScriptTypes(source: string): UnityScriptDetection {
+  const classDetection = detectCSharpClasses(source);
+  const types = classDetection.classes
+    .filter(hasUnityKind)
+    .map(type => ({
+      name: type.name,
+      namespace: type.namespace,
+      kind: type.unityKind,
+      isPartial: type.isPartial
+    }));
+
+  return {
+    types,
+    isSafeForAutomaticRename: types.length === 1 && !hasUnsafePartialOverlap(types)
+  };
+}
+
+export function detectCSharpClasses(source: string): CSharpClassDetection {
   const sanitizedSource = stripCommentsAndStrings(source);
-  const types: UnityScriptType[] = [];
+  const classes: CSharpClassInfo[] = [];
   let match: RegExpExecArray | null;
 
   while ((match = classDeclarationPattern.exec(sanitizedSource)) !== null) {
     const name = match[1];
     const baseTypes = parseBaseTypes(match[2] ?? '');
-    const kind = detectUnityScriptKind(baseTypes);
 
-    if (!kind) {
-      continue;
-    }
-
-    types.push({
+    classes.push({
       name,
       namespace: findNamespaceAt(sanitizedSource, match.index),
-      kind,
+      baseTypes,
+      unityKind: detectUnityScriptKind(baseTypes),
       isPartial: isPartialClassDeclaration(match[0])
     });
   }
 
   return {
-    types,
-    isSafeForAutomaticRename: types.length === 1 && !hasUnsafePartialOverlap(types)
+    classes,
+    isSafeForAutomaticRename: classes.length === 1 && !hasUnsafePartialOverlap(classes)
   };
 }
 
@@ -55,6 +81,10 @@ function detectUnityScriptKind(baseTypes: readonly string[]): UnityScriptKind | 
   return undefined;
 }
 
+function hasUnityKind(type: CSharpClassInfo): type is CSharpClassInfo & { unityKind: UnityScriptKind } {
+  return type.unityKind !== undefined;
+}
+
 function parseBaseTypes(baseTypeList: string): string[] {
   return baseTypeList
     .split(',')
@@ -66,7 +96,7 @@ function isPartialClassDeclaration(declaration: string): boolean {
   return /\bpartial\s+class\b/.test(declaration);
 }
 
-function hasUnsafePartialOverlap(types: readonly UnityScriptType[]): boolean {
+function hasUnsafePartialOverlap(types: readonly Pick<CSharpClassInfo, 'isPartial' | 'name' | 'namespace'>[]): boolean {
   const partialTypeNames = new Set(types.filter(type => type.isPartial).map(type => `${type.namespace ?? ''}.${type.name}`));
   return partialTypeNames.size > 0 && types.length > 1;
 }
