@@ -49,6 +49,8 @@ export interface ScriptRenameSyncRuntime {
   showWarningMessage(message: string): void;
   wait(ms: number): Promise<void>;
   debounceMs: number;
+  retryIntervalMs: number;
+  settleTimeoutMs: number;
   logger: UnityPlusLogger;
 }
 
@@ -149,6 +151,8 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
         },
         wait,
         debounceMs: 400,
+        retryIntervalMs: 200,
+        settleTimeoutMs: 2000,
         logger
       });
 
@@ -180,14 +184,7 @@ export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSync
   // Let the C# provider settle after a Rename Symbol edit before reading document symbols.
   await runtime.wait(runtime.debounceMs);
 
-  const newClass = await getPrimaryClass(runtime.languageService, runtime.uri, runtime.mode, runtime.logger);
-  const plan = planScriptFilenameSync(
-    runtime.filePath,
-    runtime.oldClass,
-    newClass,
-    runtime.mode,
-    runtime.recentSync
-  );
+  const { newClass, plan } = await waitForScriptRenamePlan(runtime);
 
   if (!plan) {
     return { newClass };
@@ -208,6 +205,50 @@ export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSync
   runtime.logger.info(message);
   runtime.showInformationMessage(message);
   return { newClass, appliedPlan: plan };
+}
+
+async function waitForScriptRenamePlan(runtime: ScriptRenameSyncRuntime): Promise<{
+  newClass?: CSharpClassSnapshot;
+  plan?: ScriptFilenameSyncPlan;
+}> {
+  let elapsedMs = 0;
+  let latestClass: CSharpClassSnapshot | undefined;
+
+  while (elapsedMs <= runtime.settleTimeoutMs) {
+    latestClass = await getPrimaryClass(runtime.languageService, runtime.uri, runtime.mode, runtime.logger);
+    const plan = planScriptFilenameSync(
+      runtime.filePath,
+      runtime.oldClass,
+      latestClass,
+      runtime.mode,
+      runtime.recentSync
+    );
+
+    if (plan) {
+      return { newClass: latestClass, plan };
+    }
+
+    if (!shouldRetryClassRenameSnapshot(runtime.oldClass, latestClass)) {
+      return { newClass: latestClass };
+    }
+
+    await runtime.wait(runtime.retryIntervalMs);
+    elapsedMs += runtime.retryIntervalMs;
+  }
+
+  runtime.logger.debug(`C# language service did not settle a script rename plan for ${basename(runtime.filePath)}.`);
+  return { newClass: latestClass };
+}
+
+function shouldRetryClassRenameSnapshot(
+  oldClass: CSharpClassSnapshot | undefined,
+  newClass: CSharpClassSnapshot | undefined
+): boolean {
+  if (!oldClass) {
+    return false;
+  }
+
+  return !newClass || oldClass.name === newClass.name;
 }
 
 export function planScriptFilenameSync(

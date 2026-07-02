@@ -324,6 +324,8 @@ describe('renameSync', () => {
       showWarningMessage: () => undefined,
       wait: async () => undefined,
       debounceMs: 400,
+      retryIntervalMs: 200,
+      settleTimeoutMs: 2000,
       logger: createTestLogger()
     });
 
@@ -345,7 +347,7 @@ describe('renameSync', () => {
       filePath: plan.oldFilePath,
       mode: 'unity-object',
       oldClass: unityClass(plan.oldClassName),
-      languageService: createFakeLanguageService(unityClass(plan.oldClassName)),
+      languageService: createFakeLanguageService(unityClass(plan.newClassName)),
       operations: {
         fileExists: async () => true,
         applyRenameOperations: async () => true,
@@ -358,10 +360,47 @@ describe('renameSync', () => {
         waited.push(ms);
       },
       debounceMs: 450,
+      retryIntervalMs: 200,
+      settleTimeoutMs: 2000,
       logger: createTestLogger()
     });
 
     assert.deepStrictEqual(waited, [450]);
+  });
+
+  it('retries class snapshot reads until the C# language service reports the renamed class', async () => {
+    const waited: number[] = [];
+    const plan = createSyncPlan();
+    const classes = [
+      unityClass(plan.oldClassName),
+      unityClass(plan.newClassName)
+    ];
+
+    const result = await syncScriptRenameAfterClassChange({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'unity-object',
+      oldClass: unityClass(plan.oldClassName),
+      languageService: createSequenceLanguageService(classes),
+      operations: {
+        fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+        applyRenameOperations: async () => true,
+        logger: createTestLogger()
+      },
+      showProgress: async (_title, task) => await task(),
+      showInformationMessage: () => undefined,
+      showWarningMessage: () => undefined,
+      wait: async ms => {
+        waited.push(ms);
+      },
+      debounceMs: 400,
+      retryIntervalMs: 200,
+      settleTimeoutMs: 2000,
+      logger: createTestLogger()
+    });
+
+    assert.deepStrictEqual(waited, [400, 200]);
+    assert.strictEqual(result.appliedPlan?.newClassName, plan.newClassName);
   });
 
   it('does not show progress when class rename sync has no plan', async () => {
@@ -387,6 +426,8 @@ describe('renameSync', () => {
       showWarningMessage: () => undefined,
       wait: async () => undefined,
       debounceMs: 400,
+      retryIntervalMs: 200,
+      settleTimeoutMs: 2000,
       logger: createTestLogger()
     });
 
@@ -419,6 +460,8 @@ describe('renameSync', () => {
       showWarningMessage: message => warnings.push(message),
       wait: async () => undefined,
       debounceMs: 400,
+      retryIntervalMs: 200,
+      settleTimeoutMs: 2000,
       logger
     });
 
@@ -501,6 +544,24 @@ function createFakeLanguageService(primaryClass: CSharpClassSnapshot | undefined
   return {
     async getPrimaryClass() {
       return primaryClass;
+    },
+    async findReferences() {
+      return [];
+    },
+    async buildRenameEdit() {
+      return undefined;
+    }
+  };
+}
+
+function createSequenceLanguageService(classes: CSharpClassSnapshot[]): CSharpLanguageService {
+  let index = 0;
+
+  return {
+    async getPrimaryClass() {
+      const current = classes[Math.min(index, classes.length - 1)];
+      index += 1;
+      return current;
     },
     async findReferences() {
       return [];
