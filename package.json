@@ -11,6 +11,10 @@
   "categories": [
     "Other"
   ],
+  "extensionDependencies": [
+    "ms-dotnettools.csdevkit",
+    "ms-dotnettools.csharp"
+  ],
   "activationEvents": [
     "onLanguage:csharp",
     "workspaceContains:ProjectSettings/ProjectVersion.txt",
@@ -56,7 +60,7 @@
             "any",
             "off"
           ],
-          "description": "Controls automatic C# class/file name synchronization. Use unity-object for direct MonoBehaviour or ScriptableObject classes, any for safe single-class C# files, or off to disable sync."
+          "description": "Controls automatic C# class/file name synchronization. Use unity-object for classes that resolve to UnityEngine.Object through the C# language service, any for safe single-class C# files, or off to disable sync."
         },
         "unityPlus.projectFiles.autoRefresh": {
           "type": "boolean",

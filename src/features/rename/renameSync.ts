@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
-import { CSharpClassInfo, detectCSharpClasses, detectUnityScriptTypes } from '../../unity/csharpTypeDetector';
+import { createVscodeCSharpLanguageService, CSharpClassSnapshot, CSharpLanguageService } from '../../unity/csharpLanguageService';
 import { UnityPlusLogger } from '../../unity/logger';
 
 export type RenameClassFileSyncMode = 'unity-object' | 'any' | 'off';
@@ -33,8 +33,9 @@ export interface RecentScriptFilenameSync {
 
 export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposable {
   const runtimeVscode = loadVscode();
+  const languageService = createVscodeCSharpLanguageService(runtimeVscode);
   const disposables: vscode.Disposable[] = [];
-  const previousCsharpText = new Map<string, string>();
+  const previousCsharpClasses = new Map<string, CSharpClassSnapshot>();
   let recentSync: RecentScriptFilenameSync | undefined;
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.syncScriptFilename', async () => {
@@ -52,32 +53,34 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
     if (csharpMoves.length > 0 && getRenameClassFileSyncMode(runtimeVscode) !== 'off') {
       logger.debug(`Observed ${csharpMoves.length} C# rename operation(s).`);
     }
+
+    for (const file of csharpMoves) {
+      const previousClass = previousCsharpClasses.get(file.oldUri.fsPath);
+      if (previousClass) {
+        previousCsharpClasses.set(file.newUri.fsPath, previousClass);
+        previousCsharpClasses.delete(file.oldUri.fsPath);
+      }
+    }
   }));
 
   runtimeVscode.workspace.textDocuments
     .filter(document => document.uri.fsPath.endsWith('.cs'))
-    .forEach(document => previousCsharpText.set(document.uri.fsPath, document.getText()));
+    .forEach(document => {
+      void refreshPrimaryClass(languageService, document.uri, getRenameClassFileSyncMode(runtimeVscode), previousCsharpClasses, logger);
+    });
 
   disposables.push(runtimeVscode.workspace.onDidOpenTextDocument(document => {
     if (document.uri.fsPath.endsWith('.cs')) {
-      previousCsharpText.set(document.uri.fsPath, document.getText());
+      void refreshPrimaryClass(languageService, document.uri, getRenameClassFileSyncMode(runtimeVscode), previousCsharpClasses, logger);
     }
   }));
 
   disposables.push(runtimeVscode.workspace.onDidCloseTextDocument(document => {
-    previousCsharpText.delete(document.uri.fsPath);
+    previousCsharpClasses.delete(document.uri.fsPath);
   }));
 
   disposables.push(runtimeVscode.workspace.onDidChangeTextDocument(async event => {
     if (!event.document.uri.fsPath.endsWith('.cs')) {
-      return;
-    }
-
-    const newSource = event.document.getText();
-    const oldSource = previousCsharpText.get(event.document.uri.fsPath);
-    previousCsharpText.set(event.document.uri.fsPath, newSource);
-
-    if (!oldSource) {
       return;
     }
 
@@ -86,10 +89,18 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
       return;
     }
 
+    const oldClass = previousCsharpClasses.get(event.document.uri.fsPath);
+    const newClass = await getPrimaryClass(languageService, event.document.uri, mode, logger);
+    if (newClass) {
+      previousCsharpClasses.set(event.document.uri.fsPath, newClass);
+    } else {
+      previousCsharpClasses.delete(event.document.uri.fsPath);
+    }
+
     const plan = planScriptFilenameSync(
       event.document.uri.fsPath,
-      oldSource,
-      newSource,
+      oldClass,
+      newClass,
       mode,
       recentSync
     );
@@ -118,8 +129,8 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
 
 export function planScriptFilenameSync(
   filePath: string,
-  oldSource: string,
-  newSource: string,
+  oldClass: CSharpClassSnapshot | undefined,
+  newClass: CSharpClassSnapshot | undefined,
   mode: RenameClassFileSyncMode = 'unity-object',
   recentSync?: RecentScriptFilenameSync
 ): ScriptFilenameSyncPlan | undefined {
@@ -127,40 +138,30 @@ export function planScriptFilenameSync(
     return undefined;
   }
 
-  const oldDetection = detectScriptRenameTypes(oldSource, mode);
-  const newDetection = detectScriptRenameTypes(newSource, mode);
-
-  if (!oldDetection.isSafeForAutomaticRename || !newDetection.isSafeForAutomaticRename) {
+  if (!oldClass || !newClass || oldClass.name === newClass.name) {
     return undefined;
   }
 
-  const oldType = oldDetection.types[0];
-  const newType = newDetection.types[0];
-
-  if (!oldType || !newType || oldType.name === newType.name) {
-    return undefined;
-  }
-
-  const undoPlan = planUndoScriptFilenameSync(filePath, oldType.name, newType.name, recentSync);
+  const undoPlan = planUndoScriptFilenameSync(filePath, oldClass.name, newClass.name, recentSync);
   if (undoPlan) {
     return undoPlan;
   }
 
-  if (!hasCompatibleRenameTypes(oldType, newType, mode)) {
+  if (!hasCompatibleRenameTypes(oldClass, newClass, mode)) {
     return undefined;
   }
 
-  if (basename(filePath) !== `${oldType.name}.cs`) {
+  if (basename(filePath) !== `${oldClass.name}.cs`) {
     return undefined;
   }
 
   return {
-    oldClassName: oldType.name,
-    newClassName: newType.name,
+    oldClassName: oldClass.name,
+    newClassName: newClass.name,
     oldFilePath: filePath,
-    newFilePath: join(dirname(filePath), `${newType.name}.cs`),
+    newFilePath: join(dirname(filePath), `${newClass.name}.cs`),
     oldMetaPath: `${filePath}.meta`,
-    newMetaPath: `${join(dirname(filePath), `${newType.name}.cs`)}.meta`,
+    newMetaPath: `${join(dirname(filePath), `${newClass.name}.cs`)}.meta`,
     isUndo: false
   };
 }
@@ -280,31 +281,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function detectScriptRenameTypes(source: string, mode: RenameClassFileSyncMode) {
-  if (mode === 'any') {
-    const detection = detectCSharpClasses(source);
-    return {
-      types: detection.classes,
-      isSafeForAutomaticRename: detection.isSafeForAutomaticRename
-    };
-  }
-
-  const detection = detectUnityScriptTypes(source);
-  return {
-    types: detection.types.map(type => ({
-      name: type.name,
-      namespace: type.namespace,
-      baseTypes: [],
-      unityKind: type.kind,
-      isPartial: type.isPartial
-    })),
-    isSafeForAutomaticRename: detection.isSafeForAutomaticRename
-  };
-}
-
 function hasCompatibleRenameTypes(
-  oldType: CSharpClassInfo,
-  newType: CSharpClassInfo,
+  oldType: CSharpClassSnapshot,
+  newType: CSharpClassSnapshot,
   mode: RenameClassFileSyncMode
 ): boolean {
   if (oldType.namespace !== newType.namespace) {
@@ -312,10 +291,39 @@ function hasCompatibleRenameTypes(
   }
 
   if (mode === 'unity-object') {
-    return oldType.unityKind !== undefined && oldType.unityKind === newType.unityKind;
+    return newType.isUnityObject === true;
   }
 
   return true;
+}
+
+async function refreshPrimaryClass(
+  languageService: CSharpLanguageService,
+  uri: vscode.Uri,
+  mode: RenameClassFileSyncMode,
+  previousCsharpClasses: Map<string, CSharpClassSnapshot>,
+  logger: UnityPlusLogger
+): Promise<void> {
+  const primaryClass = await getPrimaryClass(languageService, uri, mode, logger);
+  if (primaryClass) {
+    previousCsharpClasses.set(uri.fsPath, primaryClass);
+  }
+}
+
+async function getPrimaryClass(
+  languageService: CSharpLanguageService,
+  uri: vscode.Uri,
+  mode: RenameClassFileSyncMode,
+  logger: UnityPlusLogger
+): Promise<CSharpClassSnapshot | undefined> {
+  try {
+    return await languageService.getPrimaryClass(uri, {
+      includeUnityObject: mode === 'unity-object'
+    });
+  } catch (error) {
+    logger.debug(`C# language service did not return a primary class for ${basename(uri.fsPath)}: ${errorMessage(error)}`);
+    return undefined;
+  }
 }
 
 function getRenameClassFileSyncMode(runtimeVscode: typeof vscode): RenameClassFileSyncMode {
