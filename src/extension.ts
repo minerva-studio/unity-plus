@@ -3,6 +3,7 @@ import { registerEventReferenceFeature } from './features/event-references/event
 import { registerProjectSyncFeature } from './features/project-sync/projectSync';
 import { registerRenameFeature } from './features/rename/renameSync';
 import { createLogger } from './unity/logger';
+import { createUnityMetadataIndex } from './unity/metadataIndex';
 import { detectUnityWorkspace } from './unity/workspaceDetector';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -13,6 +14,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   logger.info(unityWorkspace.isUnityProject
     ? `Unity project detected at ${unityWorkspace.root?.fsPath}`
     : 'No Unity project detected in the current workspace.');
+
+  if (unityWorkspace.root) {
+    const metadataIndex = createUnityMetadataIndex({
+      root: unityWorkspace.root,
+      logger
+    });
+    context.subscriptions.push(metadataIndex);
+    await metadataIndex.rebuild();
+  }
 
   context.subscriptions.push(
     registerRenameFeature(logger),
