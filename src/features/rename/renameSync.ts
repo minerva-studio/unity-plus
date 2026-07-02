@@ -7,7 +7,16 @@ import { UnityPlusLogger } from '../../unity/logger';
 export interface ScriptFilenameSyncPlan {
   oldClassName: string;
   newClassName: string;
+  oldFilePath: string;
   newFilePath: string;
+  oldMetaPath: string;
+  newMetaPath: string;
+}
+
+export interface ScriptFilenameSyncOperations {
+  fileExists(path: string): Promise<boolean>;
+  renameFile(oldPath: string, newPath: string): Promise<void>;
+  logger: UnityPlusLogger;
 }
 
 export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposable {
@@ -74,11 +83,17 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
     }
 
     try {
-      await runtimeVscode.workspace.fs.rename(
-        event.document.uri,
-        runtimeVscode.Uri.file(plan.newFilePath),
-        { overwrite: false }
-      );
+      await applyScriptFilenameSyncPlan(plan, {
+        fileExists: async path => await fileExists(runtimeVscode, path),
+        renameFile: async (oldPath, newPath) => {
+          await runtimeVscode.workspace.fs.rename(
+            runtimeVscode.Uri.file(oldPath),
+            runtimeVscode.Uri.file(newPath),
+            { overwrite: false }
+          );
+        },
+        logger
+      });
       logger.info(`Renamed Unity script file from ${basename(event.document.uri.fsPath)} to ${basename(plan.newFilePath)}.`);
     } catch (error) {
       logger.warn(`Could not rename Unity script file: ${errorMessage(error)}`);
@@ -118,8 +133,39 @@ export function planScriptFilenameSync(
   return {
     oldClassName: oldType.name,
     newClassName: newType.name,
-    newFilePath: join(dirname(filePath), `${newType.name}.cs`)
+    oldFilePath: filePath,
+    newFilePath: join(dirname(filePath), `${newType.name}.cs`),
+    oldMetaPath: `${filePath}.meta`,
+    newMetaPath: `${join(dirname(filePath), `${newType.name}.cs`)}.meta`
   };
+}
+
+export async function applyScriptFilenameSyncPlan(
+  plan: ScriptFilenameSyncPlan,
+  operations: ScriptFilenameSyncOperations
+): Promise<void> {
+  await operations.renameFile(plan.oldFilePath, plan.newFilePath);
+
+  if (!await operations.fileExists(plan.oldMetaPath)) {
+    operations.logger.debug(`Unity script meta file was not found for ${basename(plan.oldMetaPath)}.`);
+    return;
+  }
+
+  try {
+    await operations.renameFile(plan.oldMetaPath, plan.newMetaPath);
+    operations.logger.debug(`Renamed Unity script meta file from ${basename(plan.oldMetaPath)} to ${basename(plan.newMetaPath)}.`);
+  } catch (error) {
+    operations.logger.warn(`Could not rename Unity script meta file: ${errorMessage(error)}`);
+  }
+}
+
+async function fileExists(runtimeVscode: typeof vscode, path: string): Promise<boolean> {
+  try {
+    await runtimeVscode.workspace.fs.stat(runtimeVscode.Uri.file(path));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function errorMessage(error: unknown): string {
