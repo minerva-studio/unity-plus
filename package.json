@@ -1,0 +1,103 @@
+{
+  "name": "unity-plus",
+  "displayName": "Unity Plus",
+  "description": "A Unity workflow repair kit for VS Code.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "minerva-studio",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:csharp",
+    "workspaceContains:ProjectSettings/ProjectVersion.txt",
+    "workspaceContains:Assets",
+    "onCommand:unityPlus.refreshProjectFiles",
+    "onCommand:unityPlus.syncScriptFilename",
+    "onCommand:unityPlus.syncClassName",
+    "onCommand:unityPlus.showUnityEventReferences",
+    "onCommand:unityPlus.rescanUnityProject"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "unityPlus.refreshProjectFiles",
+        "title": "Unity Plus: Refresh Project Files"
+      },
+      {
+        "command": "unityPlus.syncScriptFilename",
+        "title": "Unity Plus: Sync Script Filename"
+      },
+      {
+        "command": "unityPlus.syncClassName",
+        "title": "Unity Plus: Sync Class Name"
+      },
+      {
+        "command": "unityPlus.showUnityEventReferences",
+        "title": "Unity Plus: Show Unity Event References"
+      },
+      {
+        "command": "unityPlus.rescanUnityProject",
+        "title": "Unity Plus: Rescan Unity Project"
+      }
+    ],
+    "configuration": {
+      "title": "Unity Plus",
+      "properties": {
+        "unityPlus.rename.syncClassAndFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep Unity script file names and primary Unity class names synchronized."
+        },
+        "unityPlus.projectFiles.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh Unity project files when C# files are created, moved, or deleted."
+        },
+        "unityPlus.eventReferences.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Unity serialized event references in C# files."
+        },
+        "unityPlus.scan.includeScenesOutsideBuildSettings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Scan scenes outside Unity Build Settings when looking for event references."
+        },
+        "unityPlus.logging.level": {
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Controls the verbosity of the Unity Plus output channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "npm run compile && mocha \"out/test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.14.9",
+    "@types/vscode": "^1.88.0",
+    "@typescript-eslint/eslint-plugin": "^7.16.0",
+    "@typescript-eslint/parser": "^7.16.0",
+    "eslint": "^8.57.0",
+    "mocha": "^10.7.0",
+    "typescript": "^5.5.3"
+  }
+}
