@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
-import { applyScriptFilenameSyncPlan, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, invertScriptFilenameSyncPlan, planScriptFilenameSync, ScriptFilenameSyncPlan } from '../features/rename/renameSync';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
 describe('renameSync', () => {
@@ -56,44 +56,100 @@ describe('renameSync', () => {
     assert.strictEqual(plan, undefined);
   });
 
-  it('renames the matching Unity meta file when it exists', async () => {
-    const renames: string[] = [];
+  it('builds script and Unity meta rename operations when both files exist', async () => {
     const plan = createSyncPlan();
 
-    await applyScriptFilenameSyncPlan(plan, {
-      fileExists: async path => path === plan.oldMetaPath,
-      renameFile: async (oldPath, newPath) => {
-        renames.push(`${oldPath}->${newPath}`);
-      },
+    const operations = await buildScriptFilenameSyncOperations(plan, {
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
       logger: createTestLogger()
     });
 
-    assert.deepStrictEqual(renames, [
-      `${plan.oldFilePath}->${plan.newFilePath}`,
-      `${plan.oldMetaPath}->${plan.newMetaPath}`
+    assert.deepStrictEqual(operations, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
     ]);
   });
 
-  it('keeps the script rename when the Unity meta file is missing', async () => {
+  it('builds only the script rename operation when the Unity meta file is missing', async () => {
     const output = createMemoryOutput();
-    const renames: string[] = [];
     const plan = createSyncPlan();
 
-    await applyScriptFilenameSyncPlan(plan, {
-      fileExists: async () => false,
-      renameFile: async (oldPath, newPath) => {
-        renames.push(`${oldPath}->${newPath}`);
-      },
+    const operations = await buildScriptFilenameSyncOperations(plan, {
+      fileExists: async path => path === plan.oldFilePath,
       logger: createLogger({
         output,
         getLevel: () => 'debug'
       })
     });
 
-    assert.deepStrictEqual(renames, [
-      `${plan.oldFilePath}->${plan.newFilePath}`
+    assert.deepStrictEqual(operations, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath }
     ]);
     assert.strictEqual(output.lines.some(line => line.includes('Unity script meta file was not found')), true);
+  });
+
+  it('does not build operations when the target script file already exists', async () => {
+    const output = createMemoryOutput();
+    const plan = createSyncPlan();
+
+    const operations = await buildScriptFilenameSyncOperations(plan, {
+      fileExists: async path => path === plan.oldFilePath || path === plan.newFilePath,
+      logger: createLogger({
+        output,
+        getLevel: () => 'debug'
+      })
+    });
+
+    assert.deepStrictEqual(operations, []);
+    assert.strictEqual(output.lines.some(line => line.includes('HeroController.cs already exists')), true);
+  });
+
+  it('does not build operations when the target Unity meta file already exists', async () => {
+    const output = createMemoryOutput();
+    const plan = createSyncPlan();
+
+    const operations = await buildScriptFilenameSyncOperations(plan, {
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath || path === plan.newMetaPath,
+      logger: createLogger({
+        output,
+        getLevel: () => 'debug'
+      })
+    });
+
+    assert.deepStrictEqual(operations, []);
+    assert.strictEqual(output.lines.some(line => line.includes('HeroController.cs.meta already exists')), true);
+  });
+
+  it('returns false when rename operations cannot be applied', async () => {
+    const plan = createSyncPlan();
+
+    const applied = await applyScriptFilenameSyncPlan(plan, {
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      applyRenameOperations: async () => false,
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(applied, false);
+  });
+
+  it('applies undo as reverse script and Unity meta rename operations', async () => {
+    const plan = invertScriptFilenameSyncPlan(createSyncPlan());
+    const appliedOperations: unknown[] = [];
+
+    const applied = await applyScriptFilenameSyncPlan(plan, {
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      applyRenameOperations: async operations => {
+        appliedOperations.push(...operations);
+        return true;
+      },
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(applied, true);
+    assert.deepStrictEqual(appliedOperations, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
   });
 
   it('inverts a class-to-file rename plan for undo', () => {

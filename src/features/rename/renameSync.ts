@@ -16,8 +16,13 @@ export interface ScriptFilenameSyncPlan {
 
 export interface ScriptFilenameSyncOperations {
   fileExists(path: string): Promise<boolean>;
-  renameFile(oldPath: string, newPath: string): Promise<void>;
+  applyRenameOperations(operations: readonly ScriptFileRenameOperation[]): Promise<boolean>;
   logger: UnityPlusLogger;
+}
+
+export interface ScriptFileRenameOperation {
+  oldPath: string;
+  newPath: string;
 }
 
 export interface RecentScriptFilenameSync {
@@ -90,19 +95,15 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
     }
 
     try {
-      await applyScriptFilenameSyncPlan(plan, {
+      const applied = await applyScriptFilenameSyncPlan(plan, {
         fileExists: async path => await fileExists(runtimeVscode, path),
-        renameFile: async (oldPath, newPath) => {
-          await runtimeVscode.workspace.fs.rename(
-            runtimeVscode.Uri.file(oldPath),
-            runtimeVscode.Uri.file(newPath),
-            { overwrite: false }
-          );
-        },
+        applyRenameOperations: async operations => await applyRenameOperations(runtimeVscode, operations),
         logger
       });
-      recentSync = { plan };
-      logger.info(`Renamed Unity script file from ${basename(event.document.uri.fsPath)} to ${basename(plan.newFilePath)}.`);
+      if (applied) {
+        recentSync = { plan };
+        logger.info(`Renamed Unity script file from ${basename(event.document.uri.fsPath)} to ${basename(plan.newFilePath)}.`);
+      }
     } catch (error) {
       logger.warn(`Could not rename Unity script file: ${errorMessage(error)}`);
     }
@@ -193,20 +194,51 @@ function planUndoScriptFilenameSync(
 export async function applyScriptFilenameSyncPlan(
   plan: ScriptFilenameSyncPlan,
   operations: ScriptFilenameSyncOperations
-): Promise<void> {
-  await operations.renameFile(plan.oldFilePath, plan.newFilePath);
+): Promise<boolean> {
+  const renameOperations = await buildScriptFilenameSyncOperations(plan, operations);
+
+  if (renameOperations.length === 0) {
+    return false;
+  }
+
+  return await operations.applyRenameOperations(renameOperations);
+}
+
+export async function buildScriptFilenameSyncOperations(
+  plan: ScriptFilenameSyncPlan,
+  operations: Pick<ScriptFilenameSyncOperations, 'fileExists' | 'logger'>
+): Promise<ScriptFileRenameOperation[]> {
+  if (!await operations.fileExists(plan.oldFilePath)) {
+    operations.logger.warn(`Unity script file was not found for ${basename(plan.oldFilePath)}.`);
+    return [];
+  }
+
+  if (await operations.fileExists(plan.newFilePath)) {
+    operations.logger.warn(`Unity script rename skipped because ${basename(plan.newFilePath)} already exists.`);
+    return [];
+  }
+
+  const renameOperations: ScriptFileRenameOperation[] = [{
+    oldPath: plan.oldFilePath,
+    newPath: plan.newFilePath
+  }];
 
   if (!await operations.fileExists(plan.oldMetaPath)) {
     operations.logger.debug(`Unity script meta file was not found for ${basename(plan.oldMetaPath)}.`);
-    return;
+    return renameOperations;
   }
 
-  try {
-    await operations.renameFile(plan.oldMetaPath, plan.newMetaPath);
-    operations.logger.debug(`Renamed Unity script meta file from ${basename(plan.oldMetaPath)} to ${basename(plan.newMetaPath)}.`);
-  } catch (error) {
-    operations.logger.warn(`Could not rename Unity script meta file: ${errorMessage(error)}`);
+  if (await operations.fileExists(plan.newMetaPath)) {
+    operations.logger.warn(`Unity script rename skipped because ${basename(plan.newMetaPath)} already exists.`);
+    return [];
   }
+
+  renameOperations.push({
+    oldPath: plan.oldMetaPath,
+    newPath: plan.newMetaPath
+  });
+
+  return renameOperations;
 }
 
 async function fileExists(runtimeVscode: typeof vscode, path: string): Promise<boolean> {
@@ -216,6 +248,23 @@ async function fileExists(runtimeVscode: typeof vscode, path: string): Promise<b
   } catch {
     return false;
   }
+}
+
+async function applyRenameOperations(
+  runtimeVscode: typeof vscode,
+  renameOperations: readonly ScriptFileRenameOperation[]
+): Promise<boolean> {
+  const edit = new runtimeVscode.WorkspaceEdit();
+
+  renameOperations.forEach(operation => {
+    edit.renameFile(
+      runtimeVscode.Uri.file(operation.oldPath),
+      runtimeVscode.Uri.file(operation.newPath),
+      { overwrite: false }
+    );
+  });
+
+  return await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true });
 }
 
 function errorMessage(error: unknown): string {
