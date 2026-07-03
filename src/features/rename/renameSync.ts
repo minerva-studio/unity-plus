@@ -6,6 +6,12 @@ import { UnityPlusLogger } from '../../unity/logger';
 
 export type RenameClassFileSyncMode = 'unity-object' | 'any' | 'off';
 
+export interface RenameFeatureOptions {
+  runtimeVscode?: typeof vscode;
+  getMode?: () => RenameClassFileSyncMode;
+  isUnityWorkspace?: boolean;
+}
+
 export interface ScriptFilenameSyncPlan {
   oldClassName: string;
   newClassName: string;
@@ -107,8 +113,13 @@ export type AtomicScriptRenameResult =
   | { kind: 'fallback'; reason: string }
   | { kind: 'failed'; message: string };
 
-export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposable {
-  const runtimeVscode = loadVscode();
+export function registerRenameFeature(
+  logger: UnityPlusLogger,
+  options: RenameFeatureOptions = {}
+): vscode.Disposable {
+  const runtimeVscode = options.runtimeVscode ?? loadVscode();
+  const getMode = options.getMode ?? (() => getRenameClassFileSyncMode(runtimeVscode));
+  const isUnityWorkspace = options.isUnityWorkspace ?? true;
   const languageService = createVscodeCSharpLanguageService(runtimeVscode);
   const disposables: vscode.Disposable[] = [];
   const previousCsharpClasses = new Map<string, CSharpClassSnapshot>();
@@ -124,7 +135,7 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
     try {
       const result = await runRenameClassCommand({
         editor: createRenameCommandEditor(runtimeVscode.window.activeTextEditor),
-        mode: getRenameClassFileSyncMode(runtimeVscode),
+        mode: getMode(),
         languageService,
         showInputBox: async options => await runtimeVscode.window.showInputBox(options),
         showProgress: async (title, task) => await runtimeVscode.window.withProgress({
@@ -167,107 +178,108 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
     }
   }));
 
-  disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
-    const csharpMoves = event.files.filter(file => file.oldUri.path.endsWith('.cs') || file.newUri.path.endsWith('.cs'));
-    if (csharpMoves.length > 0 && getRenameClassFileSyncMode(runtimeVscode) !== 'off') {
-      logger.debug(`Observed ${csharpMoves.length} C# rename operation(s).`);
-    }
-
-    for (const file of csharpMoves) {
-      const previousClass = previousCsharpClasses.get(file.oldUri.fsPath);
-      if (previousClass) {
-        previousCsharpClasses.set(file.newUri.fsPath, previousClass);
-        previousCsharpClasses.delete(file.oldUri.fsPath);
+  if (isUnityWorkspace && getMode() !== 'off') {
+    disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
+      if (getMode() === 'off') {
+        return;
       }
-    }
 
-    void moveScriptMetaFilesForDirectRename(runtimeVscode, event.files.map(file => ({
-      oldPath: file.oldUri.fsPath,
-      newPath: file.newUri.fsPath
-    })), logger);
-  }));
+      const csharpMoves = event.files.filter(file => file.oldUri.path.endsWith('.cs') || file.newUri.path.endsWith('.cs'));
+      if (csharpMoves.length > 0) {
+        logger.debug(`Observed ${csharpMoves.length} C# rename operation(s).`);
+      }
 
-  runtimeVscode.workspace.textDocuments
-    .filter(document => document.uri.fsPath.endsWith('.cs'))
-    .forEach(document => {
-      void refreshPrimaryClass(languageService, document.uri, getRenameClassFileSyncMode(runtimeVscode), previousCsharpClasses, logger);
-    });
+      for (const file of csharpMoves) {
+        const previousClass = previousCsharpClasses.get(file.oldUri.fsPath);
+        if (previousClass) {
+          previousCsharpClasses.set(file.newUri.fsPath, previousClass);
+          previousCsharpClasses.delete(file.oldUri.fsPath);
+        }
+      }
 
-  disposables.push(runtimeVscode.workspace.onDidOpenTextDocument(document => {
-    if (document.uri.fsPath.endsWith('.cs')) {
-      void refreshPrimaryClass(languageService, document.uri, getRenameClassFileSyncMode(runtimeVscode), previousCsharpClasses, logger);
-    }
-  }));
+      void moveScriptMetaFilesForDirectRename(runtimeVscode, event.files.map(file => ({
+        oldPath: file.oldUri.fsPath,
+        newPath: file.newUri.fsPath
+      })), logger);
+    }));
 
-  disposables.push(runtimeVscode.workspace.onDidCloseTextDocument(document => {
-    previousCsharpClasses.delete(document.uri.fsPath);
-  }));
+    disposables.push(runtimeVscode.workspace.onDidOpenTextDocument(document => {
+      const mode = getMode();
+      if (mode !== 'off' && document.uri.fsPath.endsWith('.cs')) {
+        void refreshPrimaryClass(languageService, document.uri, mode, previousCsharpClasses, logger);
+      }
+    }));
 
-  disposables.push(runtimeVscode.workspace.onDidChangeTextDocument(async event => {
-    const filePath = event.document.uri.fsPath;
-    if (!filePath.endsWith('.cs')) {
-      return;
-    }
+    disposables.push(runtimeVscode.workspace.onDidCloseTextDocument(document => {
+      previousCsharpClasses.delete(document.uri.fsPath);
+    }));
 
-    const mode = getRenameClassFileSyncMode(runtimeVscode);
-    if (mode === 'off') {
-      return;
-    }
+    disposables.push(runtimeVscode.workspace.onDidChangeTextDocument(async event => {
+      const filePath = event.document.uri.fsPath;
+      if (!filePath.endsWith('.cs')) {
+        return;
+      }
 
-    if (syncingScriptRenameFiles.has(filePath)) {
-      logger.debug(`Script rename sync is already running for ${basename(filePath)}.`);
-      return;
-    }
+      const mode = getMode();
+      if (mode === 'off') {
+        return;
+      }
 
-    syncingScriptRenameFiles.add(filePath);
+      if (syncingScriptRenameFiles.has(filePath)) {
+        logger.debug(`Script rename sync is already running for ${basename(filePath)}.`);
+        return;
+      }
 
-    try {
-      const result = await syncScriptRenameAfterClassChange({
-        uri: event.document.uri,
-        filePath,
-        mode,
-        oldClass: previousCsharpClasses.get(filePath),
-        recentSync,
-        languageService,
-        operations: {
-          fileExists: async path => await fileExists(runtimeVscode, path),
-          applyRenameOperations: async operations => await applyRenameOperations(runtimeVscode, operations),
+      syncingScriptRenameFiles.add(filePath);
+
+      try {
+        const result = await syncScriptRenameAfterClassChange({
+          uri: event.document.uri,
+          filePath,
+          mode,
+          oldClass: previousCsharpClasses.get(filePath),
+          recentSync,
+          languageService,
+          operations: {
+            fileExists: async path => await fileExists(runtimeVscode, path),
+            applyRenameOperations: async operations => await applyRenameOperations(runtimeVscode, operations),
+            logger
+          },
+          showProgress: async (title, task) => await runtimeVscode.window.withProgress({
+            location: runtimeVscode.ProgressLocation.Notification,
+            title
+          }, task),
+          showInformationMessage: message => {
+            void runtimeVscode.window.showInformationMessage(message);
+          },
+          showWarningMessage: message => {
+            void runtimeVscode.window.showWarningMessage(message);
+          },
+          wait,
+          debounceMs: 400,
+          retryIntervalMs: 200,
+          settleTimeoutMs: 2000,
           logger
-        },
-        showProgress: async (title, task) => await runtimeVscode.window.withProgress({
-          location: runtimeVscode.ProgressLocation.Notification,
-          title
-        }, task),
-        showInformationMessage: message => {
-          void runtimeVscode.window.showInformationMessage(message);
-        },
-        showWarningMessage: message => {
-          void runtimeVscode.window.showWarningMessage(message);
-        },
-        wait,
-        debounceMs: 400,
-        retryIntervalMs: 200,
-        settleTimeoutMs: 2000,
-        logger
-      });
+        });
 
-      if (result.newClass) {
-        previousCsharpClasses.set(filePath, result.newClass);
-      } else {
-        previousCsharpClasses.delete(filePath);
-      }
+        if (result.newClass) {
+          previousCsharpClasses.set(filePath, result.newClass);
+        } else {
+          previousCsharpClasses.delete(filePath);
+        }
 
-      if (result.appliedPlan) {
-        recentSync = { plan: result.appliedPlan };
+        if (result.appliedPlan) {
+          recentSync = { plan: result.appliedPlan };
+        }
+      } catch (error) {
+        const message = `Could not rename Unity script file: ${errorMessage(error)}`;
+        logger.warn(message);
+        void runtimeVscode.window.showWarningMessage(`Unity Plus: ${message}`);
+      } finally {
+        syncingScriptRenameFiles.delete(filePath);
       }
-    } catch (error) {
-      const message = `Could not rename Unity script file: ${errorMessage(error)}`;
-      logger.warn(message);
-      void runtimeVscode.window.showWarningMessage(`Unity Plus: ${message}`);
-    } finally {
-      syncingScriptRenameFiles.delete(filePath);
-    }
-  }));
+    }));
+  }
 
   return runtimeVscode.Disposable.from(...disposables);
 }
@@ -890,9 +902,9 @@ async function getPrimaryClass(
 }
 
 function getRenameClassFileSyncMode(runtimeVscode: typeof vscode): RenameClassFileSyncMode {
-  const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.classFileSyncMode', 'any');
+  const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.classFileSyncMode', 'off');
 
-  return isRenameClassFileSyncMode(mode) ? mode : 'any';
+  return isRenameClassFileSyncMode(mode) ? mode : 'off';
 }
 
 function isRenameClassFileSyncMode(mode: string | undefined): mode is RenameClassFileSyncMode {

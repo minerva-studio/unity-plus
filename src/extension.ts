@@ -1,40 +1,26 @@
 import * as vscode from 'vscode';
+import { activateUnityPlus } from './activation';
 import { registerEventReferenceFeature } from './features/event-references/eventReferences';
 import { registerProjectSyncFeature } from './features/project-sync/projectSync';
 import { registerRenameFeature } from './features/rename/renameSync';
 import { createLogger } from './unity/logger';
-import { createUnityMetadataIndex } from './unity/metadataIndex';
+import { createLazyUnityMetadataIndex } from './unity/metadataIndex';
 import { detectUnityWorkspace } from './unity/workspaceDetector';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const logger = createLogger();
-  context.subscriptions.push(logger);
 
-  const unityWorkspace = await detectUnityWorkspace(vscode.workspace.workspaceFolders ?? []);
-  logger.info(unityWorkspace.isUnityProject
-    ? `Unity project detected at ${unityWorkspace.root?.fsPath}`
-    : 'No Unity project detected in the current workspace.');
-
-  if (unityWorkspace.root) {
-    const metadataIndex = createUnityMetadataIndex({
-      root: unityWorkspace.root,
-      logger
-    });
-    context.subscriptions.push(metadataIndex);
-    await metadataIndex.rebuild();
-  }
-
-  context.subscriptions.push(
-    registerRenameFeature(logger),
-    registerProjectSyncFeature(logger),
-    registerEventReferenceFeature(logger),
-    vscode.commands.registerCommand('unityPlus.rescanUnityProject', async () => {
-      const refreshed = await detectUnityWorkspace(vscode.workspace.workspaceFolders ?? []);
-      logger.info(refreshed.isUnityProject
-        ? `Unity project rescan found ${refreshed.root?.fsPath}`
-        : 'Unity project rescan did not find a Unity workspace.');
-    })
-  );
+  await activateUnityPlus(context, {
+    workspaceFolders: vscode.workspace.workspaceFolders,
+    registerCommand: (command, callback) => vscode.commands.registerCommand(command, callback)
+  }, {
+    logger,
+    detectUnityWorkspace,
+    createLazyMetadataIndex: createLazyUnityMetadataIndex,
+    registerRenameFeature,
+    registerProjectSyncFeature,
+    registerEventReferenceFeature
+  });
 }
 
 export function deactivate(): void {

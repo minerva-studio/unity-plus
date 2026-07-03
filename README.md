@@ -26,6 +26,7 @@ Unity Plus exists because this should not be every Unity developer's private mai
 - Unity Plus starts as a VS Code extension only.
 - A Unity Editor companion package is intentionally out of scope for the first private prototype.
 - Rider and Visual Studio workflows are not targeted by this extension.
+- Unity Plus depends on the Microsoft C# and C# Dev Kit extensions for language-service features, but calls those providers only from commands or explicitly enabled workflows.
 
 ## Contributing
 

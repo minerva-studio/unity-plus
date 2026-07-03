@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
-import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, RenameClassFileSyncMode, runRenameClassCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import type * as vscode from 'vscode';
+import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameClassFileSyncMode, runRenameClassCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
 import { CSharpClassSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
@@ -833,6 +834,56 @@ describe('renameSync', () => {
     assert.strictEqual(undoPlan?.newFilePath, previousPlan.oldFilePath);
     assert.strictEqual(undoPlan?.isUndo, true);
   });
+
+  it('registers only rename commands when class/file sync mode is off', () => {
+    const runtime = createRenameFeatureRuntime();
+
+    registerRenameFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      getMode: () => 'off'
+    });
+
+    assert.deepStrictEqual(runtime.registeredCommands, [
+      'unityPlus.syncScriptFilename',
+      'unityPlus.syncClassName'
+    ]);
+    assert.strictEqual(runtime.renameFileListeners, 0);
+    assert.strictEqual(runtime.openDocumentListeners, 0);
+    assert.strictEqual(runtime.closeDocumentListeners, 0);
+    assert.strictEqual(runtime.changeDocumentListeners, 0);
+    assert.strictEqual(runtime.textDocumentsReads, 0);
+  });
+
+  it('registers automatic rename listeners without scanning already-open documents', () => {
+    const runtime = createRenameFeatureRuntime();
+
+    registerRenameFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      getMode: () => 'unity-object'
+    });
+
+    assert.strictEqual(runtime.renameFileListeners, 1);
+    assert.strictEqual(runtime.openDocumentListeners, 1);
+    assert.strictEqual(runtime.closeDocumentListeners, 1);
+    assert.strictEqual(runtime.changeDocumentListeners, 1);
+    assert.strictEqual(runtime.textDocumentsReads, 0);
+  });
+
+  it('does not register automatic rename listeners outside Unity workspaces', () => {
+    const runtime = createRenameFeatureRuntime();
+
+    registerRenameFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      getMode: () => 'unity-object',
+      isUnityWorkspace: false
+    });
+
+    assert.strictEqual(runtime.renameFileListeners, 0);
+    assert.strictEqual(runtime.openDocumentListeners, 0);
+    assert.strictEqual(runtime.closeDocumentListeners, 0);
+    assert.strictEqual(runtime.changeDocumentListeners, 0);
+    assert.strictEqual(runtime.textDocumentsReads, 0);
+  });
 });
 
 function unityClass(className: string): CSharpClassSnapshot {
@@ -1052,6 +1103,85 @@ function createSyncPlan(): ScriptFilenameSyncPlan {
   };
 }
 
+interface RenameFeatureRuntime {
+  runtime: typeof vscode;
+  registeredCommands: string[];
+  renameFileListeners: number;
+  openDocumentListeners: number;
+  closeDocumentListeners: number;
+  changeDocumentListeners: number;
+  textDocumentsReads: number;
+}
+
+function createRenameFeatureRuntime(): RenameFeatureRuntime {
+  const state = {
+    registeredCommands: [] as string[],
+    renameFileListeners: 0,
+    openDocumentListeners: 0,
+    closeDocumentListeners: 0,
+    changeDocumentListeners: 0,
+    textDocumentsReads: 0
+  };
+  const runtime = {
+    commands: {
+      registerCommand(command: string) {
+        state.registeredCommands.push(command);
+        return createDisposable();
+      }
+    },
+    workspace: {
+      get textDocuments() {
+        state.textDocumentsReads += 1;
+        return [];
+      },
+      getConfiguration: () => ({
+        get: () => 'off'
+      }),
+      onDidRenameFiles: () => {
+        state.renameFileListeners += 1;
+        return createDisposable();
+      },
+      onDidOpenTextDocument: () => {
+        state.openDocumentListeners += 1;
+        return createDisposable();
+      },
+      onDidCloseTextDocument: () => {
+        state.closeDocumentListeners += 1;
+        return createDisposable();
+      },
+      onDidChangeTextDocument: () => {
+        state.changeDocumentListeners += 1;
+        return createDisposable();
+      }
+    },
+    Disposable: {
+      from: (..._disposables: vscode.Disposable[]) => createDisposable()
+    }
+  } as unknown as typeof vscode;
+
+  return {
+    runtime,
+    get registeredCommands() {
+      return state.registeredCommands;
+    },
+    get renameFileListeners() {
+      return state.renameFileListeners;
+    },
+    get openDocumentListeners() {
+      return state.openDocumentListeners;
+    },
+    get closeDocumentListeners() {
+      return state.closeDocumentListeners;
+    },
+    get changeDocumentListeners() {
+      return state.changeDocumentListeners;
+    },
+    get textDocumentsReads() {
+      return state.textDocumentsReads;
+    }
+  };
+}
+
 interface MemoryLogOutput extends UnityPlusLogOutput {
   lines: string[];
 }
@@ -1073,4 +1203,10 @@ function createTestLogger() {
     output: createMemoryOutput(),
     getLevel: () => 'debug'
   });
+}
+
+function createDisposable(): vscode.Disposable {
+  return {
+    dispose: () => undefined
+  };
 }

@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import type * as vscode from 'vscode';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
-import { createUnityMetadataIndex, parseUnityMetaGuid, UnityMetaFileWatchHandlers } from '../unity/metadataIndex';
+import { createLazyUnityMetadataIndex, createUnityMetadataIndex, defaultMetaFilesGlob, parseUnityMetaGuid, UnityMetaFileWatchHandlers } from '../unity/metadataIndex';
 
 const firstGuid = '11111111111111111111111111111111';
 const secondGuid = '22222222222222222222222222222222';
@@ -91,6 +91,55 @@ describe('metadataIndex', () => {
 
     assert.strictEqual(index.getAssetPath(firstGuid), 'Assets/Valid.asset');
     assert.strictEqual(output.lines.some(line => line.includes('Skipped malformed Unity metadata file')), true);
+  });
+
+  it('uses an Assets-only default metadata glob', () => {
+    assert.strictEqual(defaultMetaFilesGlob, 'Assets/**/*.meta');
+  });
+
+  it('builds lazily and reuses the first metadata index until forced to rebuild', async () => {
+    const output = createMemoryOutput();
+    let created = 0;
+    let rebuilds = 0;
+    let disposed = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createLogger({
+        output,
+        getLevel: () => 'info'
+      }),
+      createIndex: () => {
+        created += 1;
+        return {
+          rebuild: async () => {
+            rebuilds += 1;
+          },
+          getAssetPath: guid => guid === firstGuid ? 'Assets/Player.cs' : undefined,
+          dispose: () => {
+            disposed += 1;
+          }
+        };
+      }
+    });
+
+    assert.strictEqual(created, 0);
+    assert.strictEqual(lazyIndex.isBuilt(), false);
+
+    const firstIndex = await lazyIndex.getOrBuild();
+    const secondIndex = await lazyIndex.getOrBuild();
+
+    assert.strictEqual(firstIndex, secondIndex);
+    assert.strictEqual(firstIndex.getAssetPath(firstGuid), 'Assets/Player.cs');
+    assert.strictEqual(created, 1);
+    assert.strictEqual(rebuilds, 1);
+    assert.strictEqual(lazyIndex.isBuilt(), true);
+
+    await lazyIndex.rebuild();
+    lazyIndex.dispose();
+
+    assert.strictEqual(created, 1);
+    assert.strictEqual(rebuilds, 2);
+    assert.strictEqual(disposed, 1);
   });
 });
 

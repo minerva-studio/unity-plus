@@ -2,7 +2,7 @@
   "name": "unity-plus",
   "displayName": "Unity Plus",
   "description": "A Unity workflow repair kit for VS Code.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "publisher": "minerva-game-studio",
   "engines": {
@@ -16,9 +16,6 @@
     "ms-dotnettools.csharp"
   ],
   "activationEvents": [
-    "onLanguage:csharp",
-    "workspaceContains:ProjectSettings/ProjectVersion.txt",
-    "workspaceContains:Assets",
     "onCommand:unityPlus.refreshProjectFiles",
     "onCommand:unityPlus.syncScriptFilename",
     "onCommand:unityPlus.syncClassName",
@@ -61,12 +58,12 @@
       "properties": {
         "unityPlus.rename.overrideF2": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Controls whether F2 in C# files uses Unity Plus class/script rename before falling back to VS Code Rename Symbol."
         },
         "unityPlus.rename.classFileSyncMode": {
           "type": "string",
-          "default": "any",
+          "default": "off",
           "enum": [
             "unity-object",
             "any",
@@ -76,12 +73,12 @@
         },
         "unityPlus.projectFiles.autoRefresh": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Refresh Unity project files when C# files are created, moved, or deleted."
         },
         "unityPlus.eventReferences.enabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Show Unity serialized event references in C# files."
         },
         "unityPlus.scan.includeScenesOutsideBuildSettings": {

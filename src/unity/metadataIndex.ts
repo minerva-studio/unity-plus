@@ -8,6 +8,13 @@ export interface UnityMetadataIndex extends vscode.Disposable {
   getAssetPath(guid: string): string | undefined;
 }
 
+export interface LazyUnityMetadataIndex extends vscode.Disposable {
+  readonly root: vscode.Uri;
+  getOrBuild(): Promise<UnityMetadataIndex>;
+  rebuild(): Promise<UnityMetadataIndex>;
+  isBuilt(): boolean;
+}
+
 export interface UnityMetadataIndexOptions {
   root: vscode.Uri;
   logger: UnityPlusLogger;
@@ -23,8 +30,15 @@ export interface UnityMetaFileWatchHandlers {
   onDelete(uri: vscode.Uri): void;
 }
 
+export interface LazyUnityMetadataIndexOptions extends UnityMetadataIndexOptions {
+  createIndex?: (options: UnityMetadataIndexOptions) => UnityMetadataIndex;
+}
+
+export const defaultMetaFilesGlob = 'Assets/**/*.meta';
+
 const metaExtension = '.meta';
 const guidPattern = /^guid:\s*([a-fA-F0-9]{32})\s*$/m;
+const defaultRebuildConcurrency = 32;
 
 export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): UnityMetadataIndex {
   const guidToAssetPath = new Map<string, string>();
@@ -43,7 +57,7 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
     metaPathToGuid.clear();
 
     const metaFiles = await findMetaFiles();
-    await Promise.all(metaFiles.map(updateMetaFile));
+    await runWithConcurrency(metaFiles, updateMetaFile, defaultRebuildConcurrency);
     options.logger.info(`Indexed ${guidToAssetPath.size} Unity metadata GUID(s).`);
   }
 
@@ -86,13 +100,54 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
   };
 }
 
+export function createLazyUnityMetadataIndex(options: LazyUnityMetadataIndexOptions): LazyUnityMetadataIndex {
+  const { createIndex = createUnityMetadataIndex, ...indexOptions } = options;
+  let index: UnityMetadataIndex | undefined;
+  let built = false;
+  let buildPromise: Promise<UnityMetadataIndex> | undefined;
+
+  async function build(force: boolean): Promise<UnityMetadataIndex> {
+    const currentIndex = index ?? createIndex(indexOptions);
+    index = currentIndex;
+
+    if (built && !force) {
+      return currentIndex;
+    }
+
+    if (buildPromise) {
+      return await buildPromise;
+    }
+
+    buildPromise = currentIndex.rebuild()
+      .then(() => {
+        built = true;
+        return currentIndex;
+      })
+      .finally(() => {
+        buildPromise = undefined;
+      });
+
+    return await buildPromise;
+  }
+
+  return {
+    root: options.root,
+    getOrBuild: async () => await build(false),
+    rebuild: async () => await build(true),
+    isBuilt: () => built,
+    dispose: () => {
+      index?.dispose();
+    }
+  };
+}
+
 export function parseUnityMetaGuid(content: string): string | undefined {
   return guidPattern.exec(content)?.[1];
 }
 
 async function findDefaultMetaFiles(root: vscode.Uri): Promise<readonly vscode.Uri[]> {
   const runtimeVscode = await import('vscode');
-  return await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, '**/*.meta'));
+  return await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, defaultMetaFilesGlob));
 }
 
 async function readDefaultTextFile(uri: vscode.Uri): Promise<string> {
@@ -105,7 +160,7 @@ function watchDefaultMetaFiles(root: vscode.Uri, handlers: UnityMetaFileWatchHan
   // Load VS Code only inside the extension host so Node-based unit tests can inject watcher behavior.
   const runtimeVscode = createRequire(__filename)('vscode') as typeof vscode;
   const watcher = runtimeVscode.workspace.createFileSystemWatcher(
-    new runtimeVscode.RelativePattern(root, '**/*.meta')
+    new runtimeVscode.RelativePattern(root, defaultMetaFilesGlob)
   );
 
   return runtimeVscode.Disposable.from(
@@ -127,6 +182,25 @@ function stripMetaExtension(path: string): string {
 
 function metaKey(uri: vscode.Uri): string {
   return uri.fsPath.replace(/\\/g, '/');
+}
+
+async function runWithConcurrency<T>(
+  items: readonly T[],
+  worker: (item: T) => Promise<void>,
+  concurrency: number
+): Promise<void> {
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(concurrency, 1), items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    // Keep rebuild IO bounded so large Unity projects do not swamp the extension host.
+    while (nextIndex < items.length) {
+      const item = items[nextIndex];
+      nextIndex += 1;
+      await worker(item);
+    }
+  });
+
+  await Promise.all(workers);
 }
 
 function errorMessage(error: unknown): string {
