@@ -81,7 +81,21 @@ describe('metaFiles', () => {
     assert.deepStrictEqual(runtime.filesExcludeUpdates, []);
   });
 
-  it('registers the open meta command and opens the target meta file', async () => {
+  it('opens the sidecar meta file when the command receives a resource URI', async () => {
+    const runtime = createMetaFilesRuntime();
+    const resourceUri = createUri('/Project/Assets/Player.cs');
+    runtime.files.set('/Project/Assets/Player.cs.meta', 'guid: 1234567890abcdef1234567890abcdef');
+
+    registerMetaFilesFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime
+    });
+    await runtime.runCommand('unityPlus.openMetaFile', resourceUri);
+
+    assert.strictEqual(runtime.openedDocuments[0].uri.fsPath, '/Project/Assets/Player.cs.meta');
+    assert.strictEqual(runtime.shownDocuments[0].uri.fsPath, '/Project/Assets/Player.cs.meta');
+  });
+
+  it('opens the provided meta file directly without appending another meta extension', async () => {
     const runtime = createMetaFilesRuntime();
     const metaUri = createUri('/Project/Assets/Player.cs.meta');
     runtime.files.set(metaUri.fsPath, 'guid: 1234567890abcdef1234567890abcdef');
@@ -94,11 +108,53 @@ describe('metaFiles', () => {
     assert.strictEqual(runtime.openedDocuments[0].uri.fsPath, metaUri.fsPath);
     assert.strictEqual(runtime.shownDocuments[0].uri.fsPath, metaUri.fsPath);
   });
+
+  it('opens meta for the active text editor when the command has no URI argument', async () => {
+    const runtime = createMetaFilesRuntime({
+      activeTextEditorUri: createUri('/Project/Assets/Gate.prefab')
+    });
+    runtime.files.set('/Project/Assets/Gate.prefab.meta', 'guid: 1234567890abcdef1234567890abcdef');
+
+    registerMetaFilesFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime
+    });
+    await runtime.runCommand('unityPlus.openMetaFile');
+
+    assert.strictEqual(runtime.openedDocuments[0].uri.fsPath, '/Project/Assets/Gate.prefab.meta');
+  });
+
+  it('opens meta for the active tab when no text editor is active', async () => {
+    const runtime = createMetaFilesRuntime({
+      activeTabUri: createUri('/Project/Assets/Icon.png')
+    });
+    runtime.files.set('/Project/Assets/Icon.png.meta', 'guid: 1234567890abcdef1234567890abcdef');
+
+    registerMetaFilesFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime
+    });
+    await runtime.runCommand('unityPlus.openMetaFile');
+
+    assert.strictEqual(runtime.openedDocuments[0].uri.fsPath, '/Project/Assets/Icon.png.meta');
+  });
+
+  it('warns without opening a document when the target meta file is missing', async () => {
+    const runtime = createMetaFilesRuntime();
+
+    registerMetaFilesFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime
+    });
+    await runtime.runCommand('unityPlus.openMetaFile', createUri('/Project/Assets/Missing.png'));
+
+    assert.strictEqual(runtime.openedDocuments.length, 0);
+    assert.strictEqual(runtime.warningMessages[0], 'Unity Plus: Meta file not found for /Project/Assets/Missing.png');
+  });
 });
 
 interface MetaFilesRuntimeOptions {
   unityPlusConfiguration?: Record<string, unknown>;
   filesExclude?: Record<string, boolean>;
+  activeTextEditorUri?: vscode.Uri;
+  activeTabUri?: vscode.Uri;
 }
 
 interface MetaFilesRuntime {
@@ -108,6 +164,7 @@ interface MetaFilesRuntime {
   configurationTargets: vscode.ConfigurationTarget[];
   openedDocuments: vscode.TextDocument[];
   shownDocuments: vscode.TextDocument[];
+  warningMessages: string[];
   runCommand(command: string, ...args: unknown[]): Promise<void>;
 }
 
@@ -118,6 +175,7 @@ function createMetaFilesRuntime(options: MetaFilesRuntimeOptions = {}): MetaFile
   const configurationTargets: vscode.ConfigurationTarget[] = [];
   const openedDocuments: vscode.TextDocument[] = [];
   const shownDocuments: vscode.TextDocument[] = [];
+  const warningMessages: string[] = [];
   const workspaceTarget = 1 as vscode.ConfigurationTarget;
 
   const runtime = {
@@ -147,6 +205,11 @@ function createMetaFilesRuntime(options: MetaFilesRuntimeOptions = {}): MetaFile
         };
       },
       fs: {
+        stat: async (uri: vscode.Uri) => {
+          if (!files.has(uri.fsPath)) {
+            throw new Error(`Missing file: ${uri.fsPath}`);
+          }
+        },
         readFile: async (uri: vscode.Uri) => {
           const content = files.get(uri.fsPath);
 
@@ -165,8 +228,28 @@ function createMetaFilesRuntime(options: MetaFilesRuntimeOptions = {}): MetaFile
       }
     },
     window: {
+      activeTextEditor: options.activeTextEditorUri
+        ? {
+          document: createTextDocument(options.activeTextEditorUri.fsPath)
+        }
+        : undefined,
+      tabGroups: {
+        activeTabGroup: {
+          activeTab: options.activeTabUri
+            ? {
+              input: {
+                uri: options.activeTabUri,
+                viewType: 'imagePreview.previewEditor'
+              }
+            }
+            : undefined
+        }
+      },
       showTextDocument: async (document: vscode.TextDocument) => {
         shownDocuments.push(document);
+      },
+      showWarningMessage: (message: string) => {
+        warningMessages.push(message);
       }
     },
     Disposable: {
@@ -189,6 +272,7 @@ function createMetaFilesRuntime(options: MetaFilesRuntimeOptions = {}): MetaFile
     configurationTargets,
     openedDocuments,
     shownDocuments,
+    warningMessages,
     async runCommand(command: string, ...args: unknown[]): Promise<void> {
       await Promise.resolve(commands.get(command)?.(...args));
     }

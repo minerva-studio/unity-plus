@@ -59,6 +59,22 @@
         "when": "editorTextFocus && editorLangId == csharp && config.unityPlus.rename.overrideF2"
       }
     ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "unityPlus.openMetaFile",
+          "when": "resourceScheme == file",
+          "group": "navigation"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "unityPlus.openMetaFile",
+          "when": "resourceScheme == file",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Unity Plus",
       "properties": {

@@ -47,6 +47,19 @@ describe('package manifest', () => {
     assert.strictEqual(command?.title, 'Unity Plus: Open Meta File');
   });
 
+  it('shows the Unity meta command in Explorer and editor title menus', () => {
+    const manifest = readPackageManifest();
+    const explorerCommand = manifest.contributes.menus['explorer/context'].find((item: { command: string }) =>
+      item.command === 'unityPlus.openMetaFile'
+    );
+    const editorTitleCommand = manifest.contributes.menus['editor/title'].find((item: { command: string }) =>
+      item.command === 'unityPlus.openMetaFile'
+    );
+
+    assert.strictEqual(explorerCommand?.when, 'resourceScheme == file');
+    assert.strictEqual(editorTitleCommand?.when, 'resourceScheme == file');
+  });
+
   it('enables optional F2 override for C# rename by default', () => {
     const manifest = readPackageManifest();
     const property = manifest.contributes.configuration.properties['unityPlus.rename.overrideF2'];
