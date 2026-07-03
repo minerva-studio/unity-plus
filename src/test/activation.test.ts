@@ -43,7 +43,9 @@ describe('activation', () => {
       },
       registerRenameFeature: () => createDisposable(),
       registerProjectSyncFeature: () => createDisposable(),
-      registerEventReferenceFeature: () => createDisposable()
+      registerEventReferenceFeature: () => createDisposable(),
+      registerMetaFilesFeature: () => createDisposable(),
+      hideMetaFilesInExplorerIfEnabled: async () => undefined
     });
 
     assert.strictEqual(lazyIndexCreated, 1);
@@ -57,6 +59,8 @@ describe('activation', () => {
     let renameOptions: RenameFeatureOptions | undefined;
     let projectSyncOptions: ProjectSyncFeatureOptions | undefined;
     let eventReferenceOptions: EventReferenceFeatureOptions | undefined;
+    let metaFilesRegistered = 0;
+    let hideMetaFilesCalls = 0;
 
     await activateUnityPlus(createContext(), {
       workspaceFolders: [],
@@ -81,6 +85,13 @@ describe('activation', () => {
       registerEventReferenceFeature: (_logger, options) => {
         eventReferenceOptions = options;
         return createDisposable();
+      },
+      registerMetaFilesFeature: () => {
+        metaFilesRegistered += 1;
+        return createDisposable();
+      },
+      hideMetaFilesInExplorerIfEnabled: async () => {
+        hideMetaFilesCalls += 1;
       }
     });
 
@@ -88,6 +99,8 @@ describe('activation', () => {
     assert.strictEqual(renameOptions?.isUnityWorkspace, false);
     assert.strictEqual(projectSyncOptions?.root, undefined);
     assert.strictEqual(eventReferenceOptions?.metadataIndex, undefined);
+    assert.strictEqual(metaFilesRegistered, 1);
+    assert.strictEqual(hideMetaFilesCalls, 0);
   });
 
   it('rebuilds the lazy metadata index only when the rescan command is executed', async () => {
@@ -115,12 +128,48 @@ describe('activation', () => {
       }),
       registerRenameFeature: () => createDisposable(),
       registerProjectSyncFeature: () => createDisposable(),
-      registerEventReferenceFeature: () => createDisposable()
+      registerEventReferenceFeature: () => createDisposable(),
+      registerMetaFilesFeature: () => createDisposable(),
+      hideMetaFilesInExplorerIfEnabled: async () => undefined
     });
 
     assert.strictEqual(rebuilds, 0);
     await Promise.resolve(commands.get('unityPlus.rescanUnityProject')?.());
     assert.strictEqual(rebuilds, 1);
+  });
+
+  it('hides meta files when a Unity workspace is detected and after a Unity rescan', async () => {
+    const root = createUri('/Project');
+    const commands = new Map<string, (...args: unknown[]) => unknown>();
+    let hideMetaFilesCalls = 0;
+
+    await activateUnityPlus(createContext(), {
+      workspaceFolders: [],
+      registerCommand: (command, callback) => {
+        commands.set(command, callback);
+        return createDisposable();
+      }
+    }, {
+      logger: createTestLogger(),
+      detectUnityWorkspace: async () => ({
+        isUnityProject: true,
+        root
+      }),
+      createLazyMetadataIndex: () => createLazyIndex(root),
+      registerRenameFeature: () => createDisposable(),
+      registerProjectSyncFeature: () => createDisposable(),
+      registerEventReferenceFeature: () => createDisposable(),
+      registerMetaFilesFeature: () => createDisposable(),
+      hideMetaFilesInExplorerIfEnabled: async () => {
+        hideMetaFilesCalls += 1;
+      }
+    });
+
+    assert.strictEqual(hideMetaFilesCalls, 1);
+
+    await Promise.resolve(commands.get('unityPlus.rescanUnityProject')?.());
+
+    assert.strictEqual(hideMetaFilesCalls, 2);
   });
 });
 

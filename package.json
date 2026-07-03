@@ -16,10 +16,12 @@
     "ms-dotnettools.csharp"
   ],
   "activationEvents": [
+    "workspaceContains:**/ProjectSettings/ProjectVersion.txt",
     "onCommand:unityPlus.refreshProjectFiles",
     "onCommand:unityPlus.syncScriptFilename",
     "onCommand:unityPlus.syncClassName",
     "onCommand:unityPlus.showUnityEventReferences",
+    "onCommand:unityPlus.openMetaFile",
     "onCommand:unityPlus.rescanUnityProject"
   ],
   "main": "./out/extension.js",
@@ -40,6 +42,10 @@
       {
         "command": "unityPlus.showUnityEventReferences",
         "title": "Unity Plus: Show Unity Event References"
+      },
+      {
+        "command": "unityPlus.openMetaFile",
+        "title": "Unity Plus: Open Meta File"
       },
       {
         "command": "unityPlus.rescanUnityProject",
@@ -79,6 +85,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show Unity serialized event references in C# files."
+        },
+        "unityPlus.metaFiles.hideInExplorer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hide Unity .meta files in the VS Code Explorer while keeping Unity Plus meta file actions available."
         },
         "unityPlus.scan.includeScenesOutsideBuildSettings": {
           "type": "boolean",

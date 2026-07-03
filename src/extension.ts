@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { activateUnityPlus } from './activation';
 import { registerEventReferenceFeature } from './features/event-references/eventReferences';
+import { hideMetaFilesInExplorerIfEnabled, registerMetaFilesFeature } from './features/meta-files/metaFiles';
 import { registerProjectSyncFeature } from './features/project-sync/projectSync';
 import { registerRenameFeature } from './features/rename/renameSync';
 import { createLogger } from './unity/logger';
@@ -19,7 +20,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     createLazyMetadataIndex: createLazyUnityMetadataIndex,
     registerRenameFeature,
     registerProjectSyncFeature,
-    registerEventReferenceFeature
+    registerEventReferenceFeature,
+    registerMetaFilesFeature,
+    hideMetaFilesInExplorerIfEnabled: async logger => await hideMetaFilesInExplorerIfEnabled(vscode, logger)
   });
 }
 

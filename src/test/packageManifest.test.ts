@@ -7,10 +7,12 @@ describe('package manifest', () => {
     const manifest = readPackageManifest();
 
     assert.deepStrictEqual(manifest.activationEvents, [
+      'workspaceContains:**/ProjectSettings/ProjectVersion.txt',
       'onCommand:unityPlus.refreshProjectFiles',
       'onCommand:unityPlus.syncScriptFilename',
       'onCommand:unityPlus.syncClassName',
       'onCommand:unityPlus.showUnityEventReferences',
+      'onCommand:unityPlus.openMetaFile',
       'onCommand:unityPlus.rescanUnityProject'
     ]);
   });
@@ -33,6 +35,16 @@ describe('package manifest', () => {
     assert.deepStrictEqual(properties['unityPlus.rename.classFileSyncMode'].enum, ['on', 'off']);
     assert.strictEqual(properties['unityPlus.projectFiles.autoRefresh'].default, true);
     assert.strictEqual(properties['unityPlus.eventReferences.enabled'].default, true);
+    assert.strictEqual(properties['unityPlus.metaFiles.hideInExplorer'].default, true);
+  });
+
+  it('contributes an explicit command for opening Unity meta files', () => {
+    const manifest = readPackageManifest();
+    const command = manifest.contributes.commands.find((item: { command: string }) =>
+      item.command === 'unityPlus.openMetaFile'
+    );
+
+    assert.strictEqual(command?.title, 'Unity Plus: Open Meta File');
   });
 
   it('enables optional F2 override for C# rename by default', () => {

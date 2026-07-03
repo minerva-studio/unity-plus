@@ -1,5 +1,6 @@
 import type * as vscode from 'vscode';
 import type { EventReferenceFeatureOptions } from './features/event-references/eventReferences';
+import type { MetaFilesFeatureOptions } from './features/meta-files/metaFiles';
 import type { ProjectSyncFeatureOptions } from './features/project-sync/projectSync';
 import type { RenameFeatureOptions } from './features/rename/renameSync';
 import type { UnityPlusLogger } from './unity/logger';
@@ -24,6 +25,8 @@ export interface UnityPlusActivationDependencies {
   registerRenameFeature(logger: UnityPlusLogger, options?: RenameFeatureOptions): vscode.Disposable;
   registerProjectSyncFeature(logger: UnityPlusLogger, options?: ProjectSyncFeatureOptions): vscode.Disposable;
   registerEventReferenceFeature(logger: UnityPlusLogger, options?: EventReferenceFeatureOptions): vscode.Disposable;
+  registerMetaFilesFeature(logger: UnityPlusLogger, options?: MetaFilesFeatureOptions): vscode.Disposable;
+  hideMetaFilesInExplorerIfEnabled(logger: UnityPlusLogger): Promise<void>;
 }
 
 export async function activateUnityPlus(
@@ -48,6 +51,10 @@ export async function activateUnityPlus(
     context.subscriptions.push(metadataIndex);
   }
 
+  if (unityWorkspace.root) {
+    await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
+  }
+
   context.subscriptions.push(
     dependencies.registerRenameFeature(logger, {
       isUnityWorkspace: unityWorkspace.root !== undefined
@@ -58,9 +65,14 @@ export async function activateUnityPlus(
     dependencies.registerEventReferenceFeature(logger, {
       metadataIndex
     }),
+    dependencies.registerMetaFilesFeature(logger),
     runtime.registerCommand('unityPlus.rescanUnityProject', async () => {
       const refreshed = await dependencies.detectUnityWorkspace(runtime.workspaceFolders ?? []);
       logWorkspaceDetection(logger, refreshed, 'rescan found');
+
+      if (refreshed.root) {
+        await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
+      }
 
       if (metadataIndex && refreshed.root && sameWorkspaceRoot(metadataIndex.root, refreshed.root)) {
         await metadataIndex.rebuild();
