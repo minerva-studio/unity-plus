@@ -619,7 +619,7 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'failed');
   });
 
-  it('shows preparing progress before falling back outside C# editors', async () => {
+  it('falls back silently outside C# editors', async () => {
     const runtime = createRenameCommandRuntime({
       editor: {
         languageId: 'typescript',
@@ -634,7 +634,17 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.progressTitles, ['Unity Plus: Preparing rename...']);
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
-    assert.strictEqual(runtime.messages.some(message => message.includes('this is not a C# editor')), true);
+    assert.deepStrictEqual(runtime.messages, []);
+  });
+
+  it('falls back silently when no active editor is available', async () => {
+    const runtime = createRenameCommandRuntime({});
+
+    const result = await runRenameTypeCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.deepStrictEqual(runtime.messages, []);
   });
 
   it('falls back with a visible message when rename sync mode is off', async () => {
@@ -651,7 +661,7 @@ describe('renameSync', () => {
     assert.strictEqual(runtime.messages.some(message => message.includes('Rename sync mode is off')), true);
   });
 
-  it('falls back with a visible message when the cursor is not on the primary top-level type name', async () => {
+  it('falls back silently when the cursor is not on the primary top-level type name', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 8, character: 2 }),
@@ -662,7 +672,7 @@ describe('renameSync', () => {
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
-    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the primary top-level type name')), true);
+    assert.deepStrictEqual(runtime.messages, []);
   });
 
   it('falls back with a visible message when type and file names do not match', async () => {
@@ -743,7 +753,7 @@ describe('renameSync', () => {
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.waited, []);
-    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the primary top-level type name')), true);
+    assert.deepStrictEqual(runtime.messages, []);
   });
 
   it('falls back after command primary top-level type lookup timeout', async () => {

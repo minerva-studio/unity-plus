@@ -103,9 +103,11 @@ export interface RenameTypeCommandRuntime {
   logger: UnityPlusLogger;
 }
 
+type RenameFallbackVisibility = 'silent' | 'informational';
+
 export type RenameTypeCommandResult =
   | { kind: 'applied'; oldTypeName: string; newTypeName: string }
-  | { kind: 'fallback'; reason: string }
+  | { kind: 'fallback'; reason: string; visibility: RenameFallbackVisibility }
   | { kind: 'cancelled' }
   | { kind: 'failed'; message: string };
 
@@ -163,7 +165,11 @@ export function registerRenameFeature(
       });
 
       if (result.kind === 'fallback') {
-        logger.info(`Unity Plus: ${result.reason}`);
+        if (result.visibility === 'silent') {
+          logger.debug(`Unity Plus rename command fell back silently: ${result.reason}`);
+        } else {
+          logger.info(`Unity Plus: ${result.reason}`);
+        }
       } else if (result.kind === 'failed') {
         logger.warn(result.message);
         void runtimeVscode.window.showWarningMessage(`Unity Plus: ${result.message}`);
@@ -295,11 +301,11 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
   runtime.logger.debug('Unity Plus rename command started.');
 
   if (!runtime.editor) {
-    return await fallbackToNativeRename(runtime, 'Using VS Code Rename Symbol because no active editor is available.');
+    return await fallbackToNativeRename(runtime, 'Using VS Code Rename Symbol because no active editor is available.', 'silent');
   }
 
   if (runtime.editor.languageId !== 'csharp') {
-    return await fallbackToNativeRename(runtime, 'Using VS Code Rename Symbol because this is not a C# editor.');
+    return await fallbackToNativeRename(runtime, 'Using VS Code Rename Symbol because this is not a C# editor.', 'silent');
   }
 
   if (runtime.mode === 'off') {
@@ -310,7 +316,7 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
   runtime.logger.debug(`Unity Plus rename command primary top-level type: ${currentType?.name ?? '<none>'}.`);
 
   if (fallbackReason) {
-    return await fallbackToNativeRename(runtime, fallbackReason);
+    return await fallbackToNativeRename(runtime, fallbackReason, getRenameFallbackVisibility(fallbackReason));
   }
 
   const renameType = currentType;
@@ -348,7 +354,7 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
     );
 
     if (result.kind === 'fallback') {
-      return await fallbackToNativeRename(runtime, result.reason);
+      return await fallbackToNativeRename(runtime, result.reason, getRenameFallbackVisibility(result.reason));
     }
 
     return result;
@@ -826,11 +832,22 @@ async function executeNativeRename(runtimeVscode: typeof vscode): Promise<void> 
 
 async function fallbackToNativeRename(
   runtime: Pick<RenameTypeCommandRuntime, 'executeNativeRename' | 'showInformationMessage'>,
-  reason: string
+  reason: string,
+  visibility: RenameFallbackVisibility = 'informational'
 ): Promise<RenameTypeCommandResult> {
   await runtime.executeNativeRename();
-  runtime.showInformationMessage(`Unity Plus: ${reason}`);
-  return { kind: 'fallback', reason };
+  if (visibility === 'informational') {
+    runtime.showInformationMessage(`Unity Plus: ${reason}`);
+  }
+  return { kind: 'fallback', reason, visibility };
+}
+
+function getRenameFallbackVisibility(reason: string): RenameFallbackVisibility {
+  if (reason.includes('cursor is not on the primary top-level type name')) {
+    return 'silent';
+  }
+
+  return 'informational';
 }
 
 function createRenameCommandEditor(editor: vscode.TextEditor | undefined): RenameCommandEditor | undefined {
