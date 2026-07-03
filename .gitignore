@@ -1,5 +1,8 @@
 node_modules/
 out/
+.vscode/
+.agent/
+.codex/
 .vscode-test/
 *.vsix
 *.log
