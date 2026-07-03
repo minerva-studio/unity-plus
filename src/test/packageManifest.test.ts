@@ -3,10 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 describe('package manifest', () => {
-  it('activates only from explicit Unity Plus commands', () => {
+  it('activates from C# files and explicit Unity Plus commands', () => {
     const manifest = readPackageManifest();
 
     assert.deepStrictEqual(manifest.activationEvents, [
+      'onLanguage:csharp',
       'workspaceContains:**/ProjectSettings/ProjectVersion.txt',
       'onCommand:unityPlus.refreshProjectFiles',
       'onCommand:unityPlus.syncScriptFilename',

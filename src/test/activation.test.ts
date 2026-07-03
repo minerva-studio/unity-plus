@@ -107,6 +107,7 @@ describe('activation', () => {
     const root = createUri('/Project');
     const commands = new Map<string, (...args: unknown[]) => unknown>();
     let rebuilds = 0;
+    let eventReferenceOptions: EventReferenceFeatureOptions | undefined;
 
     await activateUnityPlus(createContext(), {
       workspaceFolders: [],
@@ -128,14 +129,19 @@ describe('activation', () => {
       }),
       registerRenameFeature: () => createDisposable(),
       registerProjectSyncFeature: () => createDisposable(),
-      registerEventReferenceFeature: () => createDisposable(),
+      registerEventReferenceFeature: (_logger, options) => {
+        eventReferenceOptions = options;
+        return createDisposable();
+      },
       registerMetaFilesFeature: () => createDisposable(),
       hideMetaFilesInExplorerIfEnabled: async () => undefined
     });
 
     assert.strictEqual(rebuilds, 0);
+    assert.strictEqual(eventReferenceOptions?.getCacheVersion?.(), 0);
     await Promise.resolve(commands.get('unityPlus.rescanUnityProject')?.());
     assert.strictEqual(rebuilds, 1);
+    assert.strictEqual(eventReferenceOptions?.getCacheVersion?.(), 1);
   });
 
   it('hides meta files when a Unity workspace is detected and after a Unity rescan', async () => {

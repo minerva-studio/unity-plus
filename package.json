@@ -16,6 +16,7 @@
     "ms-dotnettools.csharp"
   ],
   "activationEvents": [
+    "onLanguage:csharp",
     "workspaceContains:**/ProjectSettings/ProjectVersion.txt",
     "onCommand:unityPlus.refreshProjectFiles",
     "onCommand:unityPlus.syncScriptFilename",

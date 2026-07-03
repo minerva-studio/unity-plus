@@ -1,0 +1,1 @@
+Commit and Rebuild the plugin after each task.

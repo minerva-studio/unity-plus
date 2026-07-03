@@ -46,6 +46,7 @@ export async function activateUnityPlus(
       logger
     })
     : undefined;
+  let eventReferenceCacheVersion = 0;
 
   if (metadataIndex) {
     context.subscriptions.push(metadataIndex);
@@ -63,7 +64,8 @@ export async function activateUnityPlus(
       root: unityWorkspace.root
     }),
     dependencies.registerEventReferenceFeature(logger, {
-      metadataIndex
+      metadataIndex,
+      getCacheVersion: () => eventReferenceCacheVersion
     }),
     dependencies.registerMetaFilesFeature(logger),
     runtime.registerCommand('unityPlus.rescanUnityProject', async () => {
@@ -76,6 +78,7 @@ export async function activateUnityPlus(
 
       if (metadataIndex && refreshed.root && sameWorkspaceRoot(metadataIndex.root, refreshed.root)) {
         await metadataIndex.rebuild();
+        eventReferenceCacheVersion += 1;
         logger.info('Unity metadata index rebuilt after project rescan.');
       }
     })
