@@ -88,6 +88,9 @@ export interface RenameClassCommandRuntime {
   fileExists(path: string): Promise<boolean>;
   createFileUri(path: string): vscode.Uri;
   applyWorkspaceEdit(edit: vscode.WorkspaceEdit): Promise<boolean>;
+  wait(ms: number): Promise<void>;
+  retryIntervalMs: number;
+  settleTimeoutMs: number;
   markSyncing(filePath: string): void;
   unmarkSyncing(filePath: string): void;
   logger: UnityPlusLogger;
@@ -139,6 +142,9 @@ export function registerRenameFeature(logger: UnityPlusLogger): vscode.Disposabl
         fileExists: async path => await fileExists(runtimeVscode, path),
         createFileUri: path => runtimeVscode.Uri.file(path),
         applyWorkspaceEdit: async edit => await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true }),
+        wait,
+        retryIntervalMs: 200,
+        settleTimeoutMs: 2000,
         markSyncing: filePath => syncingScriptRenameFiles.add(filePath),
         unmarkSyncing: filePath => syncingScriptRenameFiles.delete(filePath),
         logger
@@ -287,15 +293,9 @@ async function runPreparedRenameClassCommand(runtime: RenameClassCommandRuntime)
     return await fallbackToNativeRename(runtime, 'Rename sync mode is off; using VS Code Rename Symbol.');
   }
 
-  const currentClass = await getPrimaryClass(runtime.languageService, runtime.editor.uri, runtime.mode, runtime.logger);
+  const { currentClass, fallbackReason } = await waitForRenameCommandPrimaryClass(runtime);
   runtime.logger.debug(`Unity Plus rename command primary class: ${currentClass?.name ?? '<none>'}.`);
 
-  const fallbackReason = getAtomicRenameFallbackReason(
-    runtime.editor.filePath,
-    currentClass,
-    runtime.editor.cursor,
-    runtime.mode
-  );
   if (fallbackReason) {
     return await fallbackToNativeRename(runtime, fallbackReason);
   }
@@ -342,6 +342,53 @@ async function runPreparedRenameClassCommand(runtime: RenameClassCommandRuntime)
   } finally {
     runtime.unmarkSyncing(runtime.editor.filePath);
   }
+}
+
+async function waitForRenameCommandPrimaryClass(runtime: RenameClassCommandRuntime): Promise<{
+  currentClass?: CSharpClassSnapshot;
+  fallbackReason?: string;
+}> {
+  if (!runtime.editor) {
+    return { fallbackReason: 'Using VS Code Rename Symbol because no active editor is available.' };
+  }
+
+  let elapsedMs = 0;
+  let attempts = 0;
+  let latestClass: CSharpClassSnapshot | undefined;
+  let latestReason: string | undefined;
+
+  while (elapsedMs <= runtime.settleTimeoutMs) {
+    attempts += 1;
+    latestClass = await getPrimaryClass(runtime.languageService, runtime.editor.uri, runtime.mode, runtime.logger);
+    latestReason = getAtomicRenameFallbackReason(
+      runtime.editor.filePath,
+      latestClass,
+      runtime.editor.cursor,
+      runtime.mode
+    );
+
+    if (!latestReason || !isRetryableAtomicRenameFallbackReason(latestReason)) {
+      runtime.logger.debug(`Unity Plus rename command primary class settled after ${attempts} attempt(s).`);
+      return {
+        currentClass: latestClass,
+        fallbackReason: latestReason
+      };
+    }
+
+    await runtime.wait(runtime.retryIntervalMs);
+    elapsedMs += runtime.retryIntervalMs;
+  }
+
+  runtime.logger.debug(`Unity Plus rename command primary class did not settle after ${attempts} attempt(s).`);
+  return {
+    currentClass: latestClass,
+    fallbackReason: latestReason ?? 'Using VS Code Rename Symbol because no primary C# class was found.'
+  };
+}
+
+function isRetryableAtomicRenameFallbackReason(reason: string): boolean {
+  return reason.includes('no primary C# class was found') ||
+    reason.includes('primary class location is unavailable');
 }
 
 export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRuntime): Promise<AtomicScriptRenameResult> {

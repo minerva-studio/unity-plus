@@ -718,6 +718,53 @@ describe('renameSync', () => {
     assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
   });
 
+  it('retries command primary class lookup before falling back', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryClasses: [
+        undefined,
+        unityClassAt(plan.oldClassName, 2, 14)
+      ],
+      inputValue: plan.newClassName
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(runtime.waited, [200]);
+    assert.deepStrictEqual(runtime.nativeRenameCalls, []);
+  });
+
+  it('does not retry command fallback when cursor is not on the class name', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 8, character: 2 }),
+      primaryClass: unityClassAt(plan.oldClassName, 2, 14)
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.waited, []);
+    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the script class name')), true);
+  });
+
+  it('falls back after command primary class lookup timeout', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryClasses: [undefined, undefined, undefined, undefined]
+    });
+
+    const result = await runRenameClassCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.strictEqual(runtime.messages.some(message => message.includes('no primary C# class was found')), true);
+    assert.deepStrictEqual(runtime.waited, [200, 200, 200]);
+  });
+
   it('cancels visible rename command without applying or falling back when input is cancelled', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
@@ -861,6 +908,24 @@ function createSequenceLanguageService(classes: CSharpClassSnapshot[]): CSharpLa
   };
 }
 
+function createOptionalSequenceLanguageService(classes: Array<CSharpClassSnapshot | undefined>): CSharpLanguageService {
+  let index = 0;
+
+  return {
+    async getPrimaryClass() {
+      const current = classes[Math.min(index, classes.length - 1)];
+      index += 1;
+      return current;
+    },
+    async findReferences() {
+      return [];
+    },
+    async buildRenameEdit() {
+      return new FakeWorkspaceEdit() as never;
+    }
+  };
+}
+
 function fakeUri(path: string) {
   return {
     fsPath: path,
@@ -889,6 +954,7 @@ interface RenameCommandRuntimeOptions {
   };
   mode?: RenameClassFileSyncMode;
   primaryClass?: CSharpClassSnapshot;
+  primaryClasses?: Array<CSharpClassSnapshot | undefined>;
   inputValue?: string;
 }
 
@@ -901,14 +967,15 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const markedSyncing: string[] = [];
   const unmarkedSyncing: string[] = [];
   const appliedEdits: unknown[] = [];
+  const waited: number[] = [];
+  const languageService = options.primaryClasses
+    ? createOptionalSequenceLanguageService(options.primaryClasses)
+    : createFakeLanguageService(options.primaryClass, new FakeWorkspaceEdit());
 
   const runtime = {
     editor: options.editor,
     mode: options.mode ?? 'unity-object',
-    languageService: createFakeLanguageService(
-      options.primaryClass,
-      new FakeWorkspaceEdit()
-    ),
+    languageService,
     async showInputBox() {
       return options.inputValue;
     },
@@ -936,6 +1003,11 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
       appliedEdits.push(edit);
       return true;
     },
+    async wait(ms: number): Promise<void> {
+      waited.push(ms);
+    },
+    retryIntervalMs: 200,
+    settleTimeoutMs: 400,
     markSyncing(filePath: string): void {
       markedSyncing.push(filePath);
     },
@@ -949,7 +1021,8 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     nativeRenameCalls,
     markedSyncing,
     unmarkedSyncing,
-    appliedEdits
+    appliedEdits,
+    waited
   };
 
   return runtime;
