@@ -3,56 +3,147 @@ import type * as vscode from 'vscode';
 import { createVscodeCSharpLanguageService } from '../unity/csharpLanguageService';
 
 describe('csharpLanguageService', () => {
-  it('returns the single top-level class from document symbols', async () => {
+  it('returns the single top-level type from document symbols', async () => {
     const runtimeVscode = createFakeVscode({
       documentSymbols: [
         namespaceSymbol('Minerva.Gameplay', [
-          classSymbol('PlayerController', 4, 12)
+          typeSymbol('PlayerController', 1, 4, 12)
         ])
       ]
     });
     const service = createVscodeCSharpLanguageService(runtimeVscode);
 
-    const primaryClass = await service.getPrimaryClass(fakeUri('/Project/Assets/PlayerController.cs'));
+    const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/PlayerController.cs'));
 
-    assert.strictEqual(primaryClass?.name, 'PlayerController');
-    assert.strictEqual(primaryClass?.namespace, 'Minerva.Gameplay');
-    assert.deepStrictEqual(primaryClass?.position, { line: 4, character: 12 });
+    assert.strictEqual(primaryType?.name, 'PlayerController');
+    assert.strictEqual(primaryType?.kind, 'class');
+    assert.strictEqual(primaryType?.namespace, 'Minerva.Gameplay');
+    assert.deepStrictEqual(primaryType?.position, { line: 4, character: 12 });
   });
 
-  it('returns undefined when document symbols contain multiple top-level classes', async () => {
+  it('returns undefined when document symbols contain multiple top-level types', async () => {
     const runtimeVscode = createFakeVscode({
       documentSymbols: [
-        classSymbol('FirstUtility', 1, 0),
-        classSymbol('SecondUtility', 5, 0)
+        typeSymbol('FirstUtility', 1, 1, 0),
+        typeSymbol('SecondUtility', 1, 5, 0)
       ]
     });
     const service = createVscodeCSharpLanguageService(runtimeVscode);
 
-    const primaryClass = await service.getPrimaryClass(fakeUri('/Project/Assets/Utilities.cs'));
+    const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/Utilities.cs'));
 
-    assert.strictEqual(primaryClass, undefined);
+    assert.strictEqual(primaryType, undefined);
   });
 
-  it('marks a class as a Unity object when type hierarchy reaches UnityEngine.Object', async () => {
-    const classItem = typeHierarchyItem('PlayerController', '');
-    const monoBehaviourItem = typeHierarchyItem('MonoBehaviour', 'UnityEngine');
-    const objectItem = typeHierarchyItem('Object', 'UnityEngine');
+  it('falls back to source scanning when document symbols are empty', async () => {
     const runtimeVscode = createFakeVscode({
-      documentSymbols: [classSymbol('PlayerController', 4, 12)],
-      typeHierarchyItems: [classItem],
-      supertypesByName: new Map([
-        ['PlayerController', [monoBehaviourItem]],
-        ['MonoBehaviour', [objectItem]]
+      documentSymbols: [],
+      documents: new Map([
+        ['/Project/Assets/HeroStats.cs', [
+          'namespace Minerva.Gameplay;',
+          '',
+          'public struct HeroStats',
+          '{',
+          '  public int Health;',
+          '}'
+        ].join('\n')]
       ])
     });
     const service = createVscodeCSharpLanguageService(runtimeVscode);
 
-    const primaryClass = await service.getPrimaryClass(fakeUri('/Project/Assets/PlayerController.cs'), {
-      includeUnityObject: true
-    });
+    const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/HeroStats.cs'));
 
-    assert.strictEqual(primaryClass?.isUnityObject, true);
+    assert.strictEqual(primaryType?.name, 'HeroStats');
+    assert.strictEqual(primaryType?.kind, 'struct');
+    assert.strictEqual(primaryType?.namespace, 'Minerva.Gameplay');
+    assert.deepStrictEqual(primaryType?.position, { line: 2, character: 14 });
+  });
+
+  it('falls back to source scanning when document symbols throw', async () => {
+    const runtimeVscode = createFakeVscode({
+      throwDocumentSymbols: true,
+      documents: new Map([
+        ['/Project/Assets/CombatState.cs', [
+          'namespace Minerva.Gameplay',
+          '{',
+          '  public enum CombatState',
+          '  {',
+          '    Idle',
+          '  }',
+          '}'
+        ].join('\n')]
+      ])
+    });
+    const service = createVscodeCSharpLanguageService(runtimeVscode);
+
+    const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/CombatState.cs'));
+
+    assert.strictEqual(primaryType?.name, 'CombatState');
+    assert.strictEqual(primaryType?.kind, 'enum');
+    assert.strictEqual(primaryType?.namespace, 'Minerva.Gameplay');
+    assert.deepStrictEqual(primaryType?.position, { line: 2, character: 14 });
+  });
+
+  it('supports interface and record source fallback without matching comments or strings', async () => {
+    const runtimeVscode = createFakeVscode({
+      documentSymbols: [],
+      documents: new Map([
+        ['/Project/Assets/QuestDefinition.cs', [
+          '// public class CommentTrap',
+          'var text = "public enum StringTrap";',
+          'namespace Minerva.Quests',
+          '{',
+          '  public record QuestDefinition(int Id);',
+          '}'
+        ].join('\n')],
+        ['/Project/Assets/IQuestRule.cs', [
+          'namespace Minerva.Quests;',
+          'public interface IQuestRule',
+          '{',
+          '}'
+        ].join('\n')]
+      ])
+    });
+    const service = createVscodeCSharpLanguageService(runtimeVscode);
+
+    const recordType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/QuestDefinition.cs'));
+    const interfaceType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/IQuestRule.cs'));
+
+    assert.strictEqual(recordType?.name, 'QuestDefinition');
+    assert.strictEqual(recordType?.kind, 'record');
+    assert.strictEqual(interfaceType?.name, 'IQuestRule');
+    assert.strictEqual(interfaceType?.kind, 'interface');
+  });
+
+  it('does not return nested or multiple source fallback types', async () => {
+    const runtimeVscode = createFakeVscode({
+      documentSymbols: [],
+      documents: new Map([
+        ['/Project/Assets/Outer.cs', [
+          'public class Outer',
+          '{',
+          '  public class Nested',
+          '  {',
+          '  }',
+          '}'
+        ].join('\n')],
+        ['/Project/Assets/Many.cs', [
+          'public class First',
+          '{',
+          '}',
+          'public struct Second',
+          '{',
+          '}'
+        ].join('\n')]
+      ])
+    });
+    const service = createVscodeCSharpLanguageService(runtimeVscode);
+
+    const outerType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/Outer.cs'));
+    const manyTypes = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/Many.cs'));
+
+    assert.strictEqual(outerType?.name, 'Outer');
+    assert.strictEqual(manyTypes, undefined);
   });
 
   it('delegates reference lookup to the VS Code reference provider command', async () => {
@@ -98,8 +189,8 @@ describe('csharpLanguageService', () => {
 
 interface FakeVscodeOptions {
   documentSymbols?: FakeDocumentSymbol[];
-  typeHierarchyItems?: FakeTypeHierarchyItem[];
-  supertypesByName?: Map<string, FakeTypeHierarchyItem[]>;
+  throwDocumentSymbols?: boolean;
+  documents?: Map<string, string>;
   references?: FakeLocation[];
   renameEdit?: unknown;
 }
@@ -111,11 +202,17 @@ interface FakeVscode extends vscodeLike {
 interface vscodeLike {
   SymbolKind: {
     Class: number;
+    Struct: number;
+    Enum: number;
+    Interface: number;
     Namespace: number;
   };
   Position: typeof FakePosition;
   commands: {
     executeCommand<T>(command: string, ...args: unknown[]): Promise<T>;
+  };
+  workspace: {
+    openTextDocument(uri: FakeUri): Promise<{ getText(): string }>;
   };
 }
 
@@ -124,13 +221,6 @@ interface FakeDocumentSymbol {
   kind: number;
   selectionRange: FakeRange;
   children: FakeDocumentSymbol[];
-}
-
-interface FakeTypeHierarchyItem {
-  name: string;
-  detail: string;
-  uri: FakeUri;
-  range: FakeRange;
 }
 
 interface FakeLocation {
@@ -164,7 +254,10 @@ function createFakeVscode(options: FakeVscodeOptions): FakeVscode & typeof vscod
     commandCalls,
     SymbolKind: {
       Class: 1,
-      Namespace: 2
+      Struct: 2,
+      Enum: 3,
+      Interface: 4,
+      Namespace: 5
     },
     Position: FakePosition,
     commands: {
@@ -172,16 +265,10 @@ function createFakeVscode(options: FakeVscodeOptions): FakeVscode & typeof vscod
         commandCalls.push({ command, args });
 
         if (command === 'vscode.executeDocumentSymbolProvider') {
+          if (options.throwDocumentSymbols) {
+            throw new Error('Document symbols are not ready.');
+          }
           return (options.documentSymbols ?? []) as T;
-        }
-
-        if (command === 'vscode.prepareTypeHierarchy') {
-          return (options.typeHierarchyItems ?? []) as T;
-        }
-
-        if (command === 'vscode.provideSupertypes') {
-          const item = args[0] as FakeTypeHierarchyItem;
-          return (options.supertypesByName?.get(item.name) ?? []) as T;
         }
 
         if (command === 'vscode.executeReferenceProvider') {
@@ -194,6 +281,18 @@ function createFakeVscode(options: FakeVscodeOptions): FakeVscode & typeof vscod
 
         throw new Error(`Unexpected command: ${command}`);
       }
+    },
+    workspace: {
+      async openTextDocument(uri: FakeUri) {
+        const text = options.documents?.get(uri.fsPath);
+        if (text === undefined) {
+          throw new Error(`Missing fake document: ${uri.fsPath}`);
+        }
+
+        return {
+          getText: () => text
+        };
+      }
     }
   };
 
@@ -203,27 +302,18 @@ function createFakeVscode(options: FakeVscodeOptions): FakeVscode & typeof vscod
 function namespaceSymbol(name: string, children: FakeDocumentSymbol[]): FakeDocumentSymbol {
   return {
     name,
-    kind: 2,
+    kind: 5,
     selectionRange: fakeRange(0, 0, 0, 0),
     children
   };
 }
 
-function classSymbol(name: string, line: number, character: number): FakeDocumentSymbol {
+function typeSymbol(name: string, kind: number, line: number, character: number): FakeDocumentSymbol {
   return {
     name,
-    kind: 1,
+    kind,
     selectionRange: fakeRange(line, character, line, character + name.length),
     children: []
-  };
-}
-
-function typeHierarchyItem(name: string, detail: string): FakeTypeHierarchyItem {
-  return {
-    name,
-    detail,
-    uri: fakeUri(`/metadata/${name}.cs`),
-    range: fakeRange(0, 0, 0, name.length)
   };
 }
 

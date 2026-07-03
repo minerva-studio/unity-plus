@@ -1,20 +1,20 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
 import type * as vscode from 'vscode';
-import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameClassFileSyncMode, runRenameClassCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
-import { CSharpClassSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
+import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, runRenameTypeCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { CSharpTopLevelTypeSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
 describe('renameSync', () => {
-  it('plans a file rename when the primary Unity class is renamed', () => {
+  it('plans a file rename when the primary top-level type is renamed', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/PlayerController.cs'),
-      unityClass('PlayerController'),
-      unityClass('HeroController')
+      topLevelType('PlayerController'),
+      topLevelType('HeroController')
     );
 
-    assert.strictEqual(plan?.oldClassName, 'PlayerController');
-    assert.strictEqual(plan?.newClassName, 'HeroController');
+    assert.strictEqual(plan?.oldTypeName, 'PlayerController');
+    assert.strictEqual(plan?.newTypeName, 'HeroController');
     assert.strictEqual(plan?.oldFilePath, normalize('/Project/Assets/PlayerController.cs'));
     assert.strictEqual(plan?.newFilePath, normalize('/Project/Assets/HeroController.cs'));
     assert.strictEqual(plan?.oldMetaPath, normalize('/Project/Assets/PlayerController.cs.meta'));
@@ -22,77 +22,77 @@ describe('renameSync', () => {
     assert.strictEqual(plan?.isUndo, false);
   });
 
-  it('does not plan class-to-file rename when sync mode is off', () => {
+  it('does not plan type-to-file rename when sync mode is off', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/PlayerController.cs'),
-      unityClass('PlayerController'),
-      unityClass('HeroController'),
+      topLevelType('PlayerController'),
+      topLevelType('HeroController'),
       'off'
     );
 
     assert.strictEqual(plan, undefined);
   });
 
-  it('does not plan ordinary C# class rename in unity-object mode', () => {
+  it('plans ordinary C# type rename when sync mode is on', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/PlainUtility.cs'),
-      ordinaryClass('PlainUtility'),
-      ordinaryClass('RenamedUtility'),
-      'unity-object'
+      ordinaryTopLevelType('PlainUtility'),
+      ordinaryTopLevelType('RenamedUtility'),
+      'on'
     );
 
-    assert.strictEqual(plan, undefined);
-  });
-
-  it('plans ordinary C# class rename in any mode', () => {
-    const plan = planScriptFilenameSync(
-      normalize('/Project/Assets/PlainUtility.cs'),
-      ordinaryClass('PlainUtility'),
-      ordinaryClass('RenamedUtility'),
-      'any'
-    );
-
-    assert.strictEqual(plan?.oldClassName, 'PlainUtility');
-    assert.strictEqual(plan?.newClassName, 'RenamedUtility');
+    assert.strictEqual(plan?.oldTypeName, 'PlainUtility');
+    assert.strictEqual(plan?.newTypeName, 'RenamedUtility');
     assert.strictEqual(plan?.newFilePath, normalize('/Project/Assets/RenamedUtility.cs'));
   });
 
-  it('does not plan ordinary C# class rename in any mode when the provider cannot return one primary class', () => {
+  it('plans file rename for supported top-level type kinds', () => {
+    const cases = [
+      { kind: 'class', oldName: 'PlayerController', newName: 'HeroController' },
+      { kind: 'struct', oldName: 'HeroStats', newName: 'EnemyStats' },
+      { kind: 'enum', oldName: 'CombatState', newName: 'BattleState' },
+      { kind: 'interface', oldName: 'IQuestRule', newName: 'IObjectiveRule' },
+      { kind: 'record', oldName: 'QuestDefinition', newName: 'MissionDefinition' }
+    ] as const;
+
+    for (const testCase of cases) {
+      const plan = planScriptFilenameSync(
+        normalize(`/Project/Assets/${testCase.oldName}.cs`),
+        topLevelType(testCase.oldName, testCase.kind),
+        topLevelType(testCase.newName, testCase.kind),
+        'on'
+      );
+
+      assert.strictEqual(plan?.newFilePath, normalize(`/Project/Assets/${testCase.newName}.cs`));
+    }
+  });
+
+  it('does not plan ordinary C# type rename when the provider cannot return one primary top-level type', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/PlainUtility.cs'),
-      ordinaryClass('PlainUtility'),
+      ordinaryTopLevelType('PlainUtility'),
       undefined,
-      'any'
+      'on'
     );
 
     assert.strictEqual(plan, undefined);
   });
 
-  it('does not rename files that do not match the old class name', () => {
+  it('does not rename files that do not match the old type name', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/CustomName.cs'),
-      unityClass('PlayerController'),
-      unityClass('HeroController')
+      topLevelType('PlayerController'),
+      topLevelType('HeroController')
     );
 
     assert.strictEqual(plan, undefined);
   });
 
-  it('does not rename when the provider cannot return one Unity primary class', () => {
+  it('does not rename when the provider cannot return one primary top-level type', () => {
     const plan = planScriptFilenameSync(
       normalize('/Project/Assets/PlayerController.cs'),
-      unityClass('PlayerController'),
+      topLevelType('PlayerController'),
       undefined
-    );
-
-    assert.strictEqual(plan, undefined);
-  });
-
-  it('does not rename in unity-object mode when the current class is not a Unity object', () => {
-    const plan = planScriptFilenameSync(
-      normalize('/Project/Assets/PlayerController.cs'),
-      unityClass('PlayerController'),
-      ordinaryClass('HeroController')
     );
 
     assert.strictEqual(plan, undefined);
@@ -306,9 +306,9 @@ describe('renameSync', () => {
     const result = await syncScriptRenameAfterClassChange({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      oldClass: unityClass(plan.oldClassName),
-      languageService: createFakeLanguageService(unityClass(plan.newClassName)),
+      mode: 'on',
+      oldType: topLevelType(plan.oldTypeName),
+      languageService: createFakeLanguageService(topLevelType(plan.newTypeName)),
       operations: {
         fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
         applyRenameOperations: async operations => {
@@ -336,7 +336,7 @@ describe('renameSync', () => {
       { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
     ]);
     assert.strictEqual(messages[0], 'Unity Plus: Renamed PlayerController.cs -> HeroController.cs');
-    assert.strictEqual(result.appliedPlan?.newClassName, plan.newClassName);
+    assert.strictEqual(result.appliedPlan?.newTypeName, plan.newTypeName);
   });
 
   it('waits before reading the C# language service for class rename sync', async () => {
@@ -346,9 +346,9 @@ describe('renameSync', () => {
     await syncScriptRenameAfterClassChange({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      oldClass: unityClass(plan.oldClassName),
-      languageService: createFakeLanguageService(unityClass(plan.newClassName)),
+      mode: 'on',
+      oldType: topLevelType(plan.oldTypeName),
+      languageService: createFakeLanguageService(topLevelType(plan.newTypeName)),
       operations: {
         fileExists: async () => true,
         applyRenameOperations: async () => true,
@@ -373,15 +373,15 @@ describe('renameSync', () => {
     const waited: number[] = [];
     const plan = createSyncPlan();
     const classes = [
-      unityClass(plan.oldClassName),
-      unityClass(plan.newClassName)
+      topLevelType(plan.oldTypeName),
+      topLevelType(plan.newTypeName)
     ];
 
     const result = await syncScriptRenameAfterClassChange({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      oldClass: unityClass(plan.oldClassName),
+      mode: 'on',
+      oldType: topLevelType(plan.oldTypeName),
       languageService: createSequenceLanguageService(classes),
       operations: {
         fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
@@ -401,7 +401,7 @@ describe('renameSync', () => {
     });
 
     assert.deepStrictEqual(waited, [400, 200]);
-    assert.strictEqual(result.appliedPlan?.newClassName, plan.newClassName);
+    assert.strictEqual(result.appliedPlan?.newTypeName, plan.newTypeName);
   });
 
   it('does not show progress when class rename sync has no plan', async () => {
@@ -411,9 +411,9 @@ describe('renameSync', () => {
     const result = await syncScriptRenameAfterClassChange({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      oldClass: unityClass(plan.oldClassName),
-      languageService: createFakeLanguageService(unityClass(plan.oldClassName)),
+      mode: 'on',
+      oldType: topLevelType(plan.oldTypeName),
+      languageService: createFakeLanguageService(topLevelType(plan.oldTypeName)),
       operations: {
         fileExists: async () => true,
         applyRenameOperations: async () => true,
@@ -448,9 +448,9 @@ describe('renameSync', () => {
     const result = await syncScriptRenameAfterClassChange({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      oldClass: unityClass(plan.oldClassName),
-      languageService: createFakeLanguageService(unityClass(plan.newClassName)),
+      mode: 'on',
+      oldType: topLevelType(plan.oldTypeName),
+      languageService: createFakeLanguageService(topLevelType(plan.newTypeName)),
       operations: {
         fileExists: async path => path === plan.oldFilePath || path === plan.newFilePath,
         applyRenameOperations: async () => true,
@@ -479,11 +479,11 @@ describe('renameSync', () => {
     const result = await executeAtomicScriptRename({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       cursor: { line: 2, character: 18 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
       fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async edit => {
@@ -508,11 +508,11 @@ describe('renameSync', () => {
     const result = await executeAtomicScriptRename({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       cursor: { line: 2, character: 18 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
       fileExists: async path => path === plan.oldFilePath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => true,
@@ -525,37 +525,17 @@ describe('renameSync', () => {
     ]);
   });
 
-  it('falls back from atomic rename when the cursor is not on the primary class name', async () => {
+  it('falls back from atomic rename when the cursor is not on the primary top-level type name', async () => {
     const plan = createSyncPlan();
 
     const result = await executeAtomicScriptRename({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       cursor: { line: 8, character: 4 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), new FakeWorkspaceEdit()),
-      fileExists: async () => true,
-      createFileUri: fakeUri,
-      applyWorkspaceEdit: async () => true,
-      logger: createTestLogger()
-    });
-
-    assert.strictEqual(result.kind, 'fallback');
-  });
-
-  it('falls back from atomic rename in unity-object mode for non-Unity classes', async () => {
-    const plan = createSyncPlan();
-
-    const result = await executeAtomicScriptRename({
-      uri: fakeUri(plan.oldFilePath),
-      filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: ordinaryClassAt(plan.oldClassName, 2, 14),
-      cursor: { line: 2, character: 18 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(ordinaryClassAt(plan.oldClassName, 2, 14), new FakeWorkspaceEdit()),
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), new FakeWorkspaceEdit()),
       fileExists: async () => true,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => true,
@@ -573,11 +553,11 @@ describe('renameSync', () => {
     const result = await executeAtomicScriptRename({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       cursor: { line: 2, character: 18 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
       fileExists: async path => path === plan.oldFilePath || path === plan.newFilePath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => {
@@ -600,11 +580,11 @@ describe('renameSync', () => {
     const result = await executeAtomicScriptRename({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       cursor: { line: 2, character: 18 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), csharpEdit),
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
       fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath || path === plan.newMetaPath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => {
@@ -625,11 +605,11 @@ describe('renameSync', () => {
     const result = await executeAtomicScriptRename({
       uri: fakeUri(plan.oldFilePath),
       filePath: plan.oldFilePath,
-      mode: 'unity-object',
-      currentClass: unityClassAt(plan.oldClassName, 2, 14),
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       cursor: { line: 2, character: 18 },
-      newClassName: plan.newClassName,
-      languageService: createFakeLanguageService(unityClassAt(plan.oldClassName, 2, 14), new FakeWorkspaceEdit()),
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), new FakeWorkspaceEdit()),
       fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => false,
@@ -649,7 +629,7 @@ describe('renameSync', () => {
       }
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.progressTitles, ['Unity Plus: Preparing rename...']);
@@ -664,54 +644,54 @@ describe('renameSync', () => {
       editor: createCSharpEditor(plan.oldFilePath)
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
     assert.strictEqual(runtime.messages.some(message => message.includes('Rename sync mode is off')), true);
   });
 
-  it('falls back with a visible message when the cursor is not on the primary class name', async () => {
+  it('falls back with a visible message when the cursor is not on the primary top-level type name', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 8, character: 2 }),
-      primaryClass: unityClassAt(plan.oldClassName, 2, 14)
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14)
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
-    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the script class name')), true);
+    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the primary top-level type name')), true);
   });
 
-  it('falls back with a visible message when class and file names do not match', async () => {
+  it('falls back with a visible message when type and file names do not match', async () => {
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(normalize('/Project/Assets/CustomName.cs'), { line: 2, character: 18 }),
-      primaryClass: unityClassAt('PlayerController', 2, 14)
+      primaryTopLevelType: topLevelTypeAt('PlayerController', 2, 14)
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
-    assert.strictEqual(runtime.messages.some(message => message.includes('class/file names do not match')), true);
+    assert.strictEqual(runtime.messages.some(message => message.includes('type/file names do not match')), true);
   });
 
-  it('shows preparing and renaming progress for valid atomic class rename command', async () => {
+  it('shows preparing and renaming progress for valid atomic type rename command', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
-      primaryClass: unityClassAt(plan.oldClassName, 2, 14),
-      inputValue: plan.newClassName
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      inputValue: plan.newTypeName
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'applied');
     assert.deepStrictEqual(runtime.progressTitles, [
       'Unity Plus: Preparing rename...',
-      'Unity Plus: Renaming class and script file...'
+      'Unity Plus: Renaming type and script file...'
     ]);
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
     assert.strictEqual(runtime.messages.length, 0);
@@ -719,50 +699,50 @@ describe('renameSync', () => {
     assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
   });
 
-  it('retries command primary class lookup before falling back', async () => {
+  it('retries command primary top-level type lookup before falling back', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
-      primaryClasses: [
+      primaryTopLevelTypes: [
         undefined,
-        unityClassAt(plan.oldClassName, 2, 14)
+        topLevelTypeAt(plan.oldTypeName, 2, 14)
       ],
-      inputValue: plan.newClassName
+      inputValue: plan.newTypeName
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'applied');
     assert.deepStrictEqual(runtime.waited, [200]);
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
   });
 
-  it('does not retry command fallback when cursor is not on the class name', async () => {
+  it('does not retry command fallback when cursor is not on the type name', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 8, character: 2 }),
-      primaryClass: unityClassAt(plan.oldClassName, 2, 14)
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14)
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.waited, []);
-    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the script class name')), true);
+    assert.strictEqual(runtime.messages.some(message => message.includes('cursor is not on the primary top-level type name')), true);
   });
 
-  it('falls back after command primary class lookup timeout', async () => {
+  it('falls back after command primary top-level type lookup timeout', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
-      primaryClasses: [undefined, undefined, undefined, undefined]
+      primaryTopLevelTypes: [undefined, undefined, undefined, undefined]
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
-    assert.strictEqual(runtime.messages.some(message => message.includes('no primary C# class was found')), true);
+    assert.strictEqual(runtime.messages.some(message => message.includes('no primary top-level C# type was found')), true);
     assert.deepStrictEqual(runtime.waited, [200, 200, 200]);
   });
 
@@ -770,11 +750,11 @@ describe('renameSync', () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
-      primaryClass: unityClassAt(plan.oldClassName, 2, 14),
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       inputValue: undefined
     });
 
-    const result = await runRenameClassCommand(runtime);
+    const result = await runRenameTypeCommand(runtime);
 
     assert.strictEqual(result.kind, 'cancelled');
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
@@ -782,12 +762,12 @@ describe('renameSync', () => {
     assert.deepStrictEqual(runtime.warnings, []);
   });
 
-  it('inverts a class-to-file rename plan for undo', () => {
+  it('inverts a type-to-file rename plan for undo', () => {
     const plan = createSyncPlan();
     const undoPlan = invertScriptFilenameSyncPlan(plan);
 
-    assert.strictEqual(undoPlan.oldClassName, plan.newClassName);
-    assert.strictEqual(undoPlan.newClassName, plan.oldClassName);
+    assert.strictEqual(undoPlan.oldTypeName, plan.newTypeName);
+    assert.strictEqual(undoPlan.newTypeName, plan.oldTypeName);
     assert.strictEqual(undoPlan.oldFilePath, plan.newFilePath);
     assert.strictEqual(undoPlan.newFilePath, plan.oldFilePath);
     assert.strictEqual(undoPlan.oldMetaPath, plan.newMetaPath);
@@ -795,13 +775,13 @@ describe('renameSync', () => {
     assert.strictEqual(undoPlan.isUndo, true);
   });
 
-  it('plans undo from the last applied class-to-file rename', () => {
+  it('plans undo from the last applied type-to-file rename', () => {
     const previousPlan = createSyncPlan();
     const undoPlan = planScriptFilenameSync(
       previousPlan.newFilePath,
-      unityClass(previousPlan.newClassName),
-      unityClass(previousPlan.oldClassName),
-      'unity-object',
+      topLevelType(previousPlan.newTypeName),
+      topLevelType(previousPlan.oldTypeName),
+      'on',
       { plan: previousPlan }
     );
 
@@ -812,10 +792,10 @@ describe('renameSync', () => {
     assert.strictEqual(undoPlan?.isUndo, true);
   });
 
-  it('plans undo for ordinary C# class rename in any mode', () => {
+  it('plans undo for ordinary C# type rename when sync mode is on', () => {
     const previousPlan: ScriptFilenameSyncPlan = {
-      oldClassName: 'PlainUtility',
-      newClassName: 'RenamedUtility',
+      oldTypeName: 'PlainUtility',
+      newTypeName: 'RenamedUtility',
       oldFilePath: normalize('/Project/Assets/PlainUtility.cs'),
       newFilePath: normalize('/Project/Assets/RenamedUtility.cs'),
       oldMetaPath: normalize('/Project/Assets/PlainUtility.cs.meta'),
@@ -824,9 +804,9 @@ describe('renameSync', () => {
     };
     const undoPlan = planScriptFilenameSync(
       previousPlan.newFilePath,
-      ordinaryClass(previousPlan.newClassName),
-      ordinaryClass(previousPlan.oldClassName),
-      'any',
+      ordinaryTopLevelType(previousPlan.newTypeName),
+      ordinaryTopLevelType(previousPlan.oldTypeName),
+      'on',
       { plan: previousPlan }
     );
 
@@ -835,7 +815,7 @@ describe('renameSync', () => {
     assert.strictEqual(undoPlan?.isUndo, true);
   });
 
-  it('registers only rename commands when class/file sync mode is off', () => {
+  it('registers only rename commands when type/file sync mode is off', () => {
     const runtime = createRenameFeatureRuntime();
 
     registerRenameFeature(createTestLogger(), {
@@ -859,7 +839,7 @@ describe('renameSync', () => {
 
     registerRenameFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
-      getMode: () => 'unity-object'
+      getMode: () => 'on'
     });
 
     assert.strictEqual(runtime.renameFileListeners, 1);
@@ -874,7 +854,7 @@ describe('renameSync', () => {
 
     registerRenameFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
-      getMode: () => 'unity-object',
+      getMode: () => 'on',
       isUnityWorkspace: false
     });
 
@@ -886,17 +866,20 @@ describe('renameSync', () => {
   });
 });
 
-function unityClass(className: string): CSharpClassSnapshot {
+function topLevelType(
+  className: string,
+  kind: CSharpTopLevelTypeSnapshot['kind'] = 'class'
+): CSharpTopLevelTypeSnapshot {
   return {
     name: className,
-    namespace: 'Minerva.Gameplay',
-    isUnityObject: true
+    kind,
+    namespace: 'Minerva.Gameplay'
   };
 }
 
-function unityClassAt(className: string, line: number, character: number): CSharpClassSnapshot {
+function topLevelTypeAt(className: string, line: number, character: number): CSharpTopLevelTypeSnapshot {
   return {
-    ...unityClass(className),
+    ...topLevelType(className),
     position: { line, character },
     nameRange: {
       start: { line, character },
@@ -905,17 +888,17 @@ function unityClassAt(className: string, line: number, character: number): CShar
   };
 }
 
-function ordinaryClass(className: string): CSharpClassSnapshot {
+function ordinaryTopLevelType(className: string): CSharpTopLevelTypeSnapshot {
   return {
     name: className,
-    namespace: 'Minerva.Tools',
-    isUnityObject: false
+    kind: 'class',
+    namespace: 'Minerva.Tools'
   };
 }
 
-function ordinaryClassAt(className: string, line: number, character: number): CSharpClassSnapshot {
+function ordinaryTopLevelTypeAt(className: string, line: number, character: number): CSharpTopLevelTypeSnapshot {
   return {
-    ...ordinaryClass(className),
+    ...ordinaryTopLevelType(className),
     position: { line, character },
     nameRange: {
       start: { line, character },
@@ -925,12 +908,12 @@ function ordinaryClassAt(className: string, line: number, character: number): CS
 }
 
 function createFakeLanguageService(
-  primaryClass: CSharpClassSnapshot | undefined,
+  primaryTopLevelType: CSharpTopLevelTypeSnapshot | undefined,
   renameEdit?: unknown
 ): CSharpLanguageService {
   return {
-    async getPrimaryClass() {
-      return primaryClass;
+    async getPrimaryTopLevelType() {
+      return primaryTopLevelType;
     },
     async findReferences() {
       return [];
@@ -941,11 +924,11 @@ function createFakeLanguageService(
   };
 }
 
-function createSequenceLanguageService(classes: CSharpClassSnapshot[]): CSharpLanguageService {
+function createSequenceLanguageService(classes: CSharpTopLevelTypeSnapshot[]): CSharpLanguageService {
   let index = 0;
 
   return {
-    async getPrimaryClass() {
+    async getPrimaryTopLevelType() {
       const current = classes[Math.min(index, classes.length - 1)];
       index += 1;
       return current;
@@ -959,11 +942,11 @@ function createSequenceLanguageService(classes: CSharpClassSnapshot[]): CSharpLa
   };
 }
 
-function createOptionalSequenceLanguageService(classes: Array<CSharpClassSnapshot | undefined>): CSharpLanguageService {
+function createOptionalSequenceLanguageService(classes: Array<CSharpTopLevelTypeSnapshot | undefined>): CSharpLanguageService {
   let index = 0;
 
   return {
-    async getPrimaryClass() {
+    async getPrimaryTopLevelType() {
       const current = classes[Math.min(index, classes.length - 1)];
       index += 1;
       return current;
@@ -1003,9 +986,9 @@ interface RenameCommandRuntimeOptions {
     filePath: string;
     cursor: { line: number; character: number };
   };
-  mode?: RenameClassFileSyncMode;
-  primaryClass?: CSharpClassSnapshot;
-  primaryClasses?: Array<CSharpClassSnapshot | undefined>;
+  mode?: RenameFileSyncMode;
+  primaryTopLevelType?: CSharpTopLevelTypeSnapshot;
+  primaryTopLevelTypes?: Array<CSharpTopLevelTypeSnapshot | undefined>;
   inputValue?: string;
 }
 
@@ -1019,13 +1002,13 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const unmarkedSyncing: string[] = [];
   const appliedEdits: unknown[] = [];
   const waited: number[] = [];
-  const languageService = options.primaryClasses
-    ? createOptionalSequenceLanguageService(options.primaryClasses)
-    : createFakeLanguageService(options.primaryClass, new FakeWorkspaceEdit());
+  const languageService = options.primaryTopLevelTypes
+    ? createOptionalSequenceLanguageService(options.primaryTopLevelTypes)
+    : createFakeLanguageService(options.primaryTopLevelType, new FakeWorkspaceEdit());
 
   const runtime = {
     editor: options.editor,
-    mode: options.mode ?? 'unity-object',
+    mode: options.mode ?? 'on',
     languageService,
     async showInputBox() {
       return options.inputValue;
@@ -1093,8 +1076,8 @@ function createCSharpEditor(
 
 function createSyncPlan(): ScriptFilenameSyncPlan {
   return {
-    oldClassName: 'PlayerController',
-    newClassName: 'HeroController',
+    oldTypeName: 'PlayerController',
+    newTypeName: 'HeroController',
     oldFilePath: normalize('/Project/Assets/PlayerController.cs'),
     newFilePath: normalize('/Project/Assets/HeroController.cs'),
     oldMetaPath: normalize('/Project/Assets/PlayerController.cs.meta'),
