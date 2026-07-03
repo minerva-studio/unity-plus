@@ -67,7 +67,9 @@ export async function activateUnityPlus(
       metadataIndex,
       getCacheVersion: () => eventReferenceCacheVersion
     }),
-    dependencies.registerMetaFilesFeature(logger),
+    dependencies.registerMetaFilesFeature(logger, {
+      root: unityWorkspace.root
+    }),
     runtime.registerCommand('unityPlus.rescanUnityProject', async () => {
       const refreshed = await dependencies.detectUnityWorkspace(runtime.workspaceFolders ?? []);
       logWorkspaceDetection(logger, refreshed, 'rescan found');

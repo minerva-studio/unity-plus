@@ -6,13 +6,15 @@ import {
   hideMetaFilesInExplorerIfEnabled,
   metaFilesExcludePattern,
   provideMetaFileCodeLenses,
-  registerMetaFilesFeature
+  registerMetaFilesFeature,
+  toUnityAssetPath
 } from '../features/meta-files/metaFiles';
 import { UnityPlusLogger } from '../unity/logger';
 
 describe('metaFiles', () => {
-  it('shows a CodeLens when a matching Unity meta file exists', async () => {
+  it('shows meta and Open In Unity CodeLens entries when a matching Unity meta file exists', async () => {
     const runtime = createMetaFilesRuntime();
+    const root = createUri('/Project');
     const document = createTextDocument('/Project/Assets/Player.cs');
     runtime.files.set('/Project/Assets/Player.cs.meta', [
       'fileFormatVersion: 2',
@@ -20,20 +22,25 @@ describe('metaFiles', () => {
       'MonoImporter:'
     ].join('\n'));
 
-    const lenses = await provideMetaFileCodeLenses(runtime.runtime, document);
+    const lenses = await provideMetaFileCodeLenses(runtime.runtime, document, root);
 
-    assert.strictEqual(lenses.length, 1);
+    assert.strictEqual(lenses.length, 2);
     assert.strictEqual(lenses[0].command?.title, 'Meta: guid 12345678, MonoImporter');
     assert.strictEqual(lenses[0].command?.command, 'unityPlus.openMetaFile');
+    assert.strictEqual(lenses[1].command?.title, 'Open In Unity');
+    assert.strictEqual(lenses[1].command?.command, 'unityPlus.openInUnity');
   });
 
-  it('does not show a CodeLens when the matching meta file is missing', async () => {
+  it('shows Open In Unity CodeLens when the matching meta file is missing', async () => {
     const runtime = createMetaFilesRuntime();
+    const root = createUri('/Project');
     const document = createTextDocument('/Project/Assets/Missing.prefab');
 
-    const lenses = await provideMetaFileCodeLenses(runtime.runtime, document);
+    const lenses = await provideMetaFileCodeLenses(runtime.runtime, document, root);
 
-    assert.deepStrictEqual(lenses, []);
+    assert.strictEqual(lenses.length, 1);
+    assert.strictEqual(lenses[0].command?.title, 'Open In Unity');
+    assert.strictEqual(lenses[0].command?.command, 'unityPlus.openInUnity');
   });
 
   it('does not show a CodeLens for meta files themselves', async () => {
@@ -48,6 +55,17 @@ describe('metaFiles', () => {
 
   it('falls back to a safe summary for malformed meta content', () => {
     assert.strictEqual(formatMetaFileSummary('fileFormatVersion: 2'), 'Meta');
+  });
+
+  it('converts workspace asset resources to Unity asset paths', () => {
+    assert.strictEqual(
+      toUnityAssetPath(createUri('C:/Project'), createUri('C:/Project/Assets/Icon.png.meta')),
+      'Assets/Icon.png'
+    );
+    assert.strictEqual(
+      toUnityAssetPath(createUri('C:/Project'), createUri('C:/Project/Packages/manifest.json')),
+      undefined
+    );
   });
 
   it('writes the Unity meta exclude pattern when hiding is enabled', async () => {
@@ -148,6 +166,55 @@ describe('metaFiles', () => {
     assert.strictEqual(runtime.openedDocuments.length, 0);
     assert.strictEqual(runtime.warningMessages[0], 'Unity Plus: Meta file not found for /Project/Assets/Missing.png');
   });
+
+  it('sends the Unity asset path through the Open In Unity command', async () => {
+    const runtime = createMetaFilesRuntime();
+    const root = createUri('/Project');
+
+    registerMetaFilesFeature(createTestLogger(), {
+      root,
+      runtimeVscode: runtime.runtime,
+      sendOpenInUnity: async (projectRoot, assetPath) => {
+        runtime.openInUnityRequests.push({ projectRoot, assetPath });
+        return true;
+      }
+    });
+    await runtime.runCommand('unityPlus.openInUnity', createUri('/Project/Assets/Icon.png.meta'));
+
+    assert.deepStrictEqual(runtime.openInUnityRequests, [{
+      projectRoot: '/Project',
+      assetPath: 'Assets/Icon.png'
+    }]);
+  });
+
+  it('warns when Open In Unity cannot resolve an Assets path', async () => {
+    const runtime = createMetaFilesRuntime();
+
+    registerMetaFilesFeature(createTestLogger(), {
+      root: createUri('/Project'),
+      runtimeVscode: runtime.runtime,
+      sendOpenInUnity: async () => true
+    });
+    await runtime.runCommand('unityPlus.openInUnity', createUri('/Project/Packages/manifest.json'));
+
+    assert.strictEqual(runtime.warningMessages[0], 'Unity Plus: Open In Unity only supports Assets folder resources.');
+  });
+
+  it('warns when the Unity IDE messaging endpoint is missing', async () => {
+    const runtime = createMetaFilesRuntime();
+
+    registerMetaFilesFeature(createTestLogger(), {
+      root: createUri('/Project'),
+      runtimeVscode: runtime.runtime,
+      sendOpenInUnity: async () => false
+    });
+    await runtime.runCommand('unityPlus.openInUnity', createUri('/Project/Assets/Icon.png'));
+
+    assert.strictEqual(
+      runtime.warningMessages[0],
+      'Unity Plus: Unity IDE messaging endpoint was not found. Open Unity and enable the Visual Studio Editor package.'
+    );
+  });
 });
 
 interface MetaFilesRuntimeOptions {
@@ -160,6 +227,7 @@ interface MetaFilesRuntimeOptions {
 interface MetaFilesRuntime {
   runtime: typeof vscode;
   files: Map<string, string>;
+  openInUnityRequests: Array<{ projectRoot: string; assetPath: string }>;
   filesExcludeUpdates: Record<string, boolean>[];
   configurationTargets: vscode.ConfigurationTarget[];
   openedDocuments: vscode.TextDocument[];
@@ -171,6 +239,7 @@ interface MetaFilesRuntime {
 function createMetaFilesRuntime(options: MetaFilesRuntimeOptions = {}): MetaFilesRuntime {
   const commands = new Map<string, (...args: unknown[]) => unknown>();
   const files = new Map<string, string>();
+  const openInUnityRequests: Array<{ projectRoot: string; assetPath: string }> = [];
   const filesExcludeUpdates: Record<string, boolean>[] = [];
   const configurationTargets: vscode.ConfigurationTarget[] = [];
   const openedDocuments: vscode.TextDocument[] = [];
@@ -268,6 +337,7 @@ function createMetaFilesRuntime(options: MetaFilesRuntimeOptions = {}): MetaFile
   return {
     runtime,
     files,
+    openInUnityRequests,
     filesExcludeUpdates,
     configurationTargets,
     openedDocuments,

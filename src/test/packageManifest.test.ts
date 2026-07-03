@@ -14,6 +14,7 @@ describe('package manifest', () => {
       'onCommand:unityPlus.syncClassName',
       'onCommand:unityPlus.showUnityEventReferences',
       'onCommand:unityPlus.openMetaFile',
+      'onCommand:unityPlus.openInUnity',
       'onCommand:unityPlus.rescanUnityProject'
     ]);
   });
@@ -48,7 +49,16 @@ describe('package manifest', () => {
     assert.strictEqual(command?.title, 'Unity Plus: Open Meta File');
   });
 
-  it('shows the Unity meta command in Explorer and editor title menus', () => {
+  it('contributes an explicit command for opening resources in Unity', () => {
+    const manifest = readPackageManifest();
+    const command = manifest.contributes.commands.find((item: { command: string }) =>
+      item.command === 'unityPlus.openInUnity'
+    );
+
+    assert.strictEqual(command?.title, 'Unity Plus: Open In Unity');
+  });
+
+  it('shows Unity resource commands in Explorer and editor title menus', () => {
     const manifest = readPackageManifest();
     const explorerCommand = manifest.contributes.menus['explorer/context'].find((item: { command: string }) =>
       item.command === 'unityPlus.openMetaFile'
@@ -56,9 +66,17 @@ describe('package manifest', () => {
     const editorTitleCommand = manifest.contributes.menus['editor/title'].find((item: { command: string }) =>
       item.command === 'unityPlus.openMetaFile'
     );
+    const explorerOpenInUnityCommand = manifest.contributes.menus['explorer/context'].find((item: { command: string }) =>
+      item.command === 'unityPlus.openInUnity'
+    );
+    const editorTitleOpenInUnityCommand = manifest.contributes.menus['editor/title'].find((item: { command: string }) =>
+      item.command === 'unityPlus.openInUnity'
+    );
 
     assert.strictEqual(explorerCommand?.when, 'resourceScheme == file');
     assert.strictEqual(editorTitleCommand?.when, 'resourceScheme == file');
+    assert.strictEqual(explorerOpenInUnityCommand?.when, 'resourceScheme == file');
+    assert.strictEqual(editorTitleOpenInUnityCommand?.when, 'resourceScheme == file');
   });
 
   it('enables optional F2 override for C# rename by default', () => {

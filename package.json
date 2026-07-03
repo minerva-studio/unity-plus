@@ -23,6 +23,7 @@
     "onCommand:unityPlus.syncClassName",
     "onCommand:unityPlus.showUnityEventReferences",
     "onCommand:unityPlus.openMetaFile",
+    "onCommand:unityPlus.openInUnity",
     "onCommand:unityPlus.rescanUnityProject"
   ],
   "main": "./out/extension.js",
@@ -49,6 +50,10 @@
         "title": "Unity Plus: Open Meta File"
       },
       {
+        "command": "unityPlus.openInUnity",
+        "title": "Unity Plus: Open In Unity"
+      },
+      {
         "command": "unityPlus.rescanUnityProject",
         "title": "Unity Plus: Rescan Unity Project"
       }
@@ -66,11 +71,21 @@
           "command": "unityPlus.openMetaFile",
           "when": "resourceScheme == file",
           "group": "navigation"
+        },
+        {
+          "command": "unityPlus.openInUnity",
+          "when": "resourceScheme == file",
+          "group": "navigation"
         }
       ],
       "editor/title": [
         {
           "command": "unityPlus.openMetaFile",
+          "when": "resourceScheme == file",
+          "group": "navigation"
+        },
+        {
+          "command": "unityPlus.openInUnity",
           "when": "resourceScheme == file",
           "group": "navigation"
         }
