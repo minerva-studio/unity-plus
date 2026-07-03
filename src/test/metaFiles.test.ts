@@ -23,7 +23,7 @@ describe('metaFiles', () => {
     const lenses = await provideMetaFileCodeLenses(runtime.runtime, document);
 
     assert.strictEqual(lenses.length, 1);
-    assert.strictEqual(lenses[0].command?.title, 'Meta | guid 12345678 | MonoImporter - Open Meta');
+    assert.strictEqual(lenses[0].command?.title, 'Meta: guid 12345678, MonoImporter');
     assert.strictEqual(lenses[0].command?.command, 'unityPlus.openMetaFile');
   });
 

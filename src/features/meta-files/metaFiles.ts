@@ -82,16 +82,21 @@ export async function provideMetaFileCodeLenses(
 
   return [
     new runtimeVscode.CodeLens(new runtimeVscode.Range(0, 0, 0, 0), {
-      title: `${formatMetaFileSummary(content)} - Open Meta`,
+      title: formatMetaFileTitle(content),
       command: 'unityPlus.openMetaFile',
       arguments: [metaUri]
     })
   ];
 }
 
+export function formatMetaFileTitle(content: string): string {
+  const summary = formatMetaFileSummary(content);
+  return summary ? `Meta: ${summary}` : 'Meta file';
+}
+
 export function formatMetaFileSummary(content: string): string {
   const summary = parseMetaFileSummary(content);
-  const parts = ['Meta'];
+  const parts: string[] = [];
 
   if (summary.guid) {
     parts.push(`guid ${shortenGuid(summary.guid)}`);
@@ -101,7 +106,7 @@ export function formatMetaFileSummary(content: string): string {
     parts.push(summary.importer);
   }
 
-  return parts.join(' | ');
+  return parts.length > 0 ? parts.join(', ') : 'Meta';
 }
 
 function parseMetaFileSummary(content: string): MetaFileSummary {
