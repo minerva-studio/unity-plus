@@ -699,6 +699,21 @@ describe('renameSync', () => {
     assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
   });
 
+  it('renames without waiting when the source snapshot already has the primary top-level type', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      inputValue: plan.newTypeName
+    });
+
+    const result = await runRenameTypeCommand(runtime);
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(runtime.waited, []);
+    assert.deepStrictEqual(runtime.nativeRenameCalls, []);
+  });
+
   it('retries command primary top-level type lookup before falling back', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({

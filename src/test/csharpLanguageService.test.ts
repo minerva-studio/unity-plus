@@ -3,13 +3,21 @@ import type * as vscode from 'vscode';
 import { createVscodeCSharpLanguageService } from '../unity/csharpLanguageService';
 
 describe('csharpLanguageService', () => {
-  it('returns the single top-level type from document symbols', async () => {
+  it('returns the single top-level type from source text before reading document symbols', async () => {
     const runtimeVscode = createFakeVscode({
       documentSymbols: [
         namespaceSymbol('Minerva.Gameplay', [
-          typeSymbol('PlayerController', 1, 4, 12)
+          typeSymbol('StaleController', 1, 4, 12)
         ])
-      ]
+      ],
+      documents: new Map([
+        ['/Project/Assets/PlayerController.cs', [
+          'namespace Minerva.Gameplay;',
+          'public class PlayerController',
+          '{',
+          '}'
+        ].join('\n')]
+      ])
     });
     const service = createVscodeCSharpLanguageService(runtimeVscode);
 
@@ -18,24 +26,35 @@ describe('csharpLanguageService', () => {
     assert.strictEqual(primaryType?.name, 'PlayerController');
     assert.strictEqual(primaryType?.kind, 'class');
     assert.strictEqual(primaryType?.namespace, 'Minerva.Gameplay');
-    assert.deepStrictEqual(primaryType?.position, { line: 4, character: 12 });
+    assert.deepStrictEqual(primaryType?.position, { line: 1, character: 13 });
+    assert.strictEqual(runtimeVscode.commandCalls.some(call => call.command === 'vscode.executeDocumentSymbolProvider'), false);
   });
 
-  it('returns undefined when document symbols contain multiple top-level types', async () => {
+  it('returns undefined when source text contains multiple top-level types', async () => {
     const runtimeVscode = createFakeVscode({
       documentSymbols: [
-        typeSymbol('FirstUtility', 1, 1, 0),
-        typeSymbol('SecondUtility', 1, 5, 0)
-      ]
+        typeSymbol('StaleSingleUtility', 1, 1, 0)
+      ],
+      documents: new Map([
+        ['/Project/Assets/Utilities.cs', [
+          'public class FirstUtility',
+          '{',
+          '}',
+          'public class SecondUtility',
+          '{',
+          '}'
+        ].join('\n')]
+      ])
     });
     const service = createVscodeCSharpLanguageService(runtimeVscode);
 
     const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/Utilities.cs'));
 
     assert.strictEqual(primaryType, undefined);
+    assert.strictEqual(runtimeVscode.commandCalls.some(call => call.command === 'vscode.executeDocumentSymbolProvider'), false);
   });
 
-  it('falls back to source scanning when document symbols are empty', async () => {
+  it('uses source scanning when document symbols are empty', async () => {
     const runtimeVscode = createFakeVscode({
       documentSymbols: [],
       documents: new Map([
@@ -59,7 +78,7 @@ describe('csharpLanguageService', () => {
     assert.deepStrictEqual(primaryType?.position, { line: 2, character: 14 });
   });
 
-  it('falls back to source scanning when document symbols throw', async () => {
+  it('uses source scanning when document symbols throw', async () => {
     const runtimeVscode = createFakeVscode({
       throwDocumentSymbols: true,
       documents: new Map([
@@ -144,6 +163,49 @@ describe('csharpLanguageService', () => {
 
     assert.strictEqual(outerType?.name, 'Outer');
     assert.strictEqual(manyTypes, undefined);
+  });
+
+  it('uses source text when document symbols are non-empty but incomplete', async () => {
+    const runtimeVscode = createFakeVscode({
+      documentSymbols: [
+        namespaceSymbol('Minerva.Gameplay', [])
+      ],
+      documents: new Map([
+        ['/Project/Assets/PlayerController.cs', [
+          'namespace Minerva.Gameplay',
+          '{',
+          '  public class PlayerController',
+          '  {',
+          '  }',
+          '}'
+        ].join('\n')]
+      ])
+    });
+    const service = createVscodeCSharpLanguageService(runtimeVscode);
+
+    const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/PlayerController.cs'));
+
+    assert.strictEqual(primaryType?.name, 'PlayerController');
+    assert.strictEqual(runtimeVscode.commandCalls.some(call => call.command === 'vscode.executeDocumentSymbolProvider'), false);
+  });
+
+  it('falls back to document symbols only when source text cannot be opened', async () => {
+    const runtimeVscode = createFakeVscode({
+      documentSymbols: [
+        namespaceSymbol('Minerva.Gameplay', [
+          typeSymbol('PlayerController', 1, 4, 12)
+        ])
+      ]
+    });
+    const service = createVscodeCSharpLanguageService(runtimeVscode);
+
+    const primaryType = await service.getPrimaryTopLevelType(fakeUri('/Project/Assets/PlayerController.cs'));
+
+    assert.strictEqual(primaryType?.name, 'PlayerController');
+    assert.strictEqual(primaryType?.kind, 'class');
+    assert.strictEqual(primaryType?.namespace, 'Minerva.Gameplay');
+    assert.deepStrictEqual(primaryType?.position, { line: 4, character: 12 });
+    assert.strictEqual(runtimeVscode.commandCalls.some(call => call.command === 'vscode.executeDocumentSymbolProvider'), true);
   });
 
   it('delegates reference lookup to the VS Code reference provider command', async () => {

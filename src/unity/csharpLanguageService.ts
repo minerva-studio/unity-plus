@@ -60,12 +60,13 @@ interface NamespaceRange {
 export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode): CSharpLanguageService {
   return {
     async getPrimaryTopLevelType(uri) {
-      const providerType = await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
-      if (providerType !== 'fallback') {
-        return providerType;
+      const sourceType = await getPrimaryTopLevelTypeFromSource(runtimeVscode, uri);
+      if (sourceType !== 'fallback') {
+        return sourceType;
       }
 
-      return await getPrimaryTopLevelTypeFromSource(runtimeVscode, uri);
+      const providerType = await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
+      return providerType === 'fallback' ? undefined : providerType;
     },
     async findReferences(uri, position) {
       const references = await runtimeVscode.commands.executeCommand<vscode.Location[]>(
@@ -216,9 +217,16 @@ function getTopLevelTypeKind(
 async function getPrimaryTopLevelTypeFromSource(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
-): Promise<CSharpTopLevelTypeSnapshot | undefined> {
-  const document = await runtimeVscode.workspace.openTextDocument(uri);
-  const source = document.getText();
+): Promise<CSharpTopLevelTypeSnapshot | 'fallback' | undefined> {
+  let source: string;
+
+  try {
+    const document = await runtimeVscode.workspace.openTextDocument(uri);
+    source = document.getText();
+  } catch {
+    return 'fallback';
+  }
+
   const masked = maskCommentsAndStrings(source);
   const lineStarts = buildLineStarts(source);
   const candidates = findSourceTopLevelTypes(masked);
