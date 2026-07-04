@@ -236,6 +236,34 @@ describe('eventReferences', () => {
     assert.strictEqual(diagnostics.serializedInstanceScriptDedupedTextHitCount, 0);
   });
 
+  it('uses the lightweight serialized instance scanner without heavy YAML parsing for script-only assets', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const assetUris = Array.from({ length: 8 }, (_, index) => createUri(`/Project/Assets/Generated/OnlyScript${index}.asset`));
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => assetUris,
+      findCSharpFiles: async () => [],
+      readTextFile: async () => createLooseScriptReferenceYaml(),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    const diagnostics = index.getDiagnostics();
+
+    assert.strictEqual(index.getSerializedInstanceCount(gateScriptPath), 24);
+    assert.strictEqual(diagnostics.lightweightSerializedScanAssetCount, 8);
+    assert.strictEqual(diagnostics.heavyParsedAssetCount, 0);
+    assert.strictEqual(diagnostics.skippedHeavyParserAssetCount, 8);
+    assert.strictEqual(diagnostics.persistentCallCount, 0);
+  });
+
   it('indexes ScriptableObject and MonoBehaviour serialized instances from asset files', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -320,6 +348,45 @@ describe('eventReferences', () => {
     assert.strictEqual(references[0].scriptPath, gateScriptPath);
     assert.strictEqual(references[0].line, 22);
     assert.strictEqual(references[0].character, 13);
+  });
+
+  it('uses the heavy YAML parser only for assets with UnityEvent calls or overrides', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [
+        createUri('/Project/Assets/Gate.prefab'),
+        createUri('/Project/Assets/GateVariant.prefab'),
+        createUri('/Project/Assets/OnlyScript.asset')
+      ],
+      findCSharpFiles: async () => [],
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('GateVariant.prefab')) {
+          return createPrefabOverrideYaml(2);
+        }
+
+        return uri.fsPath.endsWith('OnlyScript.asset')
+          ? createLooseScriptReferenceYaml()
+          : createPrefabYaml(2);
+      },
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    const diagnostics = index.getDiagnostics();
+
+    assert.strictEqual(diagnostics.lightweightSerializedScanAssetCount, 3);
+    assert.strictEqual(diagnostics.heavyParsedAssetCount, 2);
+    assert.strictEqual(diagnostics.skippedHeavyParserAssetCount, 1);
+    assert.strictEqual(diagnostics.persistentCallCount, 2);
+    assert.strictEqual(index.getReferenceCount(gateScriptPath, 'CanInteract'), 2);
   });
 
   it('keeps UnityEvent line numbers correct after many serialized documents', async () => {

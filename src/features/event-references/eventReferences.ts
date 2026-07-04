@@ -54,6 +54,9 @@ export interface UnityEventReferenceDiagnostics {
   assetCount: number;
   skippedAssetCount: number;
   canceledAssetCount: number;
+  lightweightSerializedScanAssetCount: number;
+  heavyParsedAssetCount: number;
+  skippedHeavyParserAssetCount: number;
   persistentCallCount: number;
   serializedInstanceCount: number;
   resolvedReferenceCount: number;
@@ -143,15 +146,6 @@ interface SerializedObjectScriptIdentity {
   source?: 'guid' | 'editorClassIdentifier';
 }
 
-interface SerializedScriptTextHit {
-  guid: string;
-  line: number;
-  character: number;
-  matchOffset: number;
-  document?: SerializedDocument;
-  object?: SerializedObjectRecord;
-}
-
 interface PersistentCallSnapshot {
   eventFieldName: string;
   ownerFileId?: string;
@@ -222,7 +216,11 @@ const prefabInstanceClassId = 1001;
 const assetGlobs = ['Assets/**/*', 'Packages/**/*'];
 const csharpGlobs = ['Assets/**/*.cs', 'Packages/**/*.cs'];
 const defaultAssetScanConcurrency = 4;
+const backgroundAssetScanConcurrency = 1;
 const scanYieldEvery = 4;
+const backgroundScanYieldEvery = 1;
+const backgroundBuildDebounceMilliseconds = 150;
+const serializedLineScanYieldEvery = 2000;
 const progressReportInterval = 10;
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
 const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
@@ -230,7 +228,6 @@ const documentHeaderPattern = /^--- !u!(\d+) &(-?\d+)/gm;
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
 const fileIdPattern = /fileID:\s*(-?\d+)/;
 const guidPattern = /guid:\s*([a-fA-F0-9]{32})/;
-const scriptReferencePattern = /^\s*m_Script:\s*\{([^}]*)\}/gm;
 const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 const unityEventTokenPattern = /(?:UnityEngine\.Events\.)?UnityEvent\b/g;
 const identifierPattern = /[A-Za-z_][A-Za-z0-9_]*/y;
@@ -378,9 +375,9 @@ export async function buildUnityEventReferenceIndex(
 
       runtime.logger.warn(`Could not scan UnityEvent references in ${assetUri.fsPath}: ${errorMessage(error)}`);
     }
-  }, defaultAssetScanConcurrency, {
+  }, context.mode === 'background' ? backgroundAssetScanConcurrency : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
-    yieldEvery: scanYieldEvery,
+    yieldEvery: context.mode === 'background' ? backgroundScanYieldEvery : scanYieldEvery,
     onProgress: (completedCount, totalCount) => {
       if (context.mode !== 'interactive') {
         return;
@@ -473,11 +470,29 @@ async function parseUnityEventReferencesCore(
   serializedInstances: UnitySerializedInstanceLocation[];
   diagnostics: UnityEventReferenceDiagnostics;
 }> {
+  const diagnostics = createEmptyDiagnostics();
+  diagnostics.lightweightSerializedScanAssetCount += 1;
+
+  const serializedInstances = await collectSerializedInstancesFromLineScan(
+    content,
+    assetPath,
+    assetKind,
+    metadataIndex,
+    resolveCSharpType,
+    diagnostics
+  );
+
+  if (!needsHeavyUnityEventParsing(content)) {
+    diagnostics.skippedHeavyParserAssetCount += 1;
+    diagnostics.serializedInstanceCount = serializedInstances.length;
+    return { references: [], serializedInstances, diagnostics };
+  }
+
+  diagnostics.heavyParsedAssetCount += 1;
+
   const documents = parseSerializedDocuments(content, assetPath, assetKind);
   const objects = new Map<string, SerializedObjectRecord>();
   const callsByDocument = new Map<string, PersistentCallSnapshot[]>();
-  const serializedInstances: UnitySerializedInstanceLocation[] = [];
-  const diagnostics = createEmptyDiagnostics();
 
   for (const document of documents) {
     const object = parseSerializedObject(document);
@@ -497,17 +512,6 @@ async function parseUnityEventReferencesCore(
       diagnostics.persistentCallCount += 1;
     }
   }
-
-  serializedInstances.push(...await collectSerializedInstancesFromScriptTextHits(
-    content,
-    assetPath,
-    assetKind,
-    documents,
-    objects,
-    metadataIndex,
-    resolveCSharpType,
-    diagnostics
-  ));
 
   const references: UnityEventReference[] = [];
   for (const [ownerFileId, calls] of callsByDocument) {
@@ -654,7 +658,7 @@ function createEventReferenceIndexController(runtime: EventReferenceRuntime): Un
       if (status === 'idle' || status === 'failed') {
         void forceBuild({ mode: 'background' });
       }
-    }, 0);
+    }, backgroundBuildDebounceMilliseconds);
   }
 
   return {
@@ -926,30 +930,44 @@ function parseSerializedObject(document: SerializedDocument): SerializedObjectRe
   };
 }
 
-async function collectSerializedInstancesFromScriptTextHits(
+async function collectSerializedInstancesFromLineScan(
   content: string,
   assetPath: string,
   assetKind: UnitySerializedAssetKind,
-  documents: readonly SerializedDocument[],
-  objects: ReadonlyMap<string, SerializedObjectRecord>,
   metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
   resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>,
   diagnostics: UnityEventReferenceDiagnostics
 ): Promise<UnitySerializedInstanceLocation[]> {
   const locations: UnitySerializedInstanceLocation[] = [];
+  const gameObjectNamesByFileId = new Map<string, string>();
   const seen = new Set<string>();
+  let currentClassId: number | undefined;
+  let currentFileId: string | undefined;
+  let currentDocumentStartOffset = 0;
+  let currentName: string | undefined;
+  let currentGameObjectFileId: string | undefined;
+  let currentEditorTypeName: string | undefined;
+  let pendingScript: { guid: string; line: number; character: number; lineStart: number } | undefined;
+  let lineStart = 0;
+  let lineNumber = 0;
 
-  for (const hit of scanSerializedScriptTextHits(content, documents, objects)) {
+  async function flushPendingScript(): Promise<void> {
+    if (!pendingScript) {
+      return;
+    }
+
+    const hit = pendingScript;
+    pendingScript = undefined;
     diagnostics.serializedInstanceScriptTextHitCount += 1;
 
     const textScriptPath = metadataIndex.getAssetPath(hit.guid);
-    const identity = textScriptPath
+    const identity: SerializedObjectScriptIdentity = textScriptPath
       ? {
         scriptPath: textScriptPath,
-        typeName: hit.object?.editorTypeName,
-        source: 'guid' as const
+        typeName: currentEditorTypeName,
+        source: 'guid'
       }
-      : await resolveSerializedObjectScriptIdentity(hit.object, metadataIndex, resolveCSharpType);
+      : await resolveSerializedLineScriptIdentity(currentEditorTypeName, resolveCSharpType);
 
     if (textScriptPath) {
       diagnostics.serializedInstanceScriptResolvedTextHitCount += 1;
@@ -957,16 +975,16 @@ async function collectSerializedInstancesFromScriptTextHits(
       diagnostics.serializedInstanceScriptUnresolvedTextHitCount += 1;
     }
 
-    trackSerializedInstanceScriptIdentity(diagnostics, hit.object, identity);
+    trackSerializedLineScriptIdentity(diagnostics, hit.guid, currentEditorTypeName, identity);
 
     if (!identity.scriptPath && !identity.typeName) {
-      continue;
+      return;
     }
 
-    const dedupeKey = serializedScriptTextHitKey(assetPath, hit);
+    const dedupeKey = serializedScriptLineHitKey(assetPath, currentFileId, currentDocumentStartOffset, hit.guid, hit.lineStart);
     if (seen.has(dedupeKey)) {
       diagnostics.serializedInstanceScriptDedupedTextHitCount += 1;
-      continue;
+      return;
     }
 
     seen.add(dedupeKey);
@@ -975,65 +993,117 @@ async function collectSerializedInstancesFromScriptTextHits(
       assetKind,
       line: hit.line,
       character: hit.character,
-      fileId: hit.document?.fileId ?? `offset:${hit.matchOffset}`,
+      fileId: currentFileId ?? `offset:${hit.lineStart}`,
       scriptPath: identity.scriptPath,
       scriptTypeName: identity.typeName,
-      name: hit.object?.name,
-      gameObjectName: getGameObjectName(objects, hit.object?.gameObjectFileId)
+      name: currentName,
+      gameObjectName: currentGameObjectFileId ? gameObjectNamesByFileId.get(currentGameObjectFileId) : undefined
     });
   }
+
+  // This scanner intentionally tracks only cheap per-document state; UnityEvent calls use the heavy parser later.
+  while (lineStart <= content.length) {
+    const nextLineBreak = content.indexOf('\n', lineStart);
+    const lineEnd = nextLineBreak === -1 ? content.length : nextLineBreak;
+    const rawLine = content.slice(lineStart, lineEnd);
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    const trimmed = line.trim();
+    const header = /^--- !u!(\d+) &(-?\d+)/.exec(line);
+
+    if (header) {
+      await flushPendingScript();
+      currentClassId = Number(header[1]);
+      currentFileId = header[2];
+      currentDocumentStartOffset = lineStart;
+      currentName = undefined;
+      currentGameObjectFileId = undefined;
+      currentEditorTypeName = undefined;
+    } else if (trimmed.startsWith('m_Name:')) {
+      currentName = valueAfterColon(trimmed);
+      if (currentClassId === gameObjectClassId && currentFileId && currentName) {
+        gameObjectNamesByFileId.set(currentFileId, currentName);
+      }
+    } else if (trimmed.startsWith('m_GameObject:')) {
+      currentGameObjectFileId = extractFileId(trimmed);
+    } else if (trimmed.startsWith('m_EditorClassIdentifier:')) {
+      currentEditorTypeName = parseEditorClassIdentifier(valueAfterColon(trimmed));
+    } else if (trimmed.startsWith('m_Script:')) {
+      const mapping = line.slice(line.indexOf('m_Script:') + 'm_Script:'.length);
+      const guid = guidPattern.exec(mapping)?.[1];
+
+      if (guid) {
+        await flushPendingScript();
+        pendingScript = {
+          guid,
+          line: lineNumber,
+          character: Math.max(0, line.indexOf(guid)),
+          lineStart
+        };
+      }
+    }
+
+    if (lineNumber > 0 && lineNumber % serializedLineScanYieldEvery === 0) {
+      await yieldToEventLoop();
+    }
+
+    if (nextLineBreak === -1) {
+      break;
+    }
+
+    lineStart = nextLineBreak + 1;
+    lineNumber += 1;
+  }
+
+  await flushPendingScript();
 
   return locations;
 }
 
-function scanSerializedScriptTextHits(
-  content: string,
-  documents: readonly SerializedDocument[],
-  objects: ReadonlyMap<string, SerializedObjectRecord>
-): SerializedScriptTextHit[] {
-  const hits: SerializedScriptTextHit[] = [];
-  let match: RegExpExecArray | null;
-
-  scriptReferencePattern.lastIndex = 0;
-  while ((match = scriptReferencePattern.exec(content))) {
-    const guid = guidPattern.exec(match[1])?.[1];
-    if (!guid) {
-      continue;
-    }
-
-    const guidOffset = content.indexOf(guid, match.index);
-    const document = findSerializedDocumentAtOffset(documents, match.index);
-
-    // Count by raw m_Script text first; YAML object details are enrichment only and must not gate the hit.
-    hits.push({
-      guid,
-      line: countLineBreaks(content, 0, match.index),
-      character: getCharacterAtOffset(content, guidOffset === -1 ? match.index : guidOffset),
-      matchOffset: match.index,
-      document,
-      object: document ? objects.get(document.fileId) : undefined
-    });
+async function resolveSerializedLineScriptIdentity(
+  editorTypeName: string | undefined,
+  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
+): Promise<SerializedObjectScriptIdentity> {
+  if (!editorTypeName) {
+    return {};
   }
 
-  return hits;
+  // m_EditorClassIdentifier is only a fallback for instances whose MonoScript GUID is not indexed.
+  return {
+    scriptPath: await resolveCSharpType(editorTypeName),
+    typeName: editorTypeName,
+    source: 'editorClassIdentifier'
+  };
 }
 
-function findSerializedDocumentAtOffset(
-  documents: readonly SerializedDocument[],
-  offset: number
-): SerializedDocument | undefined {
-  return documents.find(document => document.bodyStartOffset <= offset && offset < document.bodyEndOffset);
+function trackSerializedLineScriptIdentity(
+  diagnostics: UnityEventReferenceDiagnostics,
+  guid: string | undefined,
+  editorTypeName: string | undefined,
+  identity: SerializedObjectScriptIdentity
+): void {
+  if (identity.source === 'guid') {
+    diagnostics.resolvedSerializedInstanceScriptGuidCount += 1;
+  } else if (identity.source === 'editorClassIdentifier') {
+    diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount += 1;
+  } else if (guid || editorTypeName) {
+    diagnostics.unresolvedSerializedInstanceScriptCount += 1;
+  }
 }
 
-function serializedScriptTextHitKey(assetPath: string, hit: SerializedScriptTextHit): string {
-  const documentKey = hit.document
-    ? `${hit.document.fileId}:${hit.document.bodyStartOffset}`
-    : `offset:${hit.matchOffset}`;
-  return `${assetPath}#${documentKey}#${hit.guid.toLowerCase()}`;
+function serializedScriptLineHitKey(
+  assetPath: string,
+  fileId: string | undefined,
+  documentStartOffset: number,
+  guid: string,
+  lineStart: number
+): string {
+  const documentKey = fileId ? `${fileId}:${documentStartOffset}` : `offset:${lineStart}`;
+  return `${assetPath}#${documentKey}#${guid.toLowerCase()}`;
 }
 
-function hasSerializedScriptIdentity(object: SerializedObjectRecord): boolean {
-  return object.classId === monoBehaviourClassId && (object.scriptGuid !== undefined || object.editorTypeName !== undefined);
+function needsHeavyUnityEventParsing(content: string): boolean {
+  return content.includes('m_PersistentCalls') ||
+    (content.includes('propertyPath:') && content.includes('.m_PersistentCalls.'));
 }
 
 async function resolveSerializedObjectScriptIdentity(
@@ -1497,6 +1567,9 @@ function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
     assetCount: 0,
     skippedAssetCount: 0,
     canceledAssetCount: 0,
+    lightweightSerializedScanAssetCount: 0,
+    heavyParsedAssetCount: 0,
+    skippedHeavyParserAssetCount: 0,
     persistentCallCount: 0,
     serializedInstanceCount: 0,
     resolvedReferenceCount: 0,
@@ -1536,6 +1609,9 @@ function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityE
   target.assetCount += source.assetCount;
   target.skippedAssetCount += source.skippedAssetCount;
   target.canceledAssetCount += source.canceledAssetCount;
+  target.lightweightSerializedScanAssetCount += source.lightweightSerializedScanAssetCount;
+  target.heavyParsedAssetCount += source.heavyParsedAssetCount;
+  target.skippedHeavyParserAssetCount += source.skippedHeavyParserAssetCount;
   target.persistentCallCount += source.persistentCallCount;
   target.serializedInstanceCount += source.serializedInstanceCount;
   target.resolvedReferenceCount += source.resolvedReferenceCount;
@@ -1572,6 +1648,11 @@ function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEvent
     runtimeVscode.l10n.t('found {count} persistent call(s)', { count: diagnostics.persistentCallCount }),
     runtimeVscode.l10n.t('found {count} serialized instance(s)', {
       count: diagnostics.serializedInstanceCount
+    }),
+    runtimeVscode.l10n.t('serialized parser paths: {lightCount} light scan(s), {heavyCount} heavy parse(s), {skippedHeavyCount} heavy parse(s) skipped', {
+      lightCount: diagnostics.lightweightSerializedScanAssetCount,
+      heavyCount: diagnostics.heavyParsedAssetCount,
+      skippedHeavyCount: diagnostics.skippedHeavyParserAssetCount
     }),
     runtimeVscode.l10n.t('found {count} UnityEvent reference(s)', {
       count: diagnostics.resolvedReferenceCount
@@ -2038,9 +2119,9 @@ async function buildDefaultCSharpTypeIndex(
 
       // Source scan is a fallback resolver; unreadable files simply cannot contribute candidates.
     }
-  }, defaultAssetScanConcurrency, {
+  }, context.mode === 'background' ? backgroundAssetScanConcurrency : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
-    yieldEvery: scanYieldEvery,
+    yieldEvery: context.mode === 'background' ? backgroundScanYieldEvery : scanYieldEvery,
     onProgress: (completedCount, totalCount) => {
       if (context.mode !== 'interactive') {
         return;
