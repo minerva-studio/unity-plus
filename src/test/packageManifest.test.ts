@@ -21,10 +21,11 @@ describe('package manifest', () => {
     ]);
   });
 
-  it('keeps C# language providers as explicit extension dependencies', () => {
+  it('keeps Unity and C# providers as explicit extension dependencies', () => {
     const manifest = readPackageManifest();
 
     assert.deepStrictEqual(manifest.extensionDependencies, [
+      'VisualStudioToolsForUnity.vstuc',
       'ms-dotnettools.csdevkit',
       'ms-dotnettools.csharp'
     ]);
