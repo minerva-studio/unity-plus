@@ -1,7 +1,7 @@
 node_modules/
 out/
 .vscode/
-.agent/
+.agents/
 .codex/
 .vscode-test/
 *.vsix
