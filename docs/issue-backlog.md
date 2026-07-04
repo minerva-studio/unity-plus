@@ -21,8 +21,8 @@ Validation note: `npm test` currently fails during TypeScript compilation becaus
 | #7 | Closed | Complete | Metadata index maps GUIDs and watches `.meta` changes. |
 | #8 | Closed | Complete | C# type detector covers Unity types. |
 | #9 | Closed | Complete | Class-to-file rename path is implemented and tested. |
-| #10 | Open | Partial | Rename command exists, but file-rename-event-to-class-update is not complete. |
-| #11 | Open | Partial | ScriptableObject support is present in type/rename paths, but the broader rename issue remains open. |
+| #10 | Open | Not planned | File-rename-event-to-class-update is no longer planned; rename sync stays class-to-file. |
+| #11 | Open | Complete | Rename sync now supports matching primary top-level C# type/file pairs, including `ScriptableObject`, while preserving namespaces. |
 | #12 | Open | Partial | Cancel/fallback messaging exists; explicit affected file/class preview is still incomplete. |
 | #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
 | #14 | Open | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
@@ -119,6 +119,8 @@ Acceptance criteria:
 
 Keep primary Unity class names aligned with file renames.
 
+Status: Not planned. Rename sync intentionally stays class-to-file instead of updating source after file rename events.
+
 Acceptance criteria:
 - Detects `.cs` file rename events.
 - Updates the primary Unity class name.
@@ -127,6 +129,8 @@ Acceptance criteria:
 ## 11. [feature] Handle ScriptableObject class/file rename
 
 Extend rename sync to `ScriptableObject` workflows.
+
+Status: Complete. The current rename sync path supports any matching primary top-level C# type/file pair, including `ScriptableObject` classes.
 
 Acceptance criteria:
 - Supports `ScriptableObject` classes.
