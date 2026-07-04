@@ -465,12 +465,9 @@ export function showRenameInput(
     const quickPick = runtimeVscode.window.createQuickPick<RenameInputQuickPickItem>();
     let accepted = false;
 
-    const buildItems = (newTypeName: string): RenameInputQuickPickItem[] => {
-      const newScriptName = `${newTypeName.trim() || request.oldTypeName}.cs`;
+    const buildItems = (): RenameInputQuickPickItem[] => {
       const items: RenameInputQuickPickItem[] = [{
         label: runtimeVscode.l10n.t('Rename script file'),
-        description: `${basename(request.filePath)} -> ${newScriptName}`,
-        detail: runtimeVscode.l10n.t('Keep the script filename aligned with the C# type name.'),
         picked: true,
         alwaysShow: true,
         operationKind: 'script'
@@ -479,8 +476,6 @@ export function showRenameInput(
       if (request.hasMetaFile) {
         items.push({
           label: runtimeVscode.l10n.t('Rename Unity meta file'),
-          description: `${basename(request.filePath)}.meta -> ${newScriptName}.meta`,
-          detail: runtimeVscode.l10n.t('Keep the Unity asset GUID sidecar with the script file.'),
           picked: true,
           alwaysShow: true,
           operationKind: 'meta'
@@ -492,7 +487,7 @@ export function showRenameInput(
 
     const updateItems = () => {
       const selectedKinds = new Set(quickPick.selectedItems.map(item => item.operationKind));
-      const items = buildItems(quickPick.value);
+      const items = buildItems();
       quickPick.items = items;
       quickPick.selectedItems = items.filter(item =>
         selectedKinds.size === 0 ? item.picked : selectedKinds.has(item.operationKind)
@@ -500,13 +495,12 @@ export function showRenameInput(
     };
 
     quickPick.title = runtimeVscode.l10n.t('Rename C# Type and Script');
-    quickPick.placeholder = runtimeVscode.l10n.t('Type the new C# type name, then choose file changes');
-    quickPick.prompt = runtimeVscode.l10n.t('The input text is the new type name. Checked items choose which files are renamed.');
+    quickPick.placeholder = runtimeVscode.l10n.t('New C# type name');
     quickPick.canSelectMany = true;
     quickPick.matchOnDescription = false;
     quickPick.matchOnDetail = false;
     quickPick.value = request.oldTypeName;
-    quickPick.items = buildItems(request.oldTypeName);
+    quickPick.items = buildItems();
     quickPick.selectedItems = quickPick.items.filter(item => item.picked);
 
     quickPick.onDidChangeValue(() => updateItems());

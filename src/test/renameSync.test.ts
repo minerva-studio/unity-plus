@@ -1066,7 +1066,8 @@ describe('renameSync', () => {
     });
     assert.strictEqual(quickPickRuntime.lastItems.length, 2);
     assert.strictEqual(quickPickRuntime.lastItems.every(item => item.alwaysShow === true), true);
-    assert.strictEqual(quickPickRuntime.lastItems[0].description?.includes('HeroController.cs'), true);
+    assert.strictEqual(quickPickRuntime.lastItems.every(item => item.description === undefined), true);
+    assert.strictEqual(quickPickRuntime.lastItems.every(item => item.detail === undefined), true);
   });
 
   it('renames only the C# type when the combined rename input disables file changes', async () => {
