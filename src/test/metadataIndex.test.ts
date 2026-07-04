@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import type * as vscode from 'vscode';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
-import { createLazyUnityMetadataIndex, createUnityMetadataIndex, defaultMetaFilesGlob, parseUnityMetaGuid, UnityMetaFileWatchHandlers } from '../unity/metadataIndex';
+import { createLazyUnityMetadataIndex, createUnityMetadataIndex, defaultMetaFilesGlob, defaultMetaFilesGlobs, parseUnityMetaGuid, UnityMetaFileWatchHandlers } from '../unity/metadataIndex';
 
 const firstGuid = '11111111111111111111111111111111';
 const secondGuid = '22222222222222222222222222222222';
@@ -93,8 +93,9 @@ describe('metadataIndex', () => {
     assert.strictEqual(output.lines.some(line => line.includes('Skipped malformed Unity metadata file')), true);
   });
 
-  it('uses an Assets-only default metadata glob', () => {
+  it('keeps the legacy Assets metadata glob and scans package metadata too', () => {
     assert.strictEqual(defaultMetaFilesGlob, 'Assets/**/*.meta');
+    assert.deepStrictEqual(defaultMetaFilesGlobs, ['Assets/**/*.meta', 'Packages/**/*.meta']);
   });
 
   it('builds lazily and reuses the first metadata index until forced to rebuild', async () => {

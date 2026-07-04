@@ -34,7 +34,8 @@ export interface LazyUnityMetadataIndexOptions extends UnityMetadataIndexOptions
   createIndex?: (options: UnityMetadataIndexOptions) => UnityMetadataIndex;
 }
 
-export const defaultMetaFilesGlob = 'Assets/**/*.meta';
+export const defaultMetaFilesGlobs = ['Assets/**/*.meta', 'Packages/**/*.meta'];
+export const defaultMetaFilesGlob = defaultMetaFilesGlobs[0];
 
 const metaExtension = '.meta';
 const guidPattern = /^guid:\s*([a-fA-F0-9]{32})\s*$/m;
@@ -147,7 +148,10 @@ export function parseUnityMetaGuid(content: string): string | undefined {
 
 async function findDefaultMetaFiles(root: vscode.Uri): Promise<readonly vscode.Uri[]> {
   const runtimeVscode = await import('vscode');
-  return await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, defaultMetaFilesGlob));
+  const fileGroups = await Promise.all(defaultMetaFilesGlobs.map(async glob =>
+    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob))
+  ));
+  return fileGroups.flat();
 }
 
 async function readDefaultTextFile(uri: vscode.Uri): Promise<string> {
@@ -159,15 +163,17 @@ async function readDefaultTextFile(uri: vscode.Uri): Promise<string> {
 function watchDefaultMetaFiles(root: vscode.Uri, handlers: UnityMetaFileWatchHandlers): vscode.Disposable {
   // Load VS Code only inside the extension host so Node-based unit tests can inject watcher behavior.
   const runtimeVscode = createRequire(__filename)('vscode') as typeof vscode;
-  const watcher = runtimeVscode.workspace.createFileSystemWatcher(
-    new runtimeVscode.RelativePattern(root, defaultMetaFilesGlob)
+  const watchers = defaultMetaFilesGlobs.map(glob =>
+    runtimeVscode.workspace.createFileSystemWatcher(new runtimeVscode.RelativePattern(root, glob))
   );
 
   return runtimeVscode.Disposable.from(
-    watcher,
-    watcher.onDidCreate(handlers.onCreate),
-    watcher.onDidChange(handlers.onChange),
-    watcher.onDidDelete(handlers.onDelete)
+    ...watchers.flatMap(watcher => [
+      watcher,
+      watcher.onDidCreate(handlers.onCreate),
+      watcher.onDidChange(handlers.onChange),
+      watcher.onDidDelete(handlers.onDelete)
+    ])
   );
 }
 

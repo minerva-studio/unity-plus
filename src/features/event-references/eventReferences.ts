@@ -159,8 +159,8 @@ interface RunWithConcurrencyOptions {
 const gameObjectClassId = 1;
 const monoBehaviourClassId = 114;
 const prefabInstanceClassId = 1001;
-const assetGlob = 'Assets/**/*';
-const csharpGlob = 'Assets/**/*.cs';
+const assetGlobs = ['Assets/**/*', 'Packages/**/*'];
+const csharpGlobs = ['Assets/**/*.cs', 'Packages/**/*.cs'];
 const defaultAssetScanConcurrency = 4;
 const scanYieldEvery = 4;
 const progressReportInterval = 10;
@@ -171,7 +171,8 @@ const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
 const fileIdPattern = /fileID:\s*(-?\d+)/;
 const guidPattern = /guid:\s*([a-fA-F0-9]{32})/;
 const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-const unityEventFieldPattern = /\b(?:public|private|protected|internal|static|readonly|new|serializedfield|SerializeField|\s|\[[^\]]+\])*(?:UnityEngine\.Events\.)?UnityEvent(?:\s*<[^;>{}]+>)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:[=;])/g;
+const unityEventTokenPattern = /(?:UnityEngine\.Events\.)?UnityEvent\b/g;
+const identifierPattern = /[A-Za-z_][A-Za-z0-9_]*/y;
 const persistentCallPropertyPathPattern = /^(.+)\.m_PersistentCalls\.m_Calls\.Array\.data\[(\d+)\]\.(m_[A-Za-z0-9_]+)$/;
 
 export function registerEventReferenceFeature(
@@ -594,7 +595,7 @@ function createEventReferenceProvider(
         const count = index.getReferenceCount(scriptPath, method.name);
         if (count > 0) {
           codeLenses.push(new runtime.runtimeVscode.CodeLens(method.range, {
-            title: runtime.runtimeVscode.l10n.t('UnityEvent references: {count}', { count }),
+            title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count }),
             command: 'unityPlus.showUnityEventReferenceLocations',
             arguments: [{
               kind: 'method',
@@ -610,7 +611,7 @@ function createEventReferenceProvider(
         const count = index.getFieldReferenceCount(scriptPath, field.name);
         if (count > 0) {
           codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-            title: runtime.runtimeVscode.l10n.t('UnityEvent references: {count}', { count }),
+            title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count }),
             command: 'unityPlus.showUnityEventReferenceLocations',
             arguments: [{
               kind: 'field',
@@ -624,7 +625,7 @@ function createEventReferenceProvider(
         const targetCount = index.getFieldTargetCount(scriptPath, field.name);
         if (targetCount > 0) {
           codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-            title: runtime.runtimeVscode.l10n.t('UnityEvent targets: {count}', { count: targetCount }),
+            title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: targetCount }),
             command: 'unityPlus.showUnityEventReferenceLocations',
             arguments: [{
               kind: 'fieldTarget',
@@ -1143,16 +1144,72 @@ function findUnityEventFields(runtimeVscode: typeof vscode, document: vscode.Tex
   const fields: CSharpFieldSnapshot[] = [];
   let match: RegExpExecArray | null;
 
-  unityEventFieldPattern.lastIndex = 0;
-  while ((match = unityEventFieldPattern.exec(text))) {
-    const name = match[1];
-    const nameStart = match.index + match[0].lastIndexOf(name);
+  unityEventTokenPattern.lastIndex = 0;
+  while ((match = unityEventTokenPattern.exec(text))) {
+    const nameStart = findUnityEventFieldNameStart(text, unityEventTokenPattern.lastIndex);
+    if (nameStart === undefined) {
+      continue;
+    }
+
+    const name = readIdentifierAt(text, nameStart);
+    if (!name) {
+      continue;
+    }
+
     const start = document.positionAt(nameStart);
     const end = document.positionAt(nameStart + name.length);
     fields.push({ name, range: new runtimeVscode.Range(start, end) });
   }
 
   return fields;
+}
+
+function findUnityEventFieldNameStart(text: string, offset: number): number | undefined {
+  let cursor = skipWhitespace(text, offset);
+
+  if (text[cursor] === '<') {
+    cursor = skipGenericArguments(text, cursor);
+    if (cursor === -1) {
+      return undefined;
+    }
+  }
+
+  cursor = skipWhitespace(text, cursor);
+  return readIdentifierAt(text, cursor) ? cursor : undefined;
+}
+
+function skipGenericArguments(text: string, offset: number): number {
+  let depth = 0;
+
+  // Generic UnityEvent arguments can be nested, so keep a tiny balanced scanner instead of a single regex.
+  for (let index = offset; index < text.length; index += 1) {
+    if (text[index] === '<') {
+      depth += 1;
+    } else if (text[index] === '>') {
+      depth -= 1;
+      if (depth === 0) {
+        return index + 1;
+      }
+    } else if ((text[index] === ';' || text[index] === '\n') && depth > 0) {
+      return -1;
+    }
+  }
+
+  return -1;
+}
+
+function skipWhitespace(text: string, offset: number): number {
+  let cursor = offset;
+  while (cursor < text.length && /\s/.test(text[cursor])) {
+    cursor += 1;
+  }
+
+  return cursor;
+}
+
+function readIdentifierAt(text: string, offset: number): string | undefined {
+  identifierPattern.lastIndex = offset;
+  return identifierPattern.exec(text)?.[0];
 }
 
 function findUnityEventFieldAtPosition(
@@ -1172,7 +1229,7 @@ function createHoverMarkdown(
   references: readonly UnityEventReference[]
 ): vscode.MarkdownString {
   const markdown = new runtimeVscode.MarkdownString();
-  markdown.appendMarkdown(`**${runtimeVscode.l10n.t('UnityEvent references: {count}', { count: references.length })}**\n\n`);
+  markdown.appendMarkdown(`**${runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length })}**\n\n`);
 
   for (const reference of references.slice(0, 12)) {
     const location = reference.gameObjectName
@@ -1359,7 +1416,10 @@ async function findDefaultAssetFiles(
   root: vscode.Uri,
   runtimeVscode: typeof vscode
 ): Promise<readonly vscode.Uri[]> {
-  const files = await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, assetGlob));
+  const fileGroups = await Promise.all(assetGlobs.map(async glob =>
+    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob))
+  ));
+  const files = fileGroups.flat();
   return files.filter(uri => supportedAssetExtensions.has(extname(uri.fsPath).toLowerCase()));
 }
 
@@ -1367,7 +1427,10 @@ async function findDefaultCSharpFiles(
   root: vscode.Uri,
   runtimeVscode: typeof vscode
 ): Promise<readonly vscode.Uri[]> {
-  return await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, csharpGlob));
+  const fileGroups = await Promise.all(csharpGlobs.map(async glob =>
+    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob))
+  ));
+  return fileGroups.flat();
 }
 
 async function readDefaultTextFile(uri: vscode.Uri, runtimeVscode: typeof vscode): Promise<string> {

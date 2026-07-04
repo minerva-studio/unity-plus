@@ -10,6 +10,8 @@ import { createLazyUnityMetadataIndex, UnityMetadataIndex } from '../unity/metad
 
 const gateGuid = '11111111111111111111111111111111';
 const gateScriptPath = 'Assets/Gate.cs';
+const interactableGuid = '33333333333333333333333333333333';
+const interactableScriptPath = 'Packages/com.example/Runtime/Interactable.cs';
 
 describe('eventReferences', () => {
   it('does not build metadata when UnityEvent references are disabled', async () => {
@@ -217,7 +219,7 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
     const lenses = await runtime.provideCodeLenses(csharpDocument);
     assert.strictEqual(lenses.length, 3);
-    assert.strictEqual(lenses[0].command?.title, 'UnityEvent references: 1');
+    assert.strictEqual(lenses[0].command?.title, '1 UnityEvent references');
     assert.strictEqual(lenses[0].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[0].command?.arguments?.[0], {
       kind: 'method',
@@ -225,7 +227,7 @@ describe('eventReferences', () => {
       symbolName: 'CanInteract',
       position: new FakePosition(4, 14)
     });
-    assert.strictEqual(lenses[1].command?.title, 'UnityEvent references: 1');
+    assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
     assert.strictEqual(lenses[1].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[1].command?.arguments?.[0], {
       kind: 'field',
@@ -233,7 +235,7 @@ describe('eventReferences', () => {
       symbolName: 'OnCheckEnable',
       position: new FakePosition(3, 20)
     });
-    assert.strictEqual(lenses[2].command?.title, 'UnityEvent targets: 1');
+    assert.strictEqual(lenses[2].command?.title, '1 UnityEvent targets');
     assert.strictEqual(lenses[2].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[2].command?.arguments?.[0], {
       kind: 'fieldTarget',
@@ -421,6 +423,109 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
   });
 
+  it('shows UnityEvent field CodeLens for non-override package assets', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Packages/com.example/Runtime/Interactable.cs', [
+      'using UnityEngine.Events;',
+      'namespace LibraryOfMeialia',
+      '{',
+      '  public class Interactable',
+      '  {',
+      '    public UnityEvent OnInteract = new();',
+      '    public void Interact()',
+      '    {',
+      '    }',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Packages/com.example/Prefabs/Button.prefab')],
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('Interactable.cs')) {
+          return csharpDocument.getText();
+        }
+
+        return createPackagePrefabYaml(2);
+      },
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+  });
+
+  it('detects simple and nested generic UnityEvent fields', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using System.Collections.Generic;',
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent<int> OnCheckEnable = new();',
+      '  public UnityEvent<List<Amlos.Fixtures.Gate>, int[]> OnBookCooldownStart;',
+      '  public bool CanInteract()',
+      '  {',
+      '    return true;',
+      '  }',
+      '  public void Interact()',
+      '  {',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [
+        createUri('/Project/Assets/Gate.prefab'),
+        createUri('/Project/Assets/GateCooldown.prefab')
+      ],
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('.cs')) {
+          return csharpDocument.getText();
+        }
+
+        return uri.fsPath.endsWith('GateCooldown.prefab') ? createInstanceTargetYaml(2) : createPrefabYaml(2);
+      },
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldLenses = lenses.filter(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLenses = lenses.filter(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    // Both fields should be visible even when the UnityEvent type has generic arguments.
+    assert.strictEqual(fieldLenses.length, 2);
+    assert.strictEqual(fieldTargetLenses.length, 2);
+    assert.strictEqual(fieldLenses.every(lens => lens.command?.title === '1 UnityEvent references'), true);
+    assert.strictEqual(fieldTargetLenses.every(lens => lens.command?.title === '1 UnityEvent targets'), true);
+  });
+
   it('deduplicates UnityEvent field target CodeLens locations across normal and override bindings', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
@@ -465,8 +570,8 @@ describe('eventReferences', () => {
     const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
     const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
-    assert.strictEqual(fieldReferenceLens?.command?.title, 'UnityEvent references: 2');
-    assert.strictEqual(fieldTargetLens?.command?.title, 'UnityEvent targets: 1');
+    assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands[0].locations.length, 2);
@@ -1002,6 +1107,27 @@ function createInstanceTargetYaml(callState: number): string {
   ].join('\n');
 }
 
+function createPackagePrefabYaml(callState: number): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!1 &2000',
+    'GameObject:',
+    '  m_Name: Package Button',
+    '--- !u!114 &560066068064628344',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 2000}',
+    `  m_Script: {fileID: 11500000, guid: ${interactableGuid}, type: 3}`,
+    '  OnInteract:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 560066068064628344}',
+    '        m_TargetAssemblyTypeName: LibraryOfMeialia.Interactable, LibraryOfMeialia',
+    '        m_MethodName: Interact',
+    '        m_Mode: 0',
+    `        m_CallState: ${callState}`
+  ].join('\n');
+}
+
 function createMissingTargetTypeYaml(): string {
   return [
     '%YAML 1.1',
@@ -1031,13 +1157,25 @@ function createBuildSettingsYaml(scenePaths: readonly string[]): string {
 }
 
 function createTypeResolver(): (fullTypeName: string) => string | undefined {
-  return fullTypeName => fullTypeName === 'Amlos.Fixtures.Gate' ? gateScriptPath : undefined;
+  return fullTypeName => {
+    if (fullTypeName === 'Amlos.Fixtures.Gate') {
+      return gateScriptPath;
+    }
+
+    return fullTypeName === 'LibraryOfMeialia.Interactable' ? interactableScriptPath : undefined;
+  };
 }
 
 function createMetadataIndex(): UnityMetadataIndex {
   return {
     rebuild: async () => undefined,
-    getAssetPath: guid => guid === gateGuid ? gateScriptPath : undefined,
+    getAssetPath: guid => {
+      if (guid === gateGuid) {
+        return gateScriptPath;
+      }
+
+      return guid === interactableGuid ? interactableScriptPath : undefined;
+    },
     dispose: () => undefined
   };
 }

@@ -30,7 +30,7 @@
   "Scanning Unity serialized assets {completedCount}/{totalCount}": "正在扫描 Unity 序列化资源 {completedCount}/{totalCount}",
   "Indexing C# type declarations": "正在索引 C# 类型声明",
   "Indexing C# type declarations {completedCount}/{totalCount}": "正在索引 C# 类型声明 {completedCount}/{totalCount}",
-  "UnityEvent references: {count}": "UnityEvent 引用: {count}",
+  "{count} UnityEvent references": "{count} UnityEvent 引用",
   "Unity Plus: UnityEvent reference index is still building.": "Unity Plus: UnityEvent 引用索引仍在构建中。",
   "Unity Plus: no UnityEvent references found for this symbol.": "Unity Plus: 未找到此符号的 UnityEvent 引用。",
   "discovered {count} serialized asset(s)": "发现 {count} 个序列化资源",
@@ -41,5 +41,5 @@
   "finished in {elapsedMilliseconds}ms": "耗时 {elapsedMilliseconds}ms",
   "Unity Plus: open a Unity project to scan UnityEvent references. Workspace roots: {roots}. Required markers: Assets, ProjectSettings, Packages/manifest.json.": "Unity Plus: 请打开 Unity 项目以扫描 UnityEvent 引用。工作区根目录: {roots}。所需标记: Assets、ProjectSettings、Packages/manifest.json。",
   "... {count} more": "... 还有 {count} 项",
-  "UnityEvent targets: {count}": "UnityEvent targets: {count}"
+  "{count} UnityEvent targets": "{count} UnityEvent targets"
 }
