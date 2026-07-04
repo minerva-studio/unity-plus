@@ -675,6 +675,8 @@ function parseSerializedDocuments(
 ): SerializedDocument[] {
   const headers = [...content.matchAll(documentHeaderPattern)];
   const documents: SerializedDocument[] = [];
+  let lineCursor = 0;
+  let offsetCursor = 0;
 
   for (let index = 0; index < headers.length; index += 1) {
     const header = headers[index];
@@ -682,11 +684,17 @@ function parseSerializedDocuments(
     const bodyStart = header.index + header[0].length;
     const bodyEnd = next?.index ?? content.length;
 
+    // Advance from the previous body start so line tracking stays linear for large Unity YAML files.
+    const startLine = lineCursor + countLineBreaks(content, offsetCursor, bodyStart);
+
+    lineCursor = startLine;
+    offsetCursor = bodyStart;
+
     documents.push({
       classId: Number(header[1]),
       fileId: header[2],
       body: content.slice(bodyStart, bodyEnd),
-      startLine: lineNumberAtOffset(content, bodyStart),
+      startLine,
       assetPath,
       assetKind
     });
@@ -1253,9 +1261,9 @@ function getIndent(line: string): number {
   return line.length - line.trimStart().length;
 }
 
-function lineNumberAtOffset(text: string, offset: number): number {
+function countLineBreaks(text: string, startOffset: number, endOffset: number): number {
   let line = 0;
-  for (let index = 0; index < offset; index += 1) {
+  for (let index = startOffset; index < endOffset; index += 1) {
     if (text[index] === '\n') {
       line += 1;
     }

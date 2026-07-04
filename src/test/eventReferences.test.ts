@@ -157,6 +157,16 @@ describe('eventReferences', () => {
     assert.strictEqual(references[0].line, 14);
   });
 
+  it('keeps UnityEvent line numbers correct after many serialized documents', async () => {
+    const prefix = createManyEmptyYamlDocuments(1500);
+    const content = `${prefix}\n${createPrefabYaml(2)}`;
+    const references = await parseUnityEventReferences(content, 'Assets/Gate.prefab', 'prefab', createMetadataIndex(), createTypeResolver());
+
+    assert.strictEqual(references.length, 1);
+    assert.strictEqual(references[0].line, countNewlines(prefix) + 1 + 13);
+    assert.strictEqual(references[0].character, 22);
+  });
+
   it('shows CodeLens and hover details for referenced C# methods', async () => {
     const runtime = createEventReferenceRuntime();
     const prefabUri = createUri('/Project/Assets/Gate.prefab');
@@ -833,6 +843,18 @@ function createPrefabYamlWithNestedTarget(callState: number): string {
     '- m_Target: {fileID: 460066068064628344}',
     ['- m_Target:', '    fileID: 460066068064628344'].join('\n')
   );
+}
+
+function createManyEmptyYamlDocuments(count: number): string {
+  return Array.from({ length: count }, (_value, index) => [
+    `--- !u!1 &${index + 1}`,
+    'GameObject:',
+    `  m_Name: Filler ${index}`
+  ].join('\n')).join('\n');
+}
+
+function countNewlines(value: string): number {
+  return value.match(/\n/g)?.length ?? 0;
 }
 
 function createInstanceTargetYaml(callState: number): string {
