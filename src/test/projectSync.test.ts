@@ -69,7 +69,7 @@ describe('projectSync', () => {
     assert.match(runtime.readFile('/Project/Assets/Game/Player.cs.meta'), /^guid: [a-f0-9]{32}$/m);
   });
 
-  it('skips Assets scripts without asmdef and leaves Assembly-CSharp fallback as TODO', async () => {
+  it('adds Assets scripts without asmdef to Assembly-CSharp fallback', async () => {
     const output = createMemoryOutput();
     const runtime = createProjectSyncRuntime({
       files: {
@@ -82,8 +82,58 @@ describe('projectSync', () => {
       createUri('/Project/Assets/Loose.cs')
     );
 
+    assert.match(runtime.readFile('/Project/Assembly-CSharp.csproj'), /<Compile Include="Assets\/Loose.cs" \/>/);
+    assert.strictEqual(output.lines.some(line => line.includes('hasEditorFolder=false')), true);
+  });
+
+  it('adds Assets scripts under Editor folders to Assembly-CSharp-Editor fallback', async () => {
+    const output = createMemoryOutput();
+    const runtime = createProjectSyncRuntime({
+      files: {
+        '/Project/Assembly-CSharp.csproj': createCsproj(),
+        '/Project/Assembly-CSharp-Editor.csproj': createCsproj()
+      }
+    });
+
+    await handleCreatedCSharpFile(
+      { ...runtime.featureRuntime, logger: createTestLogger(output) },
+      createUri('/Project/Assets/Tools/Editor/MenuTool.cs')
+    );
+
     assert.strictEqual(runtime.readFile('/Project/Assembly-CSharp.csproj'), createCsproj());
-    assert.strictEqual(output.lines.some(line => line.includes('Assembly-CSharp.csproj fallback is not implemented')), true);
+    assert.match(runtime.readFile('/Project/Assembly-CSharp-Editor.csproj'), /<Compile Include="Assets\/Tools\/Editor\/MenuTool.cs" \/>/);
+    assert.strictEqual(output.lines.some(line => line.includes('hasEditorFolder=true')), true);
+  });
+
+  it('warns and skips Assets scripts without asmdef when Assembly-CSharp fallback is missing', async () => {
+    const output = createMemoryOutput();
+    const runtime = createProjectSyncRuntime();
+
+    await handleCreatedCSharpFile(
+      { ...runtime.featureRuntime, logger: createTestLogger(output) },
+      createUri('/Project/Assets/Loose.cs')
+    );
+
+    assert.strictEqual(runtime.warningMessages.some(message => message.includes('Assembly-CSharp.csproj was not found')), true);
+    assert.strictEqual(output.lines.some(line => line.includes('Assembly-CSharp.csproj was not found')), true);
+  });
+
+  it('warns and skips Editor scripts without asmdef when Assembly-CSharp-Editor fallback is missing', async () => {
+    const output = createMemoryOutput();
+    const runtime = createProjectSyncRuntime({
+      files: {
+        '/Project/Assembly-CSharp.csproj': createCsproj()
+      }
+    });
+
+    await handleCreatedCSharpFile(
+      { ...runtime.featureRuntime, logger: createTestLogger(output) },
+      createUri('/Project/Assets/Editor/MenuTool.cs')
+    );
+
+    assert.strictEqual(runtime.readFile('/Project/Assembly-CSharp.csproj'), createCsproj());
+    assert.strictEqual(runtime.warningMessages.some(message => message.includes('Assembly-CSharp-Editor.csproj was not found')), true);
+    assert.strictEqual(output.lines.some(line => line.includes('Assembly-CSharp-Editor.csproj was not found')), true);
   });
 
   it('does not search past a package boundary when no asmdef exists', async () => {
@@ -278,6 +328,7 @@ interface ProjectSyncRuntime {
   deleteListeners: number;
   changeListeners: number;
   renameFileListeners: number;
+  warningMessages: string[];
   readFile(path: string): string;
   runCommand(command: string, ...args: unknown[]): Promise<unknown>;
 }
@@ -304,7 +355,8 @@ function createProjectSyncRuntime(options: ProjectSyncRuntimeOptions = {}): Proj
     createListeners: 0,
     deleteListeners: 0,
     changeListeners: 0,
-    renameFileListeners: 0
+    renameFileListeners: 0,
+    warningMessages: [] as string[]
   };
   const fileType = {
     File: 1,
@@ -374,7 +426,10 @@ function createProjectSyncRuntime(options: ProjectSyncRuntimeOptions = {}): Proj
       activeTextEditor: undefined,
       showInputBox: async () => options.inputBoxValue,
       showInformationMessage: () => undefined,
-      showWarningMessage: () => undefined,
+      showWarningMessage: (message: string) => {
+        state.warningMessages.push(message);
+        return undefined;
+      },
       showTextDocument: async () => undefined
     },
     Disposable: {
@@ -411,6 +466,9 @@ function createProjectSyncRuntime(options: ProjectSyncRuntimeOptions = {}): Proj
     },
     get renameFileListeners() {
       return state.renameFileListeners;
+    },
+    get warningMessages() {
+      return state.warningMessages;
     },
     readFile(path: string): string {
       const content = files.get(normalizePath(path));

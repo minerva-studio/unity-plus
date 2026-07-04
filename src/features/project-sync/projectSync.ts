@@ -25,8 +25,7 @@ interface CreateScriptRequest {
   targetUri?: vscode.Uri;
 }
 
-interface AsmdefProjectTarget {
-  asmdefName: string;
+interface CSharpProjectTarget {
   csprojUri: vscode.Uri;
 }
 
@@ -180,7 +179,7 @@ export async function addScriptToAsmdefProject(runtime: ProjectSyncRuntime, uri:
     return false;
   }
 
-  const target = await findAsmdefProjectTarget(runtime, uri);
+  const target = await findCSharpProjectTarget(runtime, uri);
   if (!target) {
     return false;
   }
@@ -293,6 +292,11 @@ export function toProjectPath(root: vscode.Uri, uri: vscode.Uri): string | undef
 
 export function normalizeProjectPath(path: string): string {
   return path.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+}
+
+function hasPathSegment(path: string, segment: string): boolean {
+  const normalizedSegment = segment.toLowerCase();
+  return path.replace(/\\/g, '/').split('/').some(part => part.toLowerCase() === normalizedSegment);
 }
 
 async function createUnityScript(runtime: ProjectSyncRuntime, request: CreateScriptRequest): Promise<void> {
@@ -421,10 +425,10 @@ async function removeMissingIncludes(
   return updated;
 }
 
-async function findAsmdefProjectTarget(
+async function findCSharpProjectTarget(
   runtime: ProjectSyncRuntime,
   scriptUri: vscode.Uri
-): Promise<AsmdefProjectTarget | undefined> {
+): Promise<CSharpProjectTarget | undefined> {
   const projectPath = toProjectPath(runtime.root, scriptUri);
   if (!projectPath) {
     return undefined;
@@ -439,8 +443,7 @@ async function findAsmdefProjectTarget(
   const asmdefUri = await findNearestAsmdef(runtime, runtime.runtimeVscode.Uri.file(dirname(scriptUri.fsPath)), boundary);
   if (!asmdefUri) {
     if (boundary === 'Assets') {
-      // TODO: Map scripts without asmdef to Assembly-CSharp.csproj once the fallback policy is finalized.
-      runtime.logger.warn(`Unity Plus skipped ${projectPath}: Assembly-CSharp.csproj fallback is not implemented yet.`);
+      return await findDefaultAssemblyProjectTarget(runtime, projectPath);
     } else {
       runtime.logger.warn(`Unity Plus skipped ${projectPath}: no asmdef was found before leaving ${boundary}.`);
     }
@@ -454,7 +457,33 @@ async function findAsmdefProjectTarget(
     return undefined;
   }
 
-  return { asmdefName, csprojUri };
+  return { csprojUri };
+}
+
+async function findDefaultAssemblyProjectTarget(
+  runtime: ProjectSyncRuntime,
+  projectPath: string
+): Promise<CSharpProjectTarget | undefined> {
+  // Unity routes scripts inside Editor folders to the default editor assembly project.
+  const hasEditorFolder = hasPathSegment(projectPath, 'Editor');
+  const projectFileName = hasEditorFolder ? 'Assembly-CSharp-Editor.csproj' : 'Assembly-CSharp.csproj';
+  const csprojUri = runtime.runtimeVscode.Uri.file(join(runtime.root.fsPath, projectFileName));
+
+  runtime.logger.debug(`Unity Plus using ${projectFileName} fallback for ${projectPath}; hasEditorFolder=${hasEditorFolder}.`);
+  if (await fileExists(runtime, csprojUri)) {
+    return { csprojUri };
+  }
+
+  const message = runtime.runtimeVscode.l10n.t(
+    'Unity Plus: {projectFileName} was not found. This project may not contain code without assembly definitions; creating {scriptPath} may have targeted the wrong folder.',
+    {
+      projectFileName,
+      scriptPath: projectPath
+    }
+  );
+  runtime.logger.warn(message);
+  runtime.runtimeVscode.window.showWarningMessage(message);
+  return undefined;
 }
 
 function findAsmdefSearchBoundary(projectPath: string): string | undefined {
