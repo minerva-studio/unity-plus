@@ -4,11 +4,11 @@ This file mirrors the initial GitHub issue plan while the repository is private 
 
 ## Status snapshot
 
-Updated: 2026-07-03
+Updated: 2026-07-04
 
 Source: GitHub issue state from `minerva-studio/unity-plus`, plus local code and test inspection.
 
-Validation note: `npm test` currently fails during TypeScript compilation because the local working tree has an uncommitted `src/features/event-references/eventReferences.ts` interface/implementation mismatch. Treat event-reference completion below as in-progress until compile is green again.
+Validation note: `npm run compile` and `npm test` pass locally. `npm run lint` passes with one warning in test code: `src/test/renameSync.test.ts` defines unused helper `ordinaryTopLevelTypeAt`.
 
 | Issue | GitHub state | Local assessment | Notes |
 | --- | --- | --- | --- |
@@ -21,17 +21,17 @@ Validation note: `npm test` currently fails during TypeScript compilation becaus
 | #7 | Closed | Complete | Metadata index maps GUIDs and watches `.meta` changes. |
 | #8 | Closed | Complete | C# type detector covers Unity types. |
 | #9 | Closed | Complete | Class-to-file rename path is implemented and tested. |
-| #10 | Open | Not planned | File-rename-event-to-class-update is no longer planned; rename sync stays class-to-file. |
+| #10 | Closed | Not planned | File-rename-event-to-class-update is no longer planned; rename sync stays class-to-file. |
 | #11 | Closed | Complete | Rename sync now supports matching primary top-level C# type/file pairs, including `ScriptableObject`, while preserving namespaces. |
 | #12 | Open | Partial | Cancel/fallback messaging exists; explicit affected file/class preview is still incomplete. |
 | #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
 | #14 | Closed | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
 | #15 | Open | Partial | Stale deleted script includes are removed by manual refresh/delete handling; missing compile entry detection is limited to asmdef-backed creates. |
-| #16 | Open | In progress | Scene/prefab scanner code exists, but current compile errors block completion. |
-| #17 | Open | In progress | CodeLens provider exists, but current compile errors block completion. |
-| #18 | Open | In progress | Hover detail code exists, but current compile errors block completion. |
-| #19 | Open | In progress | Prefab scanning exists, but current compile errors block completion. |
-| #20 | Open | Partial | Rescan command rebuilds metadata/cache version; summary counts are not fully logged. |
+| #16 | Closed | Complete | Scene/prefab scanner is implemented and covered by passing event-reference tests. |
+| #17 | Closed | Complete | CodeLens provider is implemented, respects `unityPlus.eventReferences.enabled`, and is covered by passing tests. |
+| #18 | Closed | Complete | Hover details include scene/prefab path, GameObject, component, and event field information in passing tests. |
+| #19 | Closed | Complete | Prefab scanning resolves target scripts through metadata/type lookup and appears in CodeLens/hover output. |
+| #20 | Open | Partial | Rescan command rebuilds metadata and invalidates the event-reference cache version; rescan summary counts are not fully logged. |
 | #21 | Open | Not started | Tests use inline fixtures; no small fixture Unity project was found. |
 | #22 | Open | Partial | Rename unit coverage is broad, but fixture-backed integration tests are not complete. |
 | #23 | Open | Not started | No private-to-public checklist document was found. |
