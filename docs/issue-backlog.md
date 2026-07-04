@@ -22,10 +22,10 @@ Validation note: `npm test` currently fails during TypeScript compilation becaus
 | #8 | Closed | Complete | C# type detector covers Unity types. |
 | #9 | Closed | Complete | Class-to-file rename path is implemented and tested. |
 | #10 | Open | Not planned | File-rename-event-to-class-update is no longer planned; rename sync stays class-to-file. |
-| #11 | Open | Complete | Rename sync now supports matching primary top-level C# type/file pairs, including `ScriptableObject`, while preserving namespaces. |
+| #11 | Closed | Complete | Rename sync now supports matching primary top-level C# type/file pairs, including `ScriptableObject`, while preserving namespaces. |
 | #12 | Open | Partial | Cancel/fallback messaging exists; explicit affected file/class preview is still incomplete. |
 | #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
-| #14 | Open | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
+| #14 | Closed | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
 | #15 | Open | Partial | Stale deleted script includes are removed by manual refresh/delete handling; missing compile entry detection is limited to asmdef-backed creates. |
 | #16 | Open | In progress | Scene/prefab scanner code exists, but current compile errors block completion. |
 | #17 | Open | In progress | CodeLens provider exists, but current compile errors block completion. |
