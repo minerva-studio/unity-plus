@@ -24,6 +24,8 @@ export interface UnitySerializedAssetReferenceIndex {
   getReferenceCount(scriptPath: string, methodName: string): number;
   getFieldReferences(scriptPath: string, fieldName: string): readonly UnityEventReference[];
   getFieldReferenceCount(scriptPath: string, fieldName: string): number;
+  getFieldTargets(scriptPath: string, fieldName: string): readonly UnityEventReference[];
+  getFieldTargetCount(scriptPath: string, fieldName: string): number;
   getAllReferences(): readonly UnityEventReference[];
   getDiagnostics(): UnityEventReferenceDiagnostics;
 }
@@ -102,6 +104,7 @@ interface SerializedObjectRecord {
 
 interface PersistentCallSnapshot {
   eventFieldName: string;
+  ownerFileId?: string;
   line: number;
   character: number;
   methodLine?: number;
@@ -123,7 +126,7 @@ interface CSharpFieldSnapshot {
 }
 
 interface EventReferenceLocationTarget {
-  kind: 'method' | 'field';
+  kind: 'method' | 'field' | 'fieldTarget';
   scriptPath: string;
   symbolName: string;
   position: vscode.Position;
@@ -155,6 +158,7 @@ interface RunWithConcurrencyOptions {
 
 const gameObjectClassId = 1;
 const monoBehaviourClassId = 114;
+const prefabInstanceClassId = 1001;
 const assetGlob = 'Assets/**/*';
 const csharpGlob = 'Assets/**/*.cs';
 const defaultAssetScanConcurrency = 4;
@@ -168,6 +172,7 @@ const fileIdPattern = /fileID:\s*(-?\d+)/;
 const guidPattern = /guid:\s*([a-fA-F0-9]{32})/;
 const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 const unityEventFieldPattern = /\b(?:public|private|protected|internal|static|readonly|new|serializedfield|SerializeField|\s|\[[^\]]+\])*(?:UnityEngine\.Events\.)?UnityEvent(?:\s*<[^;>{}]+>)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:[=;])/g;
+const persistentCallPropertyPathPattern = /^(.+)\.m_PersistentCalls\.m_Calls\.Array\.data\[(\d+)\]\.(m_[A-Za-z0-9_]+)$/;
 
 export function registerEventReferenceFeature(
   logger: UnityPlusLogger,
@@ -407,6 +412,14 @@ async function parseUnityEventReferencesCore(
       callsByDocument.set(document.fileId, calls);
       diagnostics.persistentCallCount += calls.length;
     }
+
+    const overrideCalls = parsePrefabOverridePersistentCalls(document);
+    for (const call of overrideCalls) {
+      const calls = callsByDocument.get(call.ownerFileId ?? document.fileId) ?? [];
+      calls.push(call);
+      callsByDocument.set(call.ownerFileId ?? document.fileId, calls);
+      diagnostics.persistentCallCount += 1;
+    }
   }
 
   const references: UnityEventReference[] = [];
@@ -437,6 +450,7 @@ async function parseUnityEventReferencesCore(
       }
 
       const target = call.targetFileId ? objects.get(call.targetFileId) : undefined;
+      const owner = call.ownerFileId ? objects.get(call.ownerFileId) : objects.get(ownerFileId);
       const eventScriptPath = owner?.scriptGuid ? metadataIndex.getAssetPath(owner.scriptGuid) : undefined;
       references.push({
         assetPath,
@@ -606,6 +620,20 @@ function createEventReferenceProvider(
             } satisfies EventReferenceLocationTarget]
           }));
         }
+
+        const targetCount = index.getFieldTargetCount(scriptPath, field.name);
+        if (targetCount > 0) {
+          codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+            title: runtime.runtimeVscode.l10n.t('UnityEvent targets: {count}', { count: targetCount }),
+            command: 'unityPlus.showUnityEventReferenceLocations',
+            arguments: [{
+              kind: 'fieldTarget',
+              scriptPath,
+              symbolName: field.name,
+              position: field.range.start
+            } satisfies EventReferenceLocationTarget]
+          }));
+        }
       }
 
       return codeLenses;
@@ -654,12 +682,26 @@ function createEventReferenceProvider(
         return;
       }
 
-      const references = target.kind === 'method'
-        ? index.getReferences(target.scriptPath, target.symbolName)
-        : index.getFieldReferences(target.scriptPath, target.symbolName);
+      const references = getReferencesForLocationTarget(index, target);
 
       if (references.length === 0) {
         runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+        return;
+      }
+
+      if (target.kind === 'fieldTarget') {
+        const locations = await createTargetMethodLocations(runtime, references);
+        if (locations.length === 0) {
+          runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+          return;
+        }
+
+        await runtime.runtimeVscode.commands.executeCommand(
+          'editor.action.showReferences',
+          toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
+          target.position,
+          locations
+        );
         return;
       }
 
@@ -785,6 +827,129 @@ function parsePersistentCalls(body: string, startLine: number): PersistentCallSn
   return calls;
 }
 
+function parsePrefabOverridePersistentCalls(document: SerializedDocument): PersistentCallSnapshot[] {
+  if (document.classId !== prefabInstanceClassId) {
+    return [];
+  }
+
+  const callsByKey = new Map<string, Partial<PersistentCallSnapshot> & { fallbackLine?: number; fallbackCharacter?: number }>();
+  const lines = document.body.split(/\r?\n/);
+  let currentTargetFileId: string | undefined;
+  let currentPropertyPath: string | undefined;
+  let currentLine = document.startLine;
+  let currentCharacter = 0;
+
+  function flushModification(): void {
+    if (!currentPropertyPath) {
+      return;
+    }
+
+    // Unity stores prefab overrides as independent property changes, so group them by owner field and call index.
+    const parsedPath = persistentCallPropertyPathPattern.exec(currentPropertyPath);
+    if (!parsedPath) {
+      return;
+    }
+
+    const key = `${currentTargetFileId ?? ''}#${parsedPath[1]}#${parsedPath[2]}`;
+    const call = callsByKey.get(key) ?? {
+      ownerFileId: currentTargetFileId,
+      eventFieldName: parsedPath[1],
+      fallbackLine: currentLine,
+      fallbackCharacter: currentCharacter
+    };
+    call.ownerFileId = currentTargetFileId;
+    call.eventFieldName = parsedPath[1];
+    call.line = call.line ?? currentLine;
+    call.character = call.character ?? currentCharacter;
+    call.fallbackLine = Math.min(call.fallbackLine ?? currentLine, currentLine);
+    call.fallbackCharacter = call.fallbackLine === currentLine ? currentCharacter : call.fallbackCharacter;
+
+    if (parsedPath[3] === 'm_MethodName') {
+      call.methodName = '';
+      call.methodLine = currentLine;
+      call.methodCharacter = currentCharacter;
+      call.line = currentLine;
+      call.character = currentCharacter;
+    } else if (parsedPath[3] === 'm_TargetAssemblyTypeName') {
+      call.targetTypeName = '';
+    } else if (parsedPath[3] === 'm_Target') {
+      call.targetFileId = undefined;
+    } else if (parsedPath[3] === 'm_CallState') {
+      call.callState = 1;
+    }
+
+    callsByKey.set(key, call);
+  }
+
+  function applyValue(key: string | undefined, trimmed: string, line: number, valueCharacter: number): void {
+    if (!currentPropertyPath) {
+      return;
+    }
+
+    const parsedPath = persistentCallPropertyPathPattern.exec(currentPropertyPath);
+    if (!parsedPath) {
+      return;
+    }
+
+    const call = callsByKey.get(`${currentTargetFileId ?? ''}#${parsedPath[1]}#${parsedPath[2]}`);
+    if (!call) {
+      return;
+    }
+
+    if (key === 'value' && parsedPath[3] === 'm_MethodName') {
+      call.methodName = valueAfterColon(trimmed);
+      call.methodLine = line;
+      call.methodCharacter = valueCharacter;
+      call.line = line;
+      call.character = valueCharacter;
+    } else if (key === 'value' && parsedPath[3] === 'm_TargetAssemblyTypeName') {
+      call.targetTypeName = valueAfterColon(trimmed);
+    } else if (key === 'value' && parsedPath[3] === 'm_CallState') {
+      call.callState = Number(valueAfterColon(trimmed));
+    } else if (key === 'objectReference' && parsedPath[3] === 'm_Target') {
+      call.targetFileId = extractFileId(trimmed);
+    }
+  }
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    const absoluteLine = document.startLine + lineIndex;
+    const trimmed = line.trim();
+    const key = parseYamlKey(trimmed);
+
+    if (trimmed.startsWith('- target:')) {
+      currentTargetFileId = extractFileId(trimmed);
+      currentPropertyPath = undefined;
+      currentLine = absoluteLine;
+      currentCharacter = getValueCharacter(line);
+      continue;
+    }
+
+    if (key === 'propertyPath') {
+      currentPropertyPath = valueAfterColon(trimmed);
+      currentLine = absoluteLine;
+      currentCharacter = getValueCharacter(line);
+      flushModification();
+      continue;
+    }
+
+    applyValue(key, trimmed, absoluteLine, getValueCharacter(line));
+  }
+
+  return [...callsByKey.values()].map(call => ({
+    eventFieldName: call.eventFieldName ?? '<unknown>',
+    ownerFileId: call.ownerFileId,
+    line: call.methodLine ?? call.line ?? call.fallbackLine ?? document.startLine,
+    character: call.methodCharacter ?? call.character ?? call.fallbackCharacter ?? 0,
+    methodLine: call.methodLine,
+    methodCharacter: call.methodCharacter,
+    targetFileId: call.targetFileId,
+    targetTypeName: call.targetTypeName ?? '',
+    methodName: call.methodName ?? '',
+    callState: call.callState ?? 1
+  }));
+}
+
 function updatePersistentCall(
   currentCall: Partial<PersistentCallSnapshot>,
   key: string | undefined,
@@ -813,6 +978,8 @@ function createReferenceIndex(
 ): UnitySerializedAssetReferenceIndex {
   const referencesByKey = new Map<string, UnityEventReference[]>();
   const referencesByFieldKey = new Map<string, UnityEventReference[]>();
+  const targetReferencesByFieldKey = new Map<string, UnityEventReference[]>();
+  const targetReferenceKeysByFieldKey = new Map<string, Set<string>>();
 
   for (const reference of references) {
     const key = referenceKey(reference.scriptPath, reference.methodName);
@@ -825,6 +992,16 @@ function createReferenceIndex(
       const fieldBucket = referencesByFieldKey.get(fieldKey) ?? [];
       fieldBucket.push(reference);
       referencesByFieldKey.set(fieldKey, fieldBucket);
+
+      const targetKey = referenceKey(reference.scriptPath, reference.methodName);
+      const seenTargets = targetReferenceKeysByFieldKey.get(fieldKey) ?? new Set<string>();
+      if (!seenTargets.has(targetKey)) {
+        const targetBucket = targetReferencesByFieldKey.get(fieldKey) ?? [];
+        targetBucket.push(reference);
+        targetReferencesByFieldKey.set(fieldKey, targetBucket);
+        seenTargets.add(targetKey);
+        targetReferenceKeysByFieldKey.set(fieldKey, seenTargets);
+      }
     }
   }
 
@@ -840,6 +1017,12 @@ function createReferenceIndex(
     },
     getFieldReferenceCount(scriptPath, fieldName) {
       return referencesByFieldKey.get(referenceKey(scriptPath, fieldName))?.length ?? 0;
+    },
+    getFieldTargets(scriptPath, fieldName) {
+      return targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)) ?? [];
+    },
+    getFieldTargetCount(scriptPath, fieldName) {
+      return targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName))?.length ?? 0;
     },
     getAllReferences() {
       return references;
@@ -1003,6 +1186,66 @@ function createHoverMarkdown(
   }
 
   return markdown;
+}
+
+function getReferencesForLocationTarget(
+  index: UnitySerializedAssetReferenceIndex,
+  target: EventReferenceLocationTarget
+): readonly UnityEventReference[] {
+  if (target.kind === 'method') {
+    return index.getReferences(target.scriptPath, target.symbolName);
+  }
+
+  if (target.kind === 'fieldTarget') {
+    return index.getFieldTargets(target.scriptPath, target.symbolName);
+  }
+
+  return index.getFieldReferences(target.scriptPath, target.symbolName);
+}
+
+async function createTargetMethodLocations(
+  runtime: EventReferenceRuntime,
+  references: readonly UnityEventReference[]
+): Promise<vscode.Location[]> {
+  const locations: vscode.Location[] = [];
+
+  for (const reference of references) {
+    const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
+    try {
+      const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
+      const position = findCSharpMethodPosition(runtime.runtimeVscode, content, reference.methodName);
+      if (position) {
+        locations.push(new runtime.runtimeVscode.Location(uri, position));
+      }
+    } catch {
+      // Missing or unreadable scripts cannot provide target locations, but other targets may still resolve.
+    }
+  }
+
+  return locations;
+}
+
+function findCSharpMethodPosition(
+  runtimeVscode: typeof vscode,
+  content: string,
+  methodName: string
+): vscode.Position | undefined {
+  methodPattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = methodPattern.exec(content))) {
+    if (match[1] !== methodName) {
+      continue;
+    }
+
+    const nameStart = match.index + match[0].lastIndexOf(methodName);
+    const line = countLineBreaks(content, 0, nameStart);
+    const previousLineBreak = content.lastIndexOf('\n', nameStart - 1);
+    const character = nameStart - previousLineBreak - 1;
+    return new runtimeVscode.Position(line, character);
+  }
+
+  return undefined;
 }
 
 function toReferenceLocation(

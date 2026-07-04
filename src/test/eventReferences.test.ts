@@ -157,6 +157,21 @@ describe('eventReferences', () => {
     assert.strictEqual(references[0].line, 14);
   });
 
+  it('parses UnityEvent persistent calls from prefab override modifications', async () => {
+    const references = await parseUnityEventReferences(createPrefabOverrideYaml(2), 'Assets/GateVariant.prefab', 'prefab', createMetadataIndex(), createTypeResolver());
+
+    assert.strictEqual(references.length, 1);
+    assert.strictEqual(references[0].assetPath, 'Assets/GateVariant.prefab');
+    assert.strictEqual(references[0].eventFieldName, 'OnCheckEnable');
+    assert.strictEqual(references[0].eventScriptPath, gateScriptPath);
+    assert.strictEqual(references[0].gameObjectName, 'North Gate Variant');
+    assert.strictEqual(references[0].targetTypeName, 'Amlos.Fixtures.Gate');
+    assert.strictEqual(references[0].methodName, 'CanInteract');
+    assert.strictEqual(references[0].scriptPath, gateScriptPath);
+    assert.strictEqual(references[0].line, 22);
+    assert.strictEqual(references[0].character, 13);
+  });
+
   it('keeps UnityEvent line numbers correct after many serialized documents', async () => {
     const prefix = createManyEmptyYamlDocuments(1500);
     const content = `${prefix}\n${createPrefabYaml(2)}`;
@@ -192,7 +207,7 @@ describe('eventReferences', () => {
       metadataIndex: lazyIndex,
       isEnabled: () => true,
       findAssetFiles: async () => [prefabUri],
-      readTextFile: async () => createPrefabYaml(2),
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
       resolveCSharpType: async typeName => createTypeResolver()(typeName)
     });
 
@@ -201,7 +216,7 @@ describe('eventReferences', () => {
 
     await runtime.waitForCodeLensChange();
     const lenses = await runtime.provideCodeLenses(csharpDocument);
-    assert.strictEqual(lenses.length, 2);
+    assert.strictEqual(lenses.length, 3);
     assert.strictEqual(lenses[0].command?.title, 'UnityEvent references: 1');
     assert.strictEqual(lenses[0].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[0].command?.arguments?.[0], {
@@ -214,6 +229,14 @@ describe('eventReferences', () => {
     assert.strictEqual(lenses[1].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[1].command?.arguments?.[0], {
       kind: 'field',
+      scriptPath: gateScriptPath,
+      symbolName: 'OnCheckEnable',
+      position: new FakePosition(3, 20)
+    });
+    assert.strictEqual(lenses[2].command?.title, 'UnityEvent targets: 1');
+    assert.strictEqual(lenses[2].command?.command, 'unityPlus.showUnityEventReferenceLocations');
+    assert.deepStrictEqual(lenses[2].command?.arguments?.[0], {
+      kind: 'fieldTarget',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
       position: new FakePosition(3, 20)
@@ -237,6 +260,13 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(4, 14));
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[2].command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 2);
+    assert.strictEqual(runtime.referenceCommands[1].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(3, 20));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('schedules one background index build after repeated CodeLens requests', async () => {
@@ -389,6 +419,64 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
+  });
+
+  it('deduplicates UnityEvent field target CodeLens locations across normal and override bindings', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract()',
+      '  {',
+      '    return true;',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [
+        createUri('/Project/Assets/Gate.prefab'),
+        createUri('/Project/Assets/GateVariant.prefab')
+      ],
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('Gate.cs')) {
+          return csharpDocument.getText();
+        }
+
+        return uri.fsPath.endsWith('GateVariant.prefab') ? createPrefabOverrideYaml(2) : createPrefabYaml(2);
+      },
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldReferenceLens?.command?.title, 'UnityEvent references: 2');
+    assert.strictEqual(fieldTargetLens?.command?.title, 'UnityEvent targets: 1');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands[0].locations.length, 2);
+    assert.strictEqual(runtime.referenceCommands[0].locations[1].uri.fsPath, '/Project/Assets/GateVariant.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[1].range.start, new FakePosition(22, 13));
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands[1].locations.length, 1);
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('shows an informational message when a reference location command has no matches', async () => {
@@ -846,6 +934,39 @@ function createPrefabYamlWithNestedTarget(callState: number): string {
     '- m_Target: {fileID: 460066068064628344}',
     ['- m_Target:', '    fileID: 460066068064628344'].join('\n')
   );
+}
+
+function createPrefabOverrideYaml(callState: number): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!1 &1000',
+    'GameObject:',
+    '  m_Name: North Gate Variant',
+    '--- !u!114 &460066068064628344',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 1000}',
+    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
+    '--- !u!1001 &223344',
+    'PrefabInstance:',
+    '  m_Modification:',
+    '    m_Modifications:',
+    '    - target: {fileID: 460066068064628344}',
+    '      propertyPath: OnCheckEnable.m_PersistentCalls.m_Calls.Array.data[0].m_Target',
+    '      value: ',
+    '      objectReference: {fileID: 460066068064628344}',
+    '    - target: {fileID: 460066068064628344}',
+    '      propertyPath: OnCheckEnable.m_PersistentCalls.m_Calls.Array.data[0].m_TargetAssemblyTypeName',
+    '      value: Amlos.Fixtures.Gate, Amlos.Gameplay.Core',
+    '      objectReference: {fileID: 0}',
+    '    - target: {fileID: 460066068064628344}',
+    '      propertyPath: OnCheckEnable.m_PersistentCalls.m_Calls.Array.data[0].m_MethodName',
+    '      value: CanInteract',
+    '      objectReference: {fileID: 0}',
+    '    - target: {fileID: 460066068064628344}',
+    '      propertyPath: OnCheckEnable.m_PersistentCalls.m_Calls.Array.data[0].m_CallState',
+    `      value: ${callState}`,
+    '      objectReference: {fileID: 0}'
+  ].join('\n');
 }
 
 function createManyEmptyYamlDocuments(count: number): string {
