@@ -166,7 +166,7 @@ const documentHeaderPattern = /^--- !u!(\d+) &(-?\d+)/gm;
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
 const fileIdPattern = /fileID:\s*(-?\d+)/;
 const guidPattern = /guid:\s*([a-fA-F0-9]{32})/;
-const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,\[\]\.?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 const unityEventFieldPattern = /\b(?:public|private|protected|internal|static|readonly|new|serializedfield|SerializeField|\s|\[[^\]]+\])*(?:UnityEngine\.Events\.)?UnityEvent(?:\s*<[^;>{}]+>)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:[=;])/g;
 
 export function registerEventReferenceFeature(
