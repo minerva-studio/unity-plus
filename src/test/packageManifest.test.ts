@@ -44,6 +44,7 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.templates.scriptableObject'].default, '');
     assert.strictEqual(properties['unityPlus.eventReferences.enabled'].default, true);
     assert.strictEqual(properties['unityPlus.metaFiles.hideInExplorer'].default, true);
+    assert.strictEqual(properties['unityPlus.metaFiles.moveWithAsset'].default, true);
   });
 
   it('contributes explicit commands for creating Unity C# scripts', () => {

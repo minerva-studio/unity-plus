@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
 import type * as vscode from 'vscode';
-import { applyScriptFilenameSyncPlan, buildScriptFilenameSyncOperations, buildScriptMetaRenameOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, runRenameTypeCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, buildAssetMetaRenameOperations, buildScriptFilenameSyncOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, runRenameTypeCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
 import { CSharpTopLevelTypeSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
@@ -194,11 +194,47 @@ describe('renameSync', () => {
     ]);
   });
 
-  it('builds Unity meta rename operation for a direct C# file rename', async () => {
+  it('builds Unity meta rename operation for a direct asset rename', async () => {
     const oldPath = normalize('/Project/Assets/PlayerController.cs');
     const newPath = normalize('/Project/Assets/HeroController.cs');
 
-    const operations = await buildScriptMetaRenameOperations([{
+    const operations = await buildAssetMetaRenameOperations([{
+      oldPath,
+      newPath
+    }], {
+      fileExists: async path => path === `${oldPath}.meta`,
+      logger: createTestLogger()
+    });
+
+    assert.deepStrictEqual(operations, [{
+      oldPath: `${oldPath}.meta`,
+      newPath: `${newPath}.meta`
+    }]);
+  });
+
+  it('builds Unity meta rename operation for a non-C# asset rename', async () => {
+    const oldPath = normalize('/Project/Assets/icon.png');
+    const newPath = normalize('/Project/Assets/icon-renamed.png');
+
+    const operations = await buildAssetMetaRenameOperations([{
+      oldPath,
+      newPath
+    }], {
+      fileExists: async path => path === `${oldPath}.meta`,
+      logger: createTestLogger()
+    });
+
+    assert.deepStrictEqual(operations, [{
+      oldPath: `${oldPath}.meta`,
+      newPath: `${newPath}.meta`
+    }]);
+  });
+
+  it('builds Unity meta rename operation for an asset moved to another folder', async () => {
+    const oldPath = normalize('/Project/Assets/Player.prefab');
+    const newPath = normalize('/Project/Assets/Characters/Player.prefab');
+
+    const operations = await buildAssetMetaRenameOperations([{
       oldPath,
       newPath
     }], {
@@ -214,7 +250,7 @@ describe('renameSync', () => {
 
   it('does not build Unity meta rename operation when the old meta file is missing', async () => {
     const output = createMemoryOutput();
-    const operations = await buildScriptMetaRenameOperations([{
+    const operations = await buildAssetMetaRenameOperations([{
       oldPath: normalize('/Project/Assets/PlayerController.cs'),
       newPath: normalize('/Project/Assets/HeroController.cs')
     }], {
@@ -226,7 +262,7 @@ describe('renameSync', () => {
     });
 
     assert.deepStrictEqual(operations, []);
-    assert.strictEqual(output.lines.some(line => line.includes('Unity script meta file was not found')), true);
+    assert.strictEqual(output.lines.some(line => line.includes('Unity meta file was not found')), true);
   });
 
   it('does not build Unity meta rename operation when the target meta file already exists', async () => {
@@ -234,7 +270,7 @@ describe('renameSync', () => {
     const oldPath = normalize('/Project/Assets/PlayerController.cs');
     const newPath = normalize('/Project/Assets/HeroController.cs');
 
-    const operations = await buildScriptMetaRenameOperations([{
+    const operations = await buildAssetMetaRenameOperations([{
       oldPath,
       newPath
     }], {
@@ -253,7 +289,7 @@ describe('renameSync', () => {
     const oldPath = normalize('/Project/Assets/PlayerController.cs');
     const newPath = normalize('/Project/Assets/HeroController.cs');
 
-    const operations = await buildScriptMetaRenameOperations([
+    const operations = await buildAssetMetaRenameOperations([
       {
         oldPath,
         newPath
@@ -270,10 +306,10 @@ describe('renameSync', () => {
     assert.deepStrictEqual(operations, []);
   });
 
-  it('does not build Unity meta rename operation for non-C# file moves', async () => {
-    const operations = await buildScriptMetaRenameOperations([{
-      oldPath: normalize('/Project/Assets/icon.png'),
-      newPath: normalize('/Project/Assets/icon-renamed.png')
+  it('does not build Unity meta rename operation for meta file moves', async () => {
+    const operations = await buildAssetMetaRenameOperations([{
+      oldPath: normalize('/Project/Assets/icon.png.meta'),
+      newPath: normalize('/Project/Assets/icon-renamed.png.meta')
     }], {
       fileExists: async () => true,
       logger: createTestLogger()
@@ -289,7 +325,7 @@ describe('renameSync', () => {
       logger: createTestLogger()
     });
 
-    const metaOperations = await buildScriptMetaRenameOperations(classSyncOperations, {
+    const metaOperations = await buildAssetMetaRenameOperations(classSyncOperations, {
       fileExists: async path => path === plan.oldMetaPath,
       logger: createTestLogger()
     });
@@ -845,7 +881,8 @@ describe('renameSync', () => {
 
     registerRenameFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
-      getMode: () => 'off'
+      getMode: () => 'off',
+      getMoveMetaWithAsset: () => false
     });
 
     assert.deepStrictEqual(runtime.registeredCommands, [
@@ -859,12 +896,65 @@ describe('renameSync', () => {
     assert.strictEqual(runtime.textDocumentsReads, 0);
   });
 
+  it('registers only asset meta rename listener when type/file sync is off and meta moves are on', () => {
+    const runtime = createRenameFeatureRuntime();
+
+    registerRenameFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      getMode: () => 'off',
+      getMoveMetaWithAsset: () => true
+    });
+
+    assert.strictEqual(runtime.renameFileListeners, 1);
+    assert.strictEqual(runtime.openDocumentListeners, 0);
+    assert.strictEqual(runtime.closeDocumentListeners, 0);
+    assert.strictEqual(runtime.changeDocumentListeners, 0);
+  });
+
+  it('moves asset meta files from the rename listener when meta moves are enabled', async () => {
+    const runtime = createRenameFeatureRuntime();
+    const oldPath = normalize('/Project/Assets/icon.png');
+    const newPath = normalize('/Project/Assets/icon-renamed.png');
+    runtime.files.add(`${oldPath}.meta`);
+
+    registerRenameFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      getMode: () => 'off',
+      getMoveMetaWithAsset: () => true
+    });
+
+    await runtime.fireRenameFiles([{ oldPath, newPath }]);
+
+    assert.deepStrictEqual(runtime.appliedRenames, [{
+      oldPath: `${oldPath}.meta`,
+      newPath: `${newPath}.meta`
+    }]);
+  });
+
+  it('does not move asset meta files from the rename listener when meta moves are disabled', async () => {
+    const runtime = createRenameFeatureRuntime();
+    const oldPath = normalize('/Project/Assets/icon.png');
+    const newPath = normalize('/Project/Assets/icon-renamed.png');
+    runtime.files.add(`${oldPath}.meta`);
+
+    registerRenameFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      getMode: () => 'on',
+      getMoveMetaWithAsset: () => false
+    });
+
+    await runtime.fireRenameFiles([{ oldPath, newPath }]);
+
+    assert.deepStrictEqual(runtime.appliedRenames, []);
+  });
+
   it('registers automatic rename listeners without scanning already-open documents', () => {
     const runtime = createRenameFeatureRuntime();
 
     registerRenameFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
-      getMode: () => 'on'
+      getMode: () => 'on',
+      getMoveMetaWithAsset: () => false
     });
 
     assert.strictEqual(runtime.renameFileListeners, 1);
@@ -880,6 +970,7 @@ describe('renameSync', () => {
     registerRenameFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
       getMode: () => 'on',
+      getMoveMetaWithAsset: () => true,
       isUnityWorkspace: false
     });
 
@@ -1114,16 +1205,22 @@ function createSyncPlan(): ScriptFilenameSyncPlan {
 interface RenameFeatureRuntime {
   runtime: typeof vscode;
   registeredCommands: string[];
+  files: Set<string>;
+  appliedRenames: { oldPath: string; newPath: string }[];
   renameFileListeners: number;
   openDocumentListeners: number;
   closeDocumentListeners: number;
   changeDocumentListeners: number;
   textDocumentsReads: number;
+  fireRenameFiles(files: { oldPath: string; newPath: string }[]): Promise<void>;
 }
 
 function createRenameFeatureRuntime(): RenameFeatureRuntime {
   const state = {
     registeredCommands: [] as string[],
+    files: new Set<string>(),
+    appliedRenames: [] as { oldPath: string; newPath: string }[],
+    renameFileHandler: undefined as ((event: { files: { oldUri: ReturnType<typeof fakeUri>; newUri: ReturnType<typeof fakeUri> }[] }) => void) | undefined,
     renameFileListeners: 0,
     openDocumentListeners: 0,
     closeDocumentListeners: 0,
@@ -1143,10 +1240,11 @@ function createRenameFeatureRuntime(): RenameFeatureRuntime {
         return [];
       },
       getConfiguration: () => ({
-        get: () => 'off'
+        get: (_key: string, defaultValue: unknown) => defaultValue
       }),
-      onDidRenameFiles: () => {
+      onDidRenameFiles: (handler: (event: { files: { oldUri: ReturnType<typeof fakeUri>; newUri: ReturnType<typeof fakeUri> }[] }) => void) => {
         state.renameFileListeners += 1;
+        state.renameFileHandler = handler;
         return createDisposable();
       },
       onDidOpenTextDocument: () => {
@@ -1160,7 +1258,25 @@ function createRenameFeatureRuntime(): RenameFeatureRuntime {
       onDidChangeTextDocument: () => {
         state.changeDocumentListeners += 1;
         return createDisposable();
+      },
+      fs: {
+        async stat(uri: { fsPath: string }) {
+          if (!state.files.has(uri.fsPath)) {
+            throw new Error('File not found.');
+          }
+        }
+      },
+      async applyEdit(edit: FakeWorkspaceEdit) {
+        state.appliedRenames.push(...edit.fileRenames);
+        return true;
       }
+    },
+    Uri: {
+      file: fakeUri
+    },
+    WorkspaceEdit: FakeWorkspaceEdit,
+    window: {
+      activeTextEditor: undefined
     },
     Disposable: {
       from: (..._disposables: vscode.Disposable[]) => createDisposable()
@@ -1171,6 +1287,12 @@ function createRenameFeatureRuntime(): RenameFeatureRuntime {
     runtime,
     get registeredCommands() {
       return state.registeredCommands;
+    },
+    get files() {
+      return state.files;
+    },
+    get appliedRenames() {
+      return state.appliedRenames;
     },
     get renameFileListeners() {
       return state.renameFileListeners;
@@ -1186,6 +1308,15 @@ function createRenameFeatureRuntime(): RenameFeatureRuntime {
     },
     get textDocumentsReads() {
       return state.textDocumentsReads;
+    },
+    async fireRenameFiles(files: { oldPath: string; newPath: string }[]): Promise<void> {
+      state.renameFileHandler?.({
+        files: files.map(file => ({
+          oldUri: fakeUri(file.oldPath),
+          newUri: fakeUri(file.newPath)
+        }))
+      });
+      await new Promise(resolve => setImmediate(resolve));
     }
   };
 }

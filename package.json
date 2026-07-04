@@ -163,6 +163,11 @@
           "default": true,
           "description": "Hide Unity .meta files in the VS Code Explorer while keeping Unity Plus meta file actions available."
         },
+        "unityPlus.metaFiles.moveWithAsset": {
+          "type": "boolean",
+          "default": true,
+          "description": "Move Unity .meta files with their asset files when assets are renamed or moved."
+        },
         "unityPlus.scan.includeScenesOutsideBuildSettings": {
           "type": "boolean",
           "default": true,

@@ -10,6 +10,7 @@ type LegacyRenameFileSyncMode = RenameFileSyncMode | 'unity-object' | 'any';
 export interface RenameFeatureOptions {
   runtimeVscode?: typeof vscode;
   getMode?: () => RenameFileSyncMode;
+  getMoveMetaWithAsset?: () => boolean;
   isUnityWorkspace?: boolean;
 }
 
@@ -122,6 +123,7 @@ export function registerRenameFeature(
 ): vscode.Disposable {
   const runtimeVscode = options.runtimeVscode ?? loadVscode();
   const getMode = options.getMode ?? (() => getRenameFileSyncMode(runtimeVscode));
+  const getMoveMetaWithAsset = options.getMoveMetaWithAsset ?? (() => getMetaFilesMoveWithAsset(runtimeVscode));
   const isUnityWorkspace = options.isUnityWorkspace ?? true;
   const languageService = createVscodeCSharpLanguageService(runtimeVscode);
   const disposables: vscode.Disposable[] = [];
@@ -185,31 +187,36 @@ export function registerRenameFeature(
     }
   }));
 
-  if (isUnityWorkspace && getMode() !== 'off') {
+  if (isUnityWorkspace && (getMode() !== 'off' || getMoveMetaWithAsset())) {
     disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
-      if (getMode() === 'off') {
-        return;
-      }
+      const mode = getMode();
+      const moveMetaWithAsset = getMoveMetaWithAsset();
 
       const csharpMoves = event.files.filter(file => file.oldUri.path.endsWith('.cs') || file.newUri.path.endsWith('.cs'));
-      if (csharpMoves.length > 0) {
+      if (mode !== 'off' && csharpMoves.length > 0) {
         logger.debug(`Observed ${csharpMoves.length} C# rename operation(s).`);
       }
 
-      for (const file of csharpMoves) {
-        const previousType = previousCsharpTypes.get(file.oldUri.fsPath);
-        if (previousType) {
-          previousCsharpTypes.set(file.newUri.fsPath, previousType);
-          previousCsharpTypes.delete(file.oldUri.fsPath);
+      if (mode !== 'off') {
+        for (const file of csharpMoves) {
+          const previousType = previousCsharpTypes.get(file.oldUri.fsPath);
+          if (previousType) {
+            previousCsharpTypes.set(file.newUri.fsPath, previousType);
+            previousCsharpTypes.delete(file.oldUri.fsPath);
+          }
         }
       }
 
-      void moveScriptMetaFilesForDirectRename(runtimeVscode, event.files.map(file => ({
-        oldPath: file.oldUri.fsPath,
-        newPath: file.newUri.fsPath
-      })), logger);
+      if (moveMetaWithAsset) {
+        void moveAssetMetaFilesForDirectRename(runtimeVscode, event.files.map(file => ({
+          oldPath: file.oldUri.fsPath,
+          newPath: file.newUri.fsPath
+        })), logger);
+      }
     }));
+  }
 
+  if (isUnityWorkspace && getMode() !== 'off') {
     disposables.push(runtimeVscode.workspace.onDidOpenTextDocument(document => {
       const mode = getMode();
       if (mode !== 'off' && document.uri.fsPath.endsWith('.cs')) {
@@ -684,7 +691,7 @@ export async function buildScriptFilenameSyncOperations(
   return renameOperations;
 }
 
-export async function buildScriptMetaRenameOperations(
+export async function buildAssetMetaRenameOperations(
   moves: readonly ScriptFileMove[],
   operations: Pick<ScriptFilenameSyncOperations, 'fileExists' | 'logger'>
 ): Promise<ScriptFileRenameOperation[]> {
@@ -692,7 +699,7 @@ export async function buildScriptMetaRenameOperations(
   const renameOperations: ScriptFileRenameOperation[] = [];
 
   for (const move of moves) {
-    if (!isCSharpScriptMove(move)) {
+    if (isMetaFileMove(move)) {
       continue;
     }
 
@@ -705,12 +712,12 @@ export async function buildScriptMetaRenameOperations(
     }
 
     if (!await operations.fileExists(oldMetaPath)) {
-      operations.logger.debug(`Unity script meta file was not found for ${basename(oldMetaPath)}.`);
+      operations.logger.debug(`Unity meta file was not found for ${basename(oldMetaPath)}.`);
       continue;
     }
 
     if (await operations.fileExists(newMetaPath)) {
-      operations.logger.warn(`Unity script meta rename skipped because ${basename(newMetaPath)} already exists.`);
+      operations.logger.warn(`Unity meta rename skipped because ${basename(newMetaPath)} already exists.`);
       continue;
     }
 
@@ -749,12 +756,12 @@ async function applyRenameOperations(
   return await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true });
 }
 
-async function moveScriptMetaFilesForDirectRename(
+async function moveAssetMetaFilesForDirectRename(
   runtimeVscode: typeof vscode,
   moves: readonly ScriptFileMove[],
   logger: UnityPlusLogger
 ): Promise<void> {
-  const renameOperations = await buildScriptMetaRenameOperations(moves, {
+  const renameOperations = await buildAssetMetaRenameOperations(moves, {
     fileExists: async path => await fileExists(runtimeVscode, path),
     logger
   });
@@ -765,7 +772,7 @@ async function moveScriptMetaFilesForDirectRename(
 
   const applied = await applyRenameOperations(runtimeVscode, renameOperations);
   if (applied) {
-    logger.info(`Moved ${renameOperations.length} Unity script meta file(s) after C# file rename.`);
+    logger.info(`Moved ${renameOperations.length} Unity meta file(s) after asset rename.`);
   }
 }
 
@@ -773,8 +780,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isCSharpScriptMove(move: ScriptFileMove): boolean {
-  return move.oldPath.endsWith('.cs') && move.newPath.endsWith('.cs');
+function isMetaFileMove(move: ScriptFileMove): boolean {
+  return move.oldPath.endsWith('.meta') || move.newPath.endsWith('.meta');
 }
 
 function getAtomicRenameFallbackReason(
@@ -912,6 +919,10 @@ function getRenameFileSyncMode(runtimeVscode: typeof vscode): RenameFileSyncMode
   const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.classFileSyncMode', 'on');
 
   return normalizeRenameFileSyncMode(mode);
+}
+
+function getMetaFilesMoveWithAsset(runtimeVscode: typeof vscode): boolean {
+  return runtimeVscode.workspace.getConfiguration('unityPlus').get<boolean>('metaFiles.moveWithAsset', true) === true;
 }
 
 function normalizeRenameFileSyncMode(mode: string | undefined): RenameFileSyncMode {
