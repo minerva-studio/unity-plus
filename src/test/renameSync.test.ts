@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
 import type * as vscode from 'vscode';
-import { applyScriptFilenameSyncPlan, buildAssetMetaRenameOperations, buildScriptFilenameSyncOperations, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, runRenameTypeCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, buildAssetMetaRenameOperations, buildScriptFilenameSyncOperations, confirmRenamePreview, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, RenamePreviewMode, runRenameTypeCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
 import { CSharpTopLevelTypeSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
@@ -538,6 +538,38 @@ describe('renameSync', () => {
     ]);
   });
 
+  it('applies atomic class rename silently without showing preview', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    let previewCalled = false;
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'on',
+      previewMode: 'silent',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => true,
+      confirmRenamePreview: async () => {
+        previewCalled = true;
+        return false;
+      },
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.strictEqual(previewCalled, false);
+    assert.deepStrictEqual(csharpEdit.fileRenames, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
+  });
+
   it('previews atomic class, script, and Unity meta rename before applying', async () => {
     const plan = createSyncPlan();
     const csharpEdit = new FakeWorkspaceEdit();
@@ -559,7 +591,7 @@ describe('renameSync', () => {
         order.push('apply');
         return true;
       },
-      confirmRenamePreview: async (previewedPlan, operations) => {
+      confirmRenamePreview: async (_previewMode, previewedPlan, operations) => {
         order.push('preview');
         previewPlan = previewedPlan;
         previewOperations = [...operations];
@@ -575,6 +607,38 @@ describe('renameSync', () => {
       { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
       { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
     ]);
+  });
+
+  it('applies only the C# rename edit when preview removes script rename operations', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    let appliedEdit: FakeWorkspaceEdit | undefined;
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'on',
+      previewMode: 'ask',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async edit => {
+        appliedEdit = edit as unknown as FakeWorkspaceEdit;
+        return true;
+      },
+      confirmRenamePreview: async () => ({
+        kind: 'confirmed',
+        operations: []
+      }),
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.strictEqual(appliedEdit, csharpEdit);
+    assert.deepStrictEqual(csharpEdit.fileRenames, []);
   });
 
   it('cancels atomic rename from the safety preview without applying edits', async () => {
@@ -603,6 +667,132 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'cancelled');
     assert.strictEqual(applyCalled, false);
     assert.deepStrictEqual(csharpEdit.fileRenames, []);
+  });
+
+  it('chooses script and Unity meta file operations from the ask preview', async () => {
+    const plan = createSyncPlan();
+    const previewRuntime = createRenamePreviewRuntime({});
+
+    const decision = await confirmRenamePreview(
+      previewRuntime.runtime,
+      'ask',
+      plan,
+      [
+        { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+        { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+      ],
+      createFakeWorkspaceEdit()
+    );
+
+    assert.strictEqual(decision.kind, 'confirmed');
+    assert.deepStrictEqual(decision.kind === 'confirmed' ? decision.operations : [], [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
+    assert.strictEqual(previewRuntime.warningMessages.length, 0);
+  });
+
+  it('applies only C# rename edits when the ask preview unchecks script rename', async () => {
+    const plan = createSyncPlan();
+    const previewRuntime = createRenamePreviewRuntime({
+      selectedLabels: []
+    });
+
+    const decision = await confirmRenamePreview(
+      previewRuntime.runtime,
+      'ask',
+      plan,
+      [
+        { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+        { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+      ],
+      createFakeWorkspaceEdit()
+    );
+
+    assert.strictEqual(decision.kind, 'confirmed');
+    assert.deepStrictEqual(decision.kind === 'confirmed' ? decision.operations : [], []);
+  });
+
+  it('cancels rename when the ask preview picker is cancelled', async () => {
+    const plan = createSyncPlan();
+    const previewRuntime = createRenamePreviewRuntime({
+      cancelPicker: true
+    });
+
+    const decision = await confirmRenamePreview(
+      previewRuntime.runtime,
+      'ask',
+      plan,
+      [{ oldPath: plan.oldFilePath, newPath: plan.newFilePath }],
+      createFakeWorkspaceEdit()
+    );
+
+    assert.strictEqual(decision.kind, 'cancelled');
+  });
+
+  it('shows detailed affected-file warning after ask+warn preview selection', async () => {
+    const plan = createSyncPlan();
+    const previewRuntime = createRenamePreviewRuntime({});
+
+    const decision = await confirmRenamePreview(
+      previewRuntime.runtime,
+      'ask+warn',
+      plan,
+      [
+        { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+        { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+      ],
+      createFakeWorkspaceEdit([
+        normalize('/Project/Assets/PlayerController.cs'),
+        normalize('/Project/Assets/PlayerSpawner.cs')
+      ])
+    );
+
+    assert.strictEqual(decision.kind, 'confirmed');
+    assert.strictEqual(previewRuntime.warningMessages.length, 1);
+    assert.strictEqual(previewRuntime.warningMessages[0].includes('PlayerController.cs'), true);
+    assert.strictEqual(previewRuntime.warningMessages[0].includes('PlayerSpawner.cs'), true);
+  });
+
+  it('cancels rename when the ask+warn detailed warning is cancelled', async () => {
+    const plan = createSyncPlan();
+    const previewRuntime = createRenamePreviewRuntime({
+      warningResult: undefined
+    });
+
+    const decision = await confirmRenamePreview(
+      previewRuntime.runtime,
+      'ask+warn',
+      plan,
+      [{ oldPath: plan.oldFilePath, newPath: plan.newFilePath }],
+      createFakeWorkspaceEdit([normalize('/Project/Assets/PlayerController.cs')])
+    );
+
+    assert.strictEqual(decision.kind, 'cancelled');
+  });
+
+  it('limits detailed affected-file warning to five files plus a remainder count', async () => {
+    const plan = createSyncPlan();
+    const previewRuntime = createRenamePreviewRuntime({});
+
+    await confirmRenamePreview(
+      previewRuntime.runtime,
+      'ask+warn',
+      plan,
+      [{ oldPath: plan.oldFilePath, newPath: plan.newFilePath }],
+      createFakeWorkspaceEdit([
+        normalize('/Project/Assets/File1.cs'),
+        normalize('/Project/Assets/File2.cs'),
+        normalize('/Project/Assets/File3.cs'),
+        normalize('/Project/Assets/File4.cs'),
+        normalize('/Project/Assets/File5.cs'),
+        normalize('/Project/Assets/File6.cs')
+      ])
+    );
+
+    assert.strictEqual(previewRuntime.warningMessages[0].includes('File5.cs'), true);
+    assert.strictEqual(previewRuntime.warningMessages[0].includes('File6.cs'), false);
+    assert.strictEqual(previewRuntime.warningMessages[0].includes('and 1 other files'), true);
   });
 
   it('applies atomic class rename without Unity meta when the old meta is missing', async () => {
@@ -1198,12 +1388,25 @@ function fakeUri(path: string) {
 class FakeWorkspaceEdit {
   public readonly fileRenames: { oldPath: string; newPath: string }[] = [];
 
+  public constructor(private readonly affectedFiles: string[] = []) {}
+
   renameFile(oldUri: { fsPath: string }, newUri: { fsPath: string }): void {
     this.fileRenames.push({
       oldPath: oldUri.fsPath,
       newPath: newUri.fsPath
     });
   }
+
+  entries(): Array<[{ fsPath: string }, unknown[]]> {
+    return this.affectedFiles.map(filePath => [
+      fakeUri(filePath),
+      [{}]
+    ]);
+  }
+}
+
+function createFakeWorkspaceEdit(affectedFiles: string[] = []): vscode.WorkspaceEdit {
+  return new FakeWorkspaceEdit(affectedFiles) as unknown as vscode.WorkspaceEdit;
 }
 
 interface RenameCommandRuntimeOptions {
@@ -1214,6 +1417,7 @@ interface RenameCommandRuntimeOptions {
     cursor: { line: number; character: number };
   };
   mode?: RenameFileSyncMode;
+  previewMode?: RenamePreviewMode;
   primaryTopLevelType?: CSharpTopLevelTypeSnapshot;
   primaryTopLevelTypes?: Array<CSharpTopLevelTypeSnapshot | undefined>;
   inputValue?: string;
@@ -1240,6 +1444,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const runtime = {
     editor: options.editor,
     mode: options.mode ?? 'on',
+    previewMode: options.previewMode ?? 'ask',
     languageService,
     async showInputBox() {
       inputBoxCalls.push('showInputBox');
@@ -1270,7 +1475,11 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
       appliedEdits.push(edit);
       return true;
     },
-    async confirmRenamePreview(plan: ScriptFilenameSyncPlan, operations: readonly { oldPath: string; newPath: string }[]): Promise<boolean> {
+    async confirmRenamePreview(
+      _previewMode: RenamePreviewMode,
+      plan: ScriptFilenameSyncPlan,
+      operations: readonly { oldPath: string; newPath: string }[]
+    ): Promise<boolean> {
       previewCalls.push({
         plan,
         operations: [...operations]
@@ -1445,6 +1654,47 @@ function createRenameFeatureRuntime(): RenameFeatureRuntime {
       });
       await new Promise(resolve => setImmediate(resolve));
     }
+  };
+}
+
+function createRenamePreviewRuntime(options: {
+  selectedLabels?: string[];
+  cancelPicker?: boolean;
+  warningResult?: string;
+}) {
+  const warningMessages: string[] = [];
+  const runtime = {
+    l10n: {
+      t(message: string, args?: Record<string, unknown>) {
+        return args
+          ? Object.entries(args).reduce((current, [key, value]) => current.replace(`{${key}}`, String(value)), message)
+          : message;
+      }
+    },
+    window: {
+      async showQuickPick(items: Array<vscode.QuickPickItem & { kind?: string }>) {
+        if (options.cancelPicker) {
+          return undefined;
+        }
+
+        if (!options.selectedLabels) {
+          return items.filter(item => item.picked);
+        }
+
+        return items.filter(item => options.selectedLabels?.includes(item.label));
+      },
+      async showWarningMessage(message: string, _options: { modal: boolean }, ...items: string[]) {
+        warningMessages.push(message);
+        return options.warningResult === undefined && 'warningResult' in options
+          ? undefined
+          : options.warningResult ?? items[0];
+      }
+    }
+  } as unknown as typeof vscode;
+
+  return {
+    runtime,
+    warningMessages
   };
 }
 

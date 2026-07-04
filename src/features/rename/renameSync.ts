@@ -5,11 +5,13 @@ import { createVscodeCSharpLanguageService, CSharpTopLevelTypeSnapshot, CSharpLa
 import { UnityPlusLogger } from '../../unity/logger';
 
 export type RenameFileSyncMode = 'on' | 'off';
+export type RenamePreviewMode = 'silent' | 'ask' | 'ask+warn';
 type LegacyRenameFileSyncMode = RenameFileSyncMode | 'unity-object' | 'any';
 
 export interface RenameFeatureOptions {
   runtimeVscode?: typeof vscode;
   getMode?: () => RenameFileSyncMode;
+  getPreviewMode?: () => RenamePreviewMode;
   getMoveMetaWithAsset?: () => boolean;
   isUnityWorkspace?: boolean;
 }
@@ -34,6 +36,15 @@ export interface ScriptFileRenameOperation {
   oldPath: string;
   newPath: string;
 }
+
+export type RenamePreviewDecision =
+  | { kind: 'confirmed'; operations: readonly ScriptFileRenameOperation[] }
+  | { kind: 'cancelled' };
+
+type RenameOperationQuickPickItem = vscode.QuickPickItem & {
+  operation: ScriptFileRenameOperation;
+  operationKind: 'script' | 'meta';
+};
 
 export interface ScriptFileMove {
   oldPath: string;
@@ -66,6 +77,7 @@ export interface AtomicScriptRenameRuntime {
   uri: vscode.Uri;
   filePath: string;
   mode: RenameFileSyncMode;
+  previewMode?: RenamePreviewMode;
   currentType: CSharpTopLevelTypeSnapshot | undefined;
   cursor: CSharpPosition;
   newTypeName: string;
@@ -73,7 +85,12 @@ export interface AtomicScriptRenameRuntime {
   fileExists(path: string): Promise<boolean>;
   createFileUri(path: string): vscode.Uri;
   applyWorkspaceEdit(edit: vscode.WorkspaceEdit): Promise<boolean>;
-  confirmRenamePreview(plan: ScriptFilenameSyncPlan, operations: readonly ScriptFileRenameOperation[]): Promise<boolean>;
+  confirmRenamePreview(
+    previewMode: RenamePreviewMode,
+    plan: ScriptFilenameSyncPlan,
+    operations: readonly ScriptFileRenameOperation[],
+    edit: vscode.WorkspaceEdit
+  ): Promise<RenamePreviewDecision | boolean>;
   logger: UnityPlusLogger;
 }
 
@@ -87,6 +104,7 @@ export interface RenameCommandEditor {
 export interface RenameTypeCommandRuntime {
   editor?: RenameCommandEditor;
   mode: RenameFileSyncMode;
+  previewMode: RenamePreviewMode;
   languageService: CSharpLanguageService;
   showInputBox(options: { value: string; prompt: string; validateInput(value: string): string | undefined }): Promise<string | undefined>;
   showProgress<T>(title: string, task: () => Promise<T>): Promise<T>;
@@ -97,7 +115,12 @@ export interface RenameTypeCommandRuntime {
   fileExists(path: string): Promise<boolean>;
   createFileUri(path: string): vscode.Uri;
   applyWorkspaceEdit(edit: vscode.WorkspaceEdit): Promise<boolean>;
-  confirmRenamePreview(plan: ScriptFilenameSyncPlan, operations: readonly ScriptFileRenameOperation[]): Promise<boolean>;
+  confirmRenamePreview(
+    previewMode: RenamePreviewMode,
+    plan: ScriptFilenameSyncPlan,
+    operations: readonly ScriptFileRenameOperation[],
+    edit: vscode.WorkspaceEdit
+  ): Promise<RenamePreviewDecision | boolean>;
   wait(ms: number): Promise<void>;
   retryIntervalMs: number;
   settleTimeoutMs: number;
@@ -126,6 +149,7 @@ export function registerRenameFeature(
 ): vscode.Disposable {
   const runtimeVscode = options.runtimeVscode ?? loadVscode();
   const getMode = options.getMode ?? (() => getRenameFileSyncMode(runtimeVscode));
+  const getPreviewMode = options.getPreviewMode ?? (() => getRenamePreviewMode(runtimeVscode));
   const getMoveMetaWithAsset = options.getMoveMetaWithAsset ?? (() => getMetaFilesMoveWithAsset(runtimeVscode));
   const isUnityWorkspace = options.isUnityWorkspace ?? true;
   const languageService = createVscodeCSharpLanguageService(runtimeVscode);
@@ -144,6 +168,7 @@ export function registerRenameFeature(
       const result = await runRenameTypeCommand({
         editor: createRenameCommandEditor(runtimeVscode.window.activeTextEditor),
         mode: getMode(),
+        previewMode: getPreviewMode(),
         languageService,
         showInputBox: async options => await runtimeVscode.window.showInputBox(options),
         showProgress: async (title, task) => await runtimeVscode.window.withProgress({
@@ -161,7 +186,7 @@ export function registerRenameFeature(
         fileExists: async path => await fileExists(runtimeVscode, path),
         createFileUri: path => runtimeVscode.Uri.file(path),
         applyWorkspaceEdit: async edit => await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true }),
-        confirmRenamePreview: async (plan, operations) => await confirmRenamePreview(runtimeVscode, plan, operations),
+        confirmRenamePreview: async (previewMode, plan, operations, edit) => await confirmRenamePreview(runtimeVscode, previewMode, plan, operations, edit),
         wait,
         retryIntervalMs: 200,
         settleTimeoutMs: 2000,
@@ -358,6 +383,7 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
         uri: runtime.editor!.uri,
         filePath: runtime.editor!.filePath,
         mode: runtime.mode,
+        previewMode: runtime.previewMode,
         currentType: renameType,
         cursor: runtime.editor!.cursor,
         newTypeName,
@@ -467,13 +493,12 @@ export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRunti
     return { kind: 'failed', message: `Script file rename preflight failed for ${basename(runtime.filePath)}.` };
   }
 
-  // Preview happens after preflight and before the workspace edit is applied, so it shows the exact safe operations.
-  const confirmed = await runtime.confirmRenamePreview(plan, renameOperations);
-  if (!confirmed) {
+  const previewDecision = await decideRenamePreview(runtime, plan, renameOperations, renameEdit);
+  if (previewDecision.kind === 'cancelled') {
     return { kind: 'cancelled' };
   }
 
-  for (const operation of renameOperations) {
+  for (const operation of previewDecision.operations) {
     renameEdit.renameFile(
       runtime.createFileUri(operation.oldPath),
       runtime.createFileUri(operation.newPath),
@@ -493,13 +518,107 @@ export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRunti
   };
 }
 
-async function confirmRenamePreview(
+export async function confirmRenamePreview(
+  runtimeVscode: typeof vscode,
+  previewMode: RenamePreviewMode,
+  plan: ScriptFilenameSyncPlan,
+  operations: readonly ScriptFileRenameOperation[],
+  edit: vscode.WorkspaceEdit
+): Promise<RenamePreviewDecision> {
+  const selectedOperations = await pickRenameOperations(runtimeVscode, plan, operations);
+  if (!selectedOperations) {
+    return { kind: 'cancelled' };
+  }
+
+  if (previewMode === 'ask+warn') {
+    const confirmed = await confirmDetailedRenameWarning(runtimeVscode, plan, selectedOperations, edit);
+    if (!confirmed) {
+      return { kind: 'cancelled' };
+    }
+  }
+
+  return { kind: 'confirmed', operations: selectedOperations };
+}
+
+async function decideRenamePreview(
+  runtime: AtomicScriptRenameRuntime,
+  plan: ScriptFilenameSyncPlan,
+  operations: readonly ScriptFileRenameOperation[],
+  edit: vscode.WorkspaceEdit
+): Promise<RenamePreviewDecision> {
+  if ((runtime.previewMode ?? 'ask') === 'silent') {
+    return { kind: 'confirmed', operations };
+  }
+
+  // Preview happens after preflight and before the workspace edit is applied, so it shows the exact safe operations.
+  const decision = await runtime.confirmRenamePreview(runtime.previewMode ?? 'ask', plan, operations, edit);
+  if (typeof decision === 'boolean') {
+    return decision
+      ? { kind: 'confirmed', operations }
+      : { kind: 'cancelled' };
+  }
+
+  return decision;
+}
+
+async function pickRenameOperations(
   runtimeVscode: typeof vscode,
   plan: ScriptFilenameSyncPlan,
   operations: readonly ScriptFileRenameOperation[]
-): Promise<boolean> {
+): Promise<ScriptFileRenameOperation[] | undefined> {
   const scriptOperation = operations.find(operation => operation.oldPath === plan.oldFilePath);
   const metaOperation = operations.find(operation => operation.oldPath === plan.oldMetaPath);
+  const scriptLabel = runtimeVscode.l10n.t('Rename script file');
+  const metaLabel = runtimeVscode.l10n.t('Rename Unity meta file');
+  const items: RenameOperationQuickPickItem[] = [];
+
+  if (scriptOperation) {
+    items.push({
+      label: scriptLabel,
+      description: `${basename(scriptOperation.oldPath)} -> ${basename(scriptOperation.newPath)}`,
+      picked: true,
+      operation: scriptOperation,
+      operationKind: 'script'
+    });
+  }
+
+  if (metaOperation) {
+    items.push({
+      label: metaLabel,
+      description: `${basename(metaOperation.oldPath)} -> ${basename(metaOperation.newPath)}`,
+      picked: scriptOperation !== undefined,
+      operation: metaOperation,
+      operationKind: 'meta'
+    });
+  }
+
+  const selectedItems = await runtimeVscode.window.showQuickPick<RenameOperationQuickPickItem>(items, {
+    canPickMany: true,
+    title: runtimeVscode.l10n.t('Unity Plus Rename Options'),
+    placeHolder: runtimeVscode.l10n.t('Choose file changes to apply with the C# type rename')
+  });
+
+  if (!selectedItems) {
+    return undefined;
+  }
+
+  const selectedKinds = new Set(selectedItems.map(item => item.operationKind));
+  if (!selectedKinds.has('script')) {
+    return [];
+  }
+
+  return selectedItems
+    .filter(item => item.operation && (item.operationKind === 'script' || selectedKinds.has('script')))
+    .map(item => item.operation!);
+}
+
+async function confirmDetailedRenameWarning(
+  runtimeVscode: typeof vscode,
+  plan: ScriptFilenameSyncPlan,
+  operations: readonly ScriptFileRenameOperation[],
+  edit: vscode.WorkspaceEdit
+): Promise<boolean> {
+  const codeFiles = getWorkspaceEditAffectedFiles(edit);
   const lines = [
     runtimeVscode.l10n.t('Unity Plus will rename:'),
     runtimeVscode.l10n.t('Class: {oldName} -> {newName}', {
@@ -508,6 +627,14 @@ async function confirmRenamePreview(
     })
   ];
 
+  if (codeFiles.length > 0) {
+    lines.push(runtimeVscode.l10n.t('C# references in: {files}', {
+      files: formatAffectedFiles(runtimeVscode, codeFiles, 5)
+    }));
+  }
+
+  const scriptOperation = operations.find(operation => operation.oldPath === plan.oldFilePath);
+  const metaOperation = operations.find(operation => operation.oldPath === plan.oldMetaPath);
   if (scriptOperation) {
     lines.push(runtimeVscode.l10n.t('Script file: {oldName} -> {newName}', {
       oldName: basename(scriptOperation.oldPath),
@@ -529,6 +656,27 @@ async function confirmRenamePreview(
     confirmLabel
   );
   return selected === confirmLabel;
+}
+
+function getWorkspaceEditAffectedFiles(edit: vscode.WorkspaceEdit): string[] {
+  if (typeof edit.entries !== 'function') {
+    return [];
+  }
+
+  return edit.entries()
+    .filter(([, edits]) => edits.length > 0)
+    .map(([uri]) => uri.fsPath);
+}
+
+function formatAffectedFiles(runtimeVscode: typeof vscode, files: readonly string[], limit: number): string {
+  const visibleFiles = files.slice(0, limit).map(file => basename(file));
+  const hiddenCount = files.length - visibleFiles.length;
+
+  if (hiddenCount === 0) {
+    return visibleFiles.join(', ');
+  }
+
+  return `${visibleFiles.join(', ')}, ${runtimeVscode.l10n.t('and {count} other files', { count: hiddenCount })}`;
 }
 
 export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSyncRuntime): Promise<{
@@ -976,6 +1124,12 @@ function getRenameFileSyncMode(runtimeVscode: typeof vscode): RenameFileSyncMode
   return normalizeRenameFileSyncMode(mode);
 }
 
+function getRenamePreviewMode(runtimeVscode: typeof vscode): RenamePreviewMode {
+  const mode = runtimeVscode.workspace.getConfiguration('unityPlus').get<string>('rename.previewMode', 'ask');
+
+  return normalizeRenamePreviewMode(mode);
+}
+
 function getMetaFilesMoveWithAsset(runtimeVscode: typeof vscode): boolean {
   return runtimeVscode.workspace.getConfiguration('unityPlus').get<boolean>('metaFiles.moveWithAsset', true) === true;
 }
@@ -994,6 +1148,14 @@ function normalizeRenameFileSyncMode(mode: string | undefined): RenameFileSyncMo
 
 function isLegacyEnabledRenameFileSyncMode(mode: string | undefined): mode is Exclude<LegacyRenameFileSyncMode, 'off'> {
   return mode === 'on' || mode === 'unity-object' || mode === 'any';
+}
+
+function normalizeRenamePreviewMode(mode: string | undefined): RenamePreviewMode {
+  if (mode === 'silent' || mode === 'ask+warn') {
+    return mode;
+  }
+
+  return 'ask';
 }
 
 function loadVscode(): typeof vscode {

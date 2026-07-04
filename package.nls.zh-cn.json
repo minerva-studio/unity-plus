@@ -14,6 +14,7 @@
   "configuration.title": "Unity Plus",
   "configuration.rename.overrideF2.description": "控制在 C# 文件中按 F2 时，是否先使用 Unity Plus 的类/脚本重命名，再回退到 VS Code 的重命名符号。",
   "configuration.rename.classFileSyncMode.description": "控制 C# 顶层类型和文件名的自动同步。使用 on 为安全的单类型 C# 文件启用同步，使用 off 禁用同步。",
+  "configuration.rename.previewMode.description": "控制 Unity Plus 重命名预览。使用 silent 直接应用所有安全的重命名改动，使用 ask 选择脚本和 meta 文件改动，使用 ask+warn 在选择后确认详细受影响文件警告。",
   "configuration.projectFiles.autoRefresh.description": "创建、移动或删除 C# 文件时刷新 Unity 项目文件。",
   "configuration.templates.csharpScriptFile.description": "用于 Unity Plus C# 脚本创建的工作区相对路径或绝对模板文件路径。优先于 unityPlus.templates.csharpScript。",
   "configuration.templates.scriptableObjectFile.description": "用于 Unity Plus ScriptableObject 创建的工作区相对路径或绝对模板文件路径。优先于 unityPlus.templates.scriptableObject。",

@@ -14,6 +14,7 @@
   "configuration.title": "Unity Plus",
   "configuration.rename.overrideF2.description": "Controls whether F2 in C# files uses Unity Plus class/script rename before falling back to VS Code Rename Symbol.",
   "configuration.rename.classFileSyncMode.description": "Controls automatic C# top-level type/file name synchronization. Use on for safe single-type C# files or off to disable sync.",
+  "configuration.rename.previewMode.description": "Controls the Unity Plus rename preview. Use silent to apply all safe rename changes, ask to choose script/meta file changes, or ask+warn to confirm a detailed affected-file warning after choosing.",
   "configuration.projectFiles.autoRefresh.description": "Refresh Unity project files when C# files are created, moved, or deleted.",
   "configuration.templates.csharpScriptFile.description": "Workspace-relative or absolute template file path for Unity Plus C# script creation. Takes priority over unityPlus.templates.csharpScript.",
   "configuration.templates.scriptableObjectFile.description": "Workspace-relative or absolute template file path for Unity Plus ScriptableObject creation. Takes priority over unityPlus.templates.scriptableObject.",

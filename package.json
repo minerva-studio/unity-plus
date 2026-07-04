@@ -141,6 +141,16 @@
           ],
           "description": "%configuration.rename.classFileSyncMode.description%"
         },
+        "unityPlus.rename.previewMode": {
+          "type": "string",
+          "default": "ask",
+          "enum": [
+            "silent",
+            "ask",
+            "ask+warn"
+          ],
+          "description": "%configuration.rename.previewMode.description%"
+        },
         "unityPlus.projectFiles.autoRefresh": {
           "type": "boolean",
           "default": true,
