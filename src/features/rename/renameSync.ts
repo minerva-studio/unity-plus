@@ -60,7 +60,7 @@ type RenameOperationQuickPickItem = vscode.QuickPickItem & {
   operationKind: RenameOperationKind;
 };
 
-type RenameInputQuickPickItem = vscode.QuickPickItem & {
+type RenameInputButton = vscode.QuickInputButton & {
   operationKind: RenameOperationKind;
 };
 
@@ -462,68 +462,124 @@ function showRenameInput(
   request: RenameInputRequest
 ): Promise<RenameInputDecision | undefined> {
   return new Promise(resolve => {
-    const quickPick = runtimeVscode.window.createQuickPick<RenameInputQuickPickItem>();
+    const inputBox = runtimeVscode.window.createInputBox();
     let accepted = false;
+    let renameScript = true;
+    let renameMeta = request.hasMetaFile;
 
-    const buildItems = (newTypeName: string): RenameInputQuickPickItem[] => {
-      const newScriptName = `${newTypeName}.cs`;
-      const items: RenameInputQuickPickItem[] = [{
-        label: runtimeVscode.l10n.t('Rename script file'),
-        description: `${basename(request.filePath)} -> ${newScriptName}`,
-        picked: true,
-        operationKind: 'script'
-      }];
+    const buildButtons = (): RenameInputButton[] => {
+      const buttons: RenameInputButton[] = [
+        createRenameInputButton(runtimeVscode, 'script', renameScript)
+      ];
 
       if (request.hasMetaFile) {
-        items.push({
-          label: runtimeVscode.l10n.t('Rename Unity meta file'),
-          description: `${basename(request.filePath)}.meta -> ${newScriptName}.meta`,
-          picked: true,
-          operationKind: 'meta'
-        });
+        buttons.push(createRenameInputButton(runtimeVscode, 'meta', renameScript && renameMeta));
       }
 
-      return items;
+      return buttons;
     };
 
-    const refreshItems = () => {
-      const previousKinds = new Set(quickPick.selectedItems.map(item => item.operationKind));
-      const items = buildItems(quickPick.value);
-      quickPick.items = items;
-      quickPick.selectedItems = items.filter(item =>
-        previousKinds.size === 0 ? item.picked : previousKinds.has(item.operationKind)
-      );
+    const updateState = () => {
+      if (!renameScript) {
+        renameMeta = false;
+      }
+
+      inputBox.buttons = buildButtons();
+      inputBox.prompt = buildRenameInputPrompt(runtimeVscode, request, inputBox.value, renameScript, request.hasMetaFile && renameMeta);
+      inputBox.validationMessage = validateRenameInputValue(inputBox.value);
     };
 
-    quickPick.title = runtimeVscode.l10n.t('Rename C# Type and Script');
-    quickPick.placeholder = runtimeVscode.l10n.t('Type the new C# type name, then choose file changes');
-    quickPick.canSelectMany = true;
-    quickPick.value = request.oldTypeName;
-    quickPick.items = buildItems(request.oldTypeName);
-    quickPick.selectedItems = quickPick.items.filter(item => item.picked);
+    inputBox.title = runtimeVscode.l10n.t('Rename C# Type and Script');
+    inputBox.placeholder = runtimeVscode.l10n.t('New C# type name');
+    inputBox.value = request.oldTypeName;
+    updateState();
 
-    quickPick.onDidChangeValue(() => refreshItems());
-    quickPick.onDidAccept(() => {
+    inputBox.onDidChangeValue(() => updateState());
+    inputBox.onDidTriggerButton(button => {
+      const renameButton = button as RenameInputButton;
+      if (renameButton.operationKind === 'script') {
+        renameScript = !renameScript;
+      } else if (renameScript) {
+        renameMeta = !renameMeta;
+      }
+
+      updateState();
+    });
+    inputBox.onDidAccept(() => {
+      const newTypeName = inputBox.value.trim();
+      const validationMessage = validateRenameInputValue(newTypeName);
+      if (validationMessage) {
+        inputBox.validationMessage = validationMessage;
+        return;
+      }
+
       accepted = true;
-      const selectedKinds = new Set(quickPick.selectedItems.map(item => item.operationKind));
-      const operationKinds = selectedKinds.has('script')
-        ? quickPick.selectedItems.map(item => item.operationKind)
-        : [];
+      const operationKinds: RenameOperationKind[] = [];
+      if (renameScript) {
+        operationKinds.push('script');
+        if (request.hasMetaFile && renameMeta) {
+          operationKinds.push('meta');
+        }
+      }
 
       resolve({
-        newTypeName: quickPick.value.trim(),
+        newTypeName,
         operationKinds
       });
-      quickPick.hide();
+      inputBox.hide();
     });
-    quickPick.onDidHide(() => {
+    inputBox.onDidHide(() => {
       if (!accepted) {
         resolve(undefined);
       }
-      quickPick.dispose();
+      inputBox.dispose();
     });
-    quickPick.show();
+    inputBox.show();
   });
+}
+
+function createRenameInputButton(
+  runtimeVscode: typeof vscode,
+  operationKind: RenameOperationKind,
+  enabled: boolean
+): RenameInputButton {
+  const label = operationKind === 'script'
+    ? runtimeVscode.l10n.t('Rename script file')
+    : runtimeVscode.l10n.t('Rename Unity meta file');
+  const state = enabled ? runtimeVscode.l10n.t('On') : runtimeVscode.l10n.t('Off');
+
+  return {
+    iconPath: new runtimeVscode.ThemeIcon(enabled ? 'check' : 'circle-large-outline'),
+    tooltip: runtimeVscode.l10n.t('{label}: {state}', { label, state }),
+    operationKind
+  };
+}
+
+function buildRenameInputPrompt(
+  runtimeVscode: typeof vscode,
+  request: RenameInputRequest,
+  newTypeName: string,
+  renameScript: boolean,
+  renameMeta: boolean
+): string {
+  const scriptState = renameScript ? runtimeVscode.l10n.t('On') : runtimeVscode.l10n.t('Off');
+  const metaState = request.hasMetaFile
+    ? runtimeVscode.l10n.t('Unity meta file: {state}', { state: renameMeta ? runtimeVscode.l10n.t('On') : runtimeVscode.l10n.t('Off') })
+    : runtimeVscode.l10n.t('Unity meta file: unavailable');
+  const scriptName = `${newTypeName.trim() || request.oldTypeName}.cs`;
+
+  // Keep the current toggle state visible because InputBox buttons only expose details through tooltips.
+  return runtimeVscode.l10n.t('Script file: {scriptState} ({oldName} -> {newName}); {metaState}', {
+    scriptState,
+    oldName: basename(request.filePath),
+    newName: scriptName,
+    metaState
+  });
+}
+
+function validateRenameInputValue(value: string): string | undefined {
+  const trimmedValue = value.trim();
+  return isValidCSharpIdentifier(trimmedValue) ? undefined : 'Enter a valid C# type name.';
 }
 
 async function waitForRenameCommandPrimaryTopLevelType(runtime: RenameTypeCommandRuntime): Promise<{

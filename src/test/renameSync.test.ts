@@ -1029,6 +1029,41 @@ describe('renameSync', () => {
     assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
   });
 
+  it('uses the combined rename input without opening a second preview picker in ask mode', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      inputValue: plan.newTypeName
+    });
+
+    const result = await runRenameTypeCommand(runtime);
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(runtime.inputBoxCalls, []);
+    assert.deepStrictEqual(runtime.renameInputCalls, ['showRenameInput']);
+    assert.deepStrictEqual(runtime.previewCalls, []);
+    assert.deepStrictEqual(runtime.appliedFileRenames, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
+  });
+
+  it('renames only the C# type when the combined rename input disables file changes', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      inputValue: plan.newTypeName,
+      renameOperationKinds: []
+    });
+
+    const result = await runRenameTypeCommand(runtime);
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(runtime.appliedFileRenames, []);
+  });
+
   it('renames without waiting when the source snapshot already has the primary top-level type', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
@@ -1441,6 +1476,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const renameInputCalls: string[] = [];
   const atomicRenameCalls: string[] = [];
   const appliedEdits: unknown[] = [];
+  const appliedFileRenames: { oldPath: string; newPath: string }[] = [];
   const previewCalls: { plan: ScriptFilenameSyncPlan; operations: { oldPath: string; newPath: string }[] }[] = [];
   const warningPreviewCalls: { plan: ScriptFilenameSyncPlan; operations: { oldPath: string; newPath: string }[] }[] = [];
   const waited: number[] = [];
@@ -1491,6 +1527,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     createFileUri: fakeUri,
     async applyWorkspaceEdit(edit: unknown): Promise<boolean> {
       appliedEdits.push(edit);
+      appliedFileRenames.push(...(edit as FakeWorkspaceEdit).fileRenames);
       return true;
     },
     async confirmRenamePreview(
@@ -1536,6 +1573,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     renameInputCalls,
     atomicRenameCalls,
     appliedEdits,
+    appliedFileRenames,
     previewCalls,
     warningPreviewCalls,
     waited
