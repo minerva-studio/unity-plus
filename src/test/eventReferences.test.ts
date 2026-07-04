@@ -202,6 +202,38 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(instances.map(instance => instance.gameObjectName), ['North Gate', 'North Gate']);
     assert.strictEqual(instances[0].line, 7);
     assert.strictEqual(instances[0].character, 37);
+    assert.strictEqual(index.getDiagnostics().serializedInstanceScriptTextHitCount, 2);
+    assert.strictEqual(index.getDiagnostics().serializedInstanceScriptDedupedTextHitCount, 0);
+  });
+
+  it('counts serialized instances from raw m_Script text hits even when object enrichment is incomplete', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/LooseScripts.prefab')],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => createLooseScriptReferenceYaml(),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    const instances = index.getSerializedInstances(gateScriptPath);
+    const diagnostics = index.getDiagnostics();
+
+    assert.strictEqual(instances.length, 3);
+    assert.deepStrictEqual(instances.map(instance => instance.fileId), ['7001', '7002', '7003']);
+    assert.deepStrictEqual(instances.map(instance => instance.line), [3, 6, 9]);
+    assert.strictEqual(diagnostics.serializedInstanceScriptTextHitCount, 4);
+    assert.strictEqual(diagnostics.serializedInstanceScriptResolvedTextHitCount, 3);
+    assert.strictEqual(diagnostics.serializedInstanceScriptUnresolvedTextHitCount, 1);
+    assert.strictEqual(diagnostics.serializedInstanceScriptDedupedTextHitCount, 0);
   });
 
   it('indexes ScriptableObject and MonoBehaviour serialized instances from asset files', async () => {
@@ -875,6 +907,44 @@ describe('eventReferences', () => {
     assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
   });
 
+  it('keeps method CodeLens when target script path resolves but target type name mismatches the C# namespace', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'namespace Actual.Gameplay',
+      '{',
+      '  public class Gate',
+      '  {',
+      '    public bool CanInteract()',
+      '    {',
+      '      return true;',
+      '    }',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const methodLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+
+    assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
+  });
+
   it('resolves UnityEvent target scripts from m_Target fileIDs before falling back to type names', async () => {
     const runtime = createEventReferenceRuntime();
     const controllerDocument = createTextDocument('/Project/Assets/GateController.cs', [
@@ -1405,6 +1475,24 @@ function createPrefabYamlWithNestedTarget(callState: number): string {
     '- m_Target: {fileID: 460066068064628344}',
     ['- m_Target:', '    fileID: 460066068064628344'].join('\n')
   );
+}
+
+function createLooseScriptReferenceYaml(): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!114 &7001',
+    'MonoBehaviour:',
+    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
+    '--- !u!199 &7002',
+    'UnknownSerializedObject:',
+    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
+    '--- !u!114 &7003',
+    'MonoBehaviour:',
+    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
+    '--- !u!114 &7004',
+    'MonoBehaviour:',
+    '  m_Script: {fileID: 11500000, guid: 99999999999999999999999999999999, type: 3}'
+  ].join('\n');
 }
 
 function createScriptableObjectAssetYaml(): string {

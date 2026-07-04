@@ -64,6 +64,10 @@ export interface UnityEventReferenceDiagnostics {
   resolvedSerializedInstanceScriptGuidCount: number;
   resolvedSerializedInstanceEditorClassIdentifierCount: number;
   unresolvedSerializedInstanceScriptCount: number;
+  serializedInstanceScriptTextHitCount: number;
+  serializedInstanceScriptResolvedTextHitCount: number;
+  serializedInstanceScriptUnresolvedTextHitCount: number;
+  serializedInstanceScriptDedupedTextHitCount: number;
   skippedDisabledCallCount: number;
   skippedMissingTargetTypeNameCount: number;
   skippedUnresolvedTargetTypeNameCount: number;
@@ -115,6 +119,8 @@ interface SerializedDocument {
   fileId: string;
   body: string;
   startLine: number;
+  bodyStartOffset: number;
+  bodyEndOffset: number;
   assetPath: string;
   assetKind: UnitySerializedAssetKind;
 }
@@ -135,6 +141,15 @@ interface SerializedObjectScriptIdentity {
   scriptPath?: string;
   typeName?: string;
   source?: 'guid' | 'editorClassIdentifier';
+}
+
+interface SerializedScriptTextHit {
+  guid: string;
+  line: number;
+  character: number;
+  matchOffset: number;
+  document?: SerializedDocument;
+  object?: SerializedObjectRecord;
 }
 
 interface PersistentCallSnapshot {
@@ -215,6 +230,7 @@ const documentHeaderPattern = /^--- !u!(\d+) &(-?\d+)/gm;
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
 const fileIdPattern = /fileID:\s*(-?\d+)/;
 const guidPattern = /guid:\s*([a-fA-F0-9]{32})/;
+const scriptReferencePattern = /^\s*m_Script:\s*\{([^}]*)\}/gm;
 const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 const unityEventTokenPattern = /(?:UnityEngine\.Events\.)?UnityEvent\b/g;
 const identifierPattern = /[A-Za-z_][A-Za-z0-9_]*/y;
@@ -467,25 +483,6 @@ async function parseUnityEventReferencesCore(
     const object = parseSerializedObject(document);
     objects.set(document.fileId, object);
 
-    if (hasSerializedScriptIdentity(object)) {
-      const scriptIdentity = await resolveSerializedObjectScriptIdentity(object, metadataIndex, resolveCSharpType);
-      trackSerializedInstanceScriptIdentity(diagnostics, object, scriptIdentity);
-
-      if (scriptIdentity.scriptPath || scriptIdentity.typeName) {
-        serializedInstances.push({
-          assetPath,
-          assetKind,
-          line: object.scriptLine ?? document.startLine,
-          character: object.scriptCharacter ?? 0,
-          fileId: document.fileId,
-          scriptPath: scriptIdentity.scriptPath,
-          scriptTypeName: scriptIdentity.typeName,
-          name: object.name,
-          gameObjectName: getGameObjectName(objects, object.gameObjectFileId)
-        });
-      }
-    }
-
     const calls = parsePersistentCalls(document.body, document.startLine);
     if (calls.length > 0) {
       callsByDocument.set(document.fileId, calls);
@@ -500,6 +497,17 @@ async function parseUnityEventReferencesCore(
       diagnostics.persistentCallCount += 1;
     }
   }
+
+  serializedInstances.push(...await collectSerializedInstancesFromScriptTextHits(
+    content,
+    assetPath,
+    assetKind,
+    documents,
+    objects,
+    metadataIndex,
+    resolveCSharpType,
+    diagnostics
+  ));
 
   const references: UnityEventReference[] = [];
   for (const [ownerFileId, calls] of callsByDocument) {
@@ -889,6 +897,8 @@ function parseSerializedDocuments(
       fileId: header[2],
       body: content.slice(bodyStart, bodyEnd),
       startLine,
+      bodyStartOffset: bodyStart,
+      bodyEndOffset: bodyEnd,
       assetPath,
       assetKind
     });
@@ -914,6 +924,112 @@ function parseSerializedObject(document: SerializedDocument): SerializedObjectRe
     scriptLine: scriptReference?.line,
     scriptCharacter: scriptReference?.character
   };
+}
+
+async function collectSerializedInstancesFromScriptTextHits(
+  content: string,
+  assetPath: string,
+  assetKind: UnitySerializedAssetKind,
+  documents: readonly SerializedDocument[],
+  objects: ReadonlyMap<string, SerializedObjectRecord>,
+  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
+  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>,
+  diagnostics: UnityEventReferenceDiagnostics
+): Promise<UnitySerializedInstanceLocation[]> {
+  const locations: UnitySerializedInstanceLocation[] = [];
+  const seen = new Set<string>();
+
+  for (const hit of scanSerializedScriptTextHits(content, documents, objects)) {
+    diagnostics.serializedInstanceScriptTextHitCount += 1;
+
+    const textScriptPath = metadataIndex.getAssetPath(hit.guid);
+    const identity = textScriptPath
+      ? {
+        scriptPath: textScriptPath,
+        typeName: hit.object?.editorTypeName,
+        source: 'guid' as const
+      }
+      : await resolveSerializedObjectScriptIdentity(hit.object, metadataIndex, resolveCSharpType);
+
+    if (textScriptPath) {
+      diagnostics.serializedInstanceScriptResolvedTextHitCount += 1;
+    } else {
+      diagnostics.serializedInstanceScriptUnresolvedTextHitCount += 1;
+    }
+
+    trackSerializedInstanceScriptIdentity(diagnostics, hit.object, identity);
+
+    if (!identity.scriptPath && !identity.typeName) {
+      continue;
+    }
+
+    const dedupeKey = serializedScriptTextHitKey(assetPath, hit);
+    if (seen.has(dedupeKey)) {
+      diagnostics.serializedInstanceScriptDedupedTextHitCount += 1;
+      continue;
+    }
+
+    seen.add(dedupeKey);
+    locations.push({
+      assetPath,
+      assetKind,
+      line: hit.line,
+      character: hit.character,
+      fileId: hit.document?.fileId ?? `offset:${hit.matchOffset}`,
+      scriptPath: identity.scriptPath,
+      scriptTypeName: identity.typeName,
+      name: hit.object?.name,
+      gameObjectName: getGameObjectName(objects, hit.object?.gameObjectFileId)
+    });
+  }
+
+  return locations;
+}
+
+function scanSerializedScriptTextHits(
+  content: string,
+  documents: readonly SerializedDocument[],
+  objects: ReadonlyMap<string, SerializedObjectRecord>
+): SerializedScriptTextHit[] {
+  const hits: SerializedScriptTextHit[] = [];
+  let match: RegExpExecArray | null;
+
+  scriptReferencePattern.lastIndex = 0;
+  while ((match = scriptReferencePattern.exec(content))) {
+    const guid = guidPattern.exec(match[1])?.[1];
+    if (!guid) {
+      continue;
+    }
+
+    const guidOffset = content.indexOf(guid, match.index);
+    const document = findSerializedDocumentAtOffset(documents, match.index);
+
+    // Count by raw m_Script text first; YAML object details are enrichment only and must not gate the hit.
+    hits.push({
+      guid,
+      line: countLineBreaks(content, 0, match.index),
+      character: getCharacterAtOffset(content, guidOffset === -1 ? match.index : guidOffset),
+      matchOffset: match.index,
+      document,
+      object: document ? objects.get(document.fileId) : undefined
+    });
+  }
+
+  return hits;
+}
+
+function findSerializedDocumentAtOffset(
+  documents: readonly SerializedDocument[],
+  offset: number
+): SerializedDocument | undefined {
+  return documents.find(document => document.bodyStartOffset <= offset && offset < document.bodyEndOffset);
+}
+
+function serializedScriptTextHitKey(assetPath: string, hit: SerializedScriptTextHit): string {
+  const documentKey = hit.document
+    ? `${hit.document.fileId}:${hit.document.bodyStartOffset}`
+    : `offset:${hit.matchOffset}`;
+  return `${assetPath}#${documentKey}#${hit.guid.toLowerCase()}`;
 }
 
 function hasSerializedScriptIdentity(object: SerializedObjectRecord): boolean {
@@ -972,14 +1088,14 @@ function trackOwnerScriptIdentity(
 
 function trackSerializedInstanceScriptIdentity(
   diagnostics: UnityEventReferenceDiagnostics,
-  object: SerializedObjectRecord,
+  object: SerializedObjectRecord | undefined,
   identity: SerializedObjectScriptIdentity
 ): void {
   if (identity.source === 'guid') {
     diagnostics.resolvedSerializedInstanceScriptGuidCount += 1;
   } else if (identity.source === 'editorClassIdentifier') {
     diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount += 1;
-  } else if (object.scriptGuid || object.editorTypeName) {
+  } else if (object && (object.scriptGuid || object.editorTypeName)) {
     diagnostics.unresolvedSerializedInstanceScriptCount += 1;
   }
 }
@@ -1218,7 +1334,7 @@ function createReferenceIndex(
       appendMapValue(referencesByKey, key, reference);
     }
 
-    if (reference.scriptTypeName) {
+    if (reference.scriptTypeName && !reference.scriptPath) {
       appendMapValue(referencesByTypeKey, typeReferenceKey(reference.scriptTypeName, reference.methodName), reference);
     }
 
@@ -1253,7 +1369,7 @@ function createReferenceIndex(
 
   const getReferences = (scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[] =>
     mergeUniqueReferences(
-      filterByType(referencesByKey.get(referenceKey(scriptPath, methodName)), typeName, reference => reference.scriptTypeName),
+      referencesByKey.get(referenceKey(scriptPath, methodName)),
       typeName ? referencesByTypeKey.get(typeReferenceKey(typeName, methodName)) : undefined
     );
   const getFieldReferences = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
@@ -1391,6 +1507,10 @@ function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
     resolvedSerializedInstanceScriptGuidCount: 0,
     resolvedSerializedInstanceEditorClassIdentifierCount: 0,
     unresolvedSerializedInstanceScriptCount: 0,
+    serializedInstanceScriptTextHitCount: 0,
+    serializedInstanceScriptResolvedTextHitCount: 0,
+    serializedInstanceScriptUnresolvedTextHitCount: 0,
+    serializedInstanceScriptDedupedTextHitCount: 0,
     skippedDisabledCallCount: 0,
     skippedMissingTargetTypeNameCount: 0,
     skippedUnresolvedTargetTypeNameCount: 0,
@@ -1426,6 +1546,10 @@ function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityE
   target.resolvedSerializedInstanceScriptGuidCount += source.resolvedSerializedInstanceScriptGuidCount;
   target.resolvedSerializedInstanceEditorClassIdentifierCount += source.resolvedSerializedInstanceEditorClassIdentifierCount;
   target.unresolvedSerializedInstanceScriptCount += source.unresolvedSerializedInstanceScriptCount;
+  target.serializedInstanceScriptTextHitCount += source.serializedInstanceScriptTextHitCount;
+  target.serializedInstanceScriptResolvedTextHitCount += source.serializedInstanceScriptResolvedTextHitCount;
+  target.serializedInstanceScriptUnresolvedTextHitCount += source.serializedInstanceScriptUnresolvedTextHitCount;
+  target.serializedInstanceScriptDedupedTextHitCount += source.serializedInstanceScriptDedupedTextHitCount;
   target.skippedDisabledCallCount += source.skippedDisabledCallCount;
   target.skippedMissingTargetTypeNameCount += source.skippedMissingTargetTypeNameCount;
   target.skippedUnresolvedTargetTypeNameCount += source.skippedUnresolvedTargetTypeNameCount;
@@ -1464,6 +1588,12 @@ function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEvent
       guidCount: diagnostics.resolvedSerializedInstanceScriptGuidCount,
       editorCount: diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount,
       unresolvedCount: diagnostics.unresolvedSerializedInstanceScriptCount
+    }),
+    runtimeVscode.l10n.t('serialized instance text hits: {hitCount} found, {resolvedCount} metadata-resolved, {unresolvedCount} unresolved, {dedupedCount} deduped', {
+      hitCount: diagnostics.serializedInstanceScriptTextHitCount,
+      resolvedCount: diagnostics.serializedInstanceScriptResolvedTextHitCount,
+      unresolvedCount: diagnostics.serializedInstanceScriptUnresolvedTextHitCount,
+      dedupedCount: diagnostics.serializedInstanceScriptDedupedTextHitCount
     }),
     runtimeVscode.l10n.t('skipped {callCount} call(s) and {assetCount} asset(s)', {
       callCount: skipped,
@@ -2076,6 +2206,11 @@ function getValueCharacter(line: string): number {
   }
 
   return valueIndex;
+}
+
+function getCharacterAtOffset(text: string, offset: number): number {
+  const lineStart = text.lastIndexOf('\n', offset - 1);
+  return offset - lineStart - 1;
 }
 
 function valueAfterColon(trimmed: string): string {
