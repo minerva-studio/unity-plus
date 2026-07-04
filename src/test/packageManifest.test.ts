@@ -47,6 +47,31 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.metaFiles.moveWithAsset'].default, true);
   });
 
+  it('uses VS Code native localization bundles', () => {
+    const manifest = readPackageManifest();
+    const packageNls = readJson<Record<string, string>>('package.nls.json');
+    const chinesePackageNls = readJson<Record<string, string>>('package.nls.zh-cn.json');
+    const placeholders = collectPackagePlaceholders(manifest);
+
+    assert.strictEqual(manifest.l10n, './l10n');
+    assert.ok(placeholders.has('extension.displayName'));
+    assert.ok(placeholders.has('configuration.logging.level.description'));
+
+    for (const key of placeholders) {
+      assert.ok(packageNls[key], `Missing package.nls.json key: ${key}`);
+      assert.ok(chinesePackageNls[key], `Missing package.nls.zh-cn.json key: ${key}`);
+    }
+  });
+
+  it('provides zh-cn runtime localization entries for user-visible strings', () => {
+    const bundle = readJson<Record<string, string>>(join('l10n', 'bundle.l10n.zh-cn.json'));
+
+    assert.strictEqual(bundle['Open In Unity'], '在 Unity 中打开');
+    assert.strictEqual(bundle['Unity Plus: UnityEvent references are disabled.'], 'Unity Plus: UnityEvent 引用已禁用。');
+    assert.ok(bundle['Unity Plus: Open a Unity project before creating a C# script.']);
+    assert.ok(bundle['UnityEvent references: {count}']);
+  });
+
   it('contributes explicit commands for creating Unity C# scripts', () => {
     const manifest = readPackageManifest();
     const csharpScriptCommand = manifest.contributes.commands.find((item: { command: string }) =>
@@ -56,8 +81,8 @@ describe('package manifest', () => {
       item.command === 'unityPlus.createScriptableObject'
     );
 
-    assert.strictEqual(csharpScriptCommand?.title, 'Unity Plus: Create C# Script');
-    assert.strictEqual(scriptableObjectCommand?.title, 'Unity Plus: Create ScriptableObject');
+    assert.strictEqual(csharpScriptCommand?.title, '%command.createCSharpScript.title%');
+    assert.strictEqual(scriptableObjectCommand?.title, '%command.createScriptableObject.title%');
   });
 
   it('contributes an explicit command for opening Unity meta files', () => {
@@ -66,7 +91,7 @@ describe('package manifest', () => {
       item.command === 'unityPlus.openMetaFile'
     );
 
-    assert.strictEqual(command?.title, 'Unity Plus: Open Meta File');
+    assert.strictEqual(command?.title, '%command.openMetaFile.title%');
   });
 
   it('contributes an explicit command for opening resources in Unity', () => {
@@ -75,7 +100,7 @@ describe('package manifest', () => {
       item.command === 'unityPlus.openInUnity'
     );
 
-    assert.strictEqual(command?.title, 'Unity Plus: Open In Unity');
+    assert.strictEqual(command?.title, '%command.openInUnity.title%');
   });
 
   it('shows Unity resource commands in Explorer and editor title menus', () => {
@@ -131,4 +156,29 @@ describe('package manifest', () => {
 
 function readPackageManifest() {
   return JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+}
+
+function readJson<T>(path: string): T {
+  return JSON.parse(readFileSync(join(process.cwd(), path), 'utf8')) as T;
+}
+
+function collectPackagePlaceholders(value: unknown, keys = new Set<string>()): Set<string> {
+  if (typeof value === 'string') {
+    const match = /^%(.+)%$/.exec(value);
+    if (match) {
+      keys.add(match[1]);
+    }
+    return keys;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectPackagePlaceholders(item, keys));
+    return keys;
+  }
+
+  if (value && typeof value === 'object') {
+    Object.values(value).forEach(item => collectPackagePlaceholders(item, keys));
+  }
+
+  return keys;
 }

@@ -774,6 +774,9 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
     MarkdownString: FakeMarkdownString,
     Uri: {
       file: createUri
+    },
+    l10n: {
+      t: localize
     }
   } as unknown as typeof vscode;
 
@@ -968,6 +971,12 @@ function createUri(fsPath: string): vscode.Uri {
     fsPath,
     path: fsPath
   } as vscode.Uri;
+}
+
+function localize(message: string, args?: Record<string, string | number | boolean>): string {
+  return Object.entries(args ?? {}).reduce((current, [key, value]) =>
+    current.replace(new RegExp(`\\{${key}\\}`, 'g'), String(value)), message
+  );
 }
 
 function createDisposable(): vscode.Disposable {

@@ -133,7 +133,7 @@ export function registerRenameFeature(
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.syncScriptFilename', async () => {
     logger.info('Script filename sync is planned but not implemented yet.');
-    runtimeVscode.window.showInformationMessage('Unity Plus: script filename sync is planned for v0.2.');
+    runtimeVscode.window.showInformationMessage(runtimeVscode.l10n.t('Unity Plus: script filename sync is planned for v0.2.'));
   }));
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.syncClassName', async () => {
@@ -174,16 +174,21 @@ export function registerRenameFeature(
         }
       } else if (result.kind === 'failed') {
         logger.warn(result.message);
-        void runtimeVscode.window.showWarningMessage(`Unity Plus: ${result.message}`);
+        void runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: {message}', {
+          message: runtimeVscode.l10n.t(result.message)
+        }));
       } else if (result.kind === 'applied') {
-        const message = `Unity Plus: Renamed ${result.oldTypeName} -> ${result.newTypeName}`;
+        const message = runtimeVscode.l10n.t('Unity Plus: Renamed {oldName} -> {newName}', {
+          oldName: result.oldTypeName,
+          newName: result.newTypeName
+        });
         logger.info(message);
         void runtimeVscode.window.showInformationMessage(message);
       }
     } catch (error) {
       const message = `Could not rename C# type and script file: ${errorMessage(error)}`;
       logger.warn(message);
-      void runtimeVscode.window.showWarningMessage(`Unity Plus: ${message}`);
+      void runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: {message}', { message }));
     }
   }));
 
@@ -288,7 +293,7 @@ export function registerRenameFeature(
       } catch (error) {
         const message = `Could not rename Unity script file: ${errorMessage(error)}`;
         logger.warn(message);
-        void runtimeVscode.window.showWarningMessage(`Unity Plus: ${message}`);
+        void runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: {message}', { message }));
       } finally {
         syncingScriptRenameFiles.delete(filePath);
       }

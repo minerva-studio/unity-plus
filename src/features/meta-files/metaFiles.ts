@@ -17,6 +17,7 @@ interface MetaFileSummary {
 }
 
 export type OpenInUnitySender = (projectRoot: string, assetPath: string) => Promise<boolean>;
+type RuntimeLocalizer = (message: string, args?: Record<string, string | number | boolean>) => string;
 
 export function registerMetaFilesFeature(
   logger: UnityPlusLogger,
@@ -91,7 +92,7 @@ export async function provideMetaFileCodeLenses(
 
   if (content !== undefined) {
     codeLenses.push(new runtimeVscode.CodeLens(range, {
-      title: formatMetaFileTitle(content),
+      title: formatMetaFileTitle(content, (message, args) => runtimeVscode.l10n.t(message, args ?? {})),
       command: 'unityPlus.openMetaFile',
       arguments: [metaUri]
     }));
@@ -99,7 +100,7 @@ export async function provideMetaFileCodeLenses(
 
   if (root && toUnityAssetPath(root, document.uri)) {
     codeLenses.push(new runtimeVscode.CodeLens(range, {
-      title: 'Open In Unity',
+      title: runtimeVscode.l10n.t('Open In Unity'),
       command: 'unityPlus.openInUnity',
       arguments: [document.uri]
     }));
@@ -108,12 +109,14 @@ export async function provideMetaFileCodeLenses(
   return codeLenses;
 }
 
-export function formatMetaFileTitle(content: string): string {
-  const summary = formatMetaFileSummary(content);
-  return summary ? `Meta: ${summary}` : 'Meta file';
+export function formatMetaFileTitle(content: string, localize?: RuntimeLocalizer): string {
+  const summary = formatMetaFileSummary(content, localize);
+  return summary
+    ? translate(localize, 'Meta: {summary}', { summary })
+    : translate(localize, 'Meta file');
 }
 
-export function formatMetaFileSummary(content: string): string {
+export function formatMetaFileSummary(content: string, localize?: RuntimeLocalizer): string {
   const summary = parseMetaFileSummary(content);
   const parts: string[] = [];
 
@@ -125,7 +128,7 @@ export function formatMetaFileSummary(content: string): string {
     parts.push(summary.importer);
   }
 
-  return parts.length > 0 ? parts.join(', ') : 'Meta';
+  return parts.length > 0 ? parts.join(', ') : translate(localize, 'Meta');
 }
 
 function parseMetaFileSummary(content: string): MetaFileSummary {
@@ -142,13 +145,15 @@ function shortenGuid(guid: string): string {
 async function openMetaFileForResource(runtimeVscode: typeof vscode, resourceUri: vscode.Uri | undefined): Promise<void> {
   const sourceUri = resourceUri ?? getActiveResourceUri(runtimeVscode);
   if (!sourceUri) {
-    runtimeVscode.window.showWarningMessage('Unity Plus: No active file found for Unity meta file.');
+    runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: No active file found for Unity meta file.'));
     return;
   }
 
   const metaUri = toMetaFileUri(runtimeVscode, sourceUri);
   if (!await fileExists(runtimeVscode, metaUri)) {
-    runtimeVscode.window.showWarningMessage(`Unity Plus: Meta file not found for ${sourceUri.fsPath}`);
+    runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Meta file not found for {filePath}', {
+      filePath: sourceUri.fsPath
+    }));
     return;
   }
 
@@ -163,25 +168,25 @@ async function openResourceInUnity(
   sendOpenInUnity: OpenInUnitySender
 ): Promise<void> {
   if (!root) {
-    runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project to use Open In Unity.');
+    runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project to use Open In Unity.'));
     return;
   }
 
   const sourceUri = resourceUri ?? getActiveResourceUri(runtimeVscode);
   if (!sourceUri) {
-    runtimeVscode.window.showWarningMessage('Unity Plus: No active file found for Open In Unity.');
+    runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: No active file found for Open In Unity.'));
     return;
   }
 
   const assetPath = toUnityAssetPath(root, sourceUri);
   if (!assetPath) {
-    runtimeVscode.window.showWarningMessage('Unity Plus: Open In Unity only supports Assets folder resources.');
+    runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open In Unity only supports Assets folder resources.'));
     return;
   }
 
   const opened = await sendOpenInUnity(root.fsPath, assetPath);
   if (!opened) {
-    runtimeVscode.window.showWarningMessage('Unity Plus: Unity IDE messaging endpoint was not found. Open Unity and enable the Visual Studio Editor package.');
+    runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Unity IDE messaging endpoint was not found. Open Unity and enable the Visual Studio Editor package.'));
   }
 }
 
@@ -267,4 +272,12 @@ function isUriLike(value: unknown): value is vscode.Uri {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function translate(
+  localize: RuntimeLocalizer | undefined,
+  message: string,
+  args?: Record<string, string | number | boolean>
+): string {
+  return localize ? localize(message, args) : message;
 }

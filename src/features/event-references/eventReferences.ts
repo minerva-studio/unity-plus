@@ -207,7 +207,7 @@ export function registerEventReferenceFeature(
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.showUnityEventReferences', async () => {
     if (!isEnabled()) {
       logger.info('UnityEvent reference lookup is disabled.');
-      runtimeVscode.window.showInformationMessage('Unity Plus: UnityEvent references are disabled.');
+      runtimeVscode.window.showInformationMessage(runtimeVscode.l10n.t('Unity Plus: UnityEvent references are disabled.'));
       return;
     }
 
@@ -221,10 +221,10 @@ export function registerEventReferenceFeature(
     let canceled = false;
     const index = await runtimeVscode.window.withProgress({
       location: runtimeVscode.ProgressLocation.Notification,
-      title: 'Unity Plus: scanning UnityEvent references',
+      title: runtimeVscode.l10n.t('Unity Plus: scanning UnityEvent references'),
       cancellable: true
     }, async (progress, cancellationToken) => {
-      progress.report({ message: 'Preparing Unity metadata' });
+      progress.report({ message: runtimeVscode.l10n.t('Preparing Unity metadata') });
       await metadataIndex.getOrBuild();
 
       if (isCancellationRequested(cancellationToken)) {
@@ -243,18 +243,18 @@ export function registerEventReferenceFeature(
 
     if (!index) {
       if (canceled) {
-        runtimeVscode.window.showInformationMessage('Unity Plus: UnityEvent reference scan canceled.');
+        runtimeVscode.window.showInformationMessage(runtimeVscode.l10n.t('Unity Plus: UnityEvent reference scan canceled.'));
         return;
       }
 
-      runtimeVscode.window.showWarningMessage('Unity Plus: UnityEvent reference index could not be built.');
+      runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: UnityEvent reference index could not be built.'));
       return;
     }
 
     const diagnostics = index.getDiagnostics();
-    const summary = formatDiagnostics(diagnostics);
+    const summary = formatDiagnostics(runtimeVscode, diagnostics);
     logger.info(`UnityEvent reference lookup ${summary}.`);
-    runtimeVscode.window.showInformationMessage(`Unity Plus: ${summary}.`);
+    runtimeVscode.window.showInformationMessage(runtimeVscode.l10n.t('Unity Plus: {summary}.', { summary }));
   }));
 
   return runtimeVscode.Disposable.from(...disposables);
@@ -270,7 +270,7 @@ export async function buildUnityEventReferenceIndex(
   const diagnostics = createEmptyDiagnostics();
 
   throwIfCancellationRequested(context.cancellationToken);
-  context.progress?.report({ message: 'Finding Unity serialized assets' });
+  context.progress?.report({ message: runtime.runtimeVscode.l10n.t('Finding Unity serialized assets') });
 
   const metadataIndex = metadata ?? await runtime.metadataIndex.getOrBuild();
   const discoveredAssetFiles = await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode);
@@ -319,7 +319,12 @@ export async function buildUnityEventReferenceIndex(
 
       if (completedCount - lastReportedCount >= progressReportInterval || completedCount === totalCount) {
         lastReportedCount = completedCount;
-        context.progress?.report({ message: `Scanning Unity serialized assets ${completedCount}/${totalCount}` });
+        context.progress?.report({
+          message: runtime.runtimeVscode.l10n.t('Scanning Unity serialized assets {completedCount}/{totalCount}', {
+            completedCount,
+            totalCount
+          })
+        });
       }
     }
   });
@@ -351,7 +356,7 @@ async function createBuildScopedTypeResolver(
     throwIfCancellationRequested(context.cancellationToken);
 
     if (!typeIndexPromise) {
-      context.progress?.report({ message: 'Indexing C# type declarations' });
+      context.progress?.report({ message: runtime.runtimeVscode.l10n.t('Indexing C# type declarations') });
       typeIndexPromise = (runtime.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex)(runtime, context);
     }
 
@@ -575,7 +580,7 @@ function createEventReferenceProvider(
         const count = index.getReferenceCount(scriptPath, method.name);
         if (count > 0) {
           codeLenses.push(new runtime.runtimeVscode.CodeLens(method.range, {
-            title: `UnityEvent references: ${count}`,
+            title: runtime.runtimeVscode.l10n.t('UnityEvent references: {count}', { count }),
             command: 'unityPlus.showUnityEventReferenceLocations',
             arguments: [{
               kind: 'method',
@@ -591,7 +596,7 @@ function createEventReferenceProvider(
         const count = index.getFieldReferenceCount(scriptPath, field.name);
         if (count > 0) {
           codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-            title: `UnityEvent references: ${count}`,
+            title: runtime.runtimeVscode.l10n.t('UnityEvent references: {count}', { count }),
             command: 'unityPlus.showUnityEventReferenceLocations',
             arguments: [{
               kind: 'field',
@@ -638,14 +643,14 @@ function createEventReferenceProvider(
     },
     async showReferenceLocations(target) {
       if (!isEnabled()) {
-        runtime.runtimeVscode.window.showInformationMessage('Unity Plus: UnityEvent references are disabled.');
+        runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: UnityEvent references are disabled.'));
         return;
       }
 
       const index = controller.getReadyIndex();
       if (!index) {
         controller.scheduleBuild();
-        runtime.runtimeVscode.window.showInformationMessage('Unity Plus: UnityEvent reference index is still building.');
+        runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: UnityEvent reference index is still building.'));
         return;
       }
 
@@ -654,7 +659,7 @@ function createEventReferenceProvider(
         : index.getFieldReferences(target.scriptPath, target.symbolName);
 
       if (references.length === 0) {
-        runtime.runtimeVscode.window.showInformationMessage('Unity Plus: no UnityEvent references found for this symbol.');
+        runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
         return;
       }
 
@@ -886,19 +891,29 @@ function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityE
   target.skippedMissingMethodNameCount += source.skippedMissingMethodNameCount;
 }
 
-function formatDiagnostics(diagnostics: UnityEventReferenceDiagnostics): string {
+function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEventReferenceDiagnostics): string {
   const skipped = diagnostics.skippedDisabledCallCount +
     diagnostics.skippedMissingTargetTypeNameCount +
     diagnostics.skippedUnresolvedTargetTypeNameCount +
     diagnostics.skippedMissingMethodNameCount;
   const skippedAssets = diagnostics.skippedAssetCount + diagnostics.canceledAssetCount;
   return [
-    `discovered ${diagnostics.discoveredAssetCount} serialized asset(s)`,
-    `scanned ${diagnostics.prefabCount} prefab(s) and ${diagnostics.sceneCount} scene(s)`,
-    `found ${diagnostics.persistentCallCount} persistent call(s)`,
-    `resolved ${diagnostics.resolvedReferenceCount} UnityEvent reference(s) by target type name`,
-    `skipped ${skipped} call(s) and ${skippedAssets} asset(s)`,
-    `finished in ${diagnostics.elapsedMilliseconds}ms`
+    runtimeVscode.l10n.t('discovered {count} serialized asset(s)', { count: diagnostics.discoveredAssetCount }),
+    runtimeVscode.l10n.t('scanned {prefabCount} prefab(s) and {sceneCount} scene(s)', {
+      prefabCount: diagnostics.prefabCount,
+      sceneCount: diagnostics.sceneCount
+    }),
+    runtimeVscode.l10n.t('found {count} persistent call(s)', { count: diagnostics.persistentCallCount }),
+    runtimeVscode.l10n.t('resolved {count} UnityEvent reference(s) by target type name', {
+      count: diagnostics.resolvedReferenceCount
+    }),
+    runtimeVscode.l10n.t('skipped {callCount} call(s) and {assetCount} asset(s)', {
+      callCount: skipped,
+      assetCount: skippedAssets
+    }),
+    runtimeVscode.l10n.t('finished in {elapsedMilliseconds}ms', {
+      elapsedMilliseconds: diagnostics.elapsedMilliseconds
+    })
   ].join(', ');
 }
 
@@ -906,7 +921,9 @@ function createMissingWorkspaceMessage(runtimeVscode: typeof vscode): string {
   const roots = runtimeVscode.workspace.workspaceFolders
     ?.map(folder => folder.uri.fsPath)
     .join(', ') ?? '<none>';
-  return `Unity Plus: open a Unity project to scan UnityEvent references. Workspace roots: ${roots}. Required markers: Assets, ProjectSettings, Packages/manifest.json.`;
+  return runtimeVscode.l10n.t('Unity Plus: open a Unity project to scan UnityEvent references. Workspace roots: {roots}. Required markers: Assets, ProjectSettings, Packages/manifest.json.', {
+    roots
+  });
 }
 
 function findCSharpMethods(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpMethodSnapshot[] {
@@ -972,7 +989,7 @@ function createHoverMarkdown(
   references: readonly UnityEventReference[]
 ): vscode.MarkdownString {
   const markdown = new runtimeVscode.MarkdownString();
-  markdown.appendMarkdown(`**UnityEvent references: ${references.length}**\n\n`);
+  markdown.appendMarkdown(`**${runtimeVscode.l10n.t('UnityEvent references: {count}', { count: references.length })}**\n\n`);
 
   for (const reference of references.slice(0, 12)) {
     const location = reference.gameObjectName
@@ -982,7 +999,7 @@ function createHoverMarkdown(
   }
 
   if (references.length > 12) {
-    markdown.appendMarkdown(`- ... ${references.length - 12} more\n`);
+    markdown.appendMarkdown(`- ${runtimeVscode.l10n.t('... {count} more', { count: references.length - 12 })}\n`);
   }
 
   return markdown;
@@ -1151,7 +1168,12 @@ async function buildDefaultCSharpTypeIndex(
 
       if (completedCount - lastReportedCount >= progressReportInterval || completedCount === totalCount) {
         lastReportedCount = completedCount;
-        context.progress?.report({ message: `Indexing C# type declarations ${completedCount}/${totalCount}` });
+        context.progress?.report({
+          message: runtime.runtimeVscode.l10n.t('Indexing C# type declarations {completedCount}/{totalCount}', {
+            completedCount,
+            totalCount
+          })
+        });
       }
     }
   });

@@ -64,12 +64,15 @@ export function registerProjectSyncFeature(
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.refreshProjectFiles', async () => {
     if (!root) {
-      runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project before refreshing project files.');
+      runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project before refreshing project files.'));
       return;
     }
 
     const result = await syncExistingProjectFileReferences({ root, runtimeVscode, logger });
-    const message = `Unity Plus: scanned ${result.scanned} C# project file(s), updated ${result.changed}.`;
+    const message = runtimeVscode.l10n.t('Unity Plus: scanned {scanned} C# project file(s), updated {changed}.', {
+      scanned: result.scanned,
+      changed: result.changed
+    });
     logger.info(message);
     runtimeVscode.window.showInformationMessage(message);
   }));
@@ -78,7 +81,7 @@ export function registerProjectSyncFeature(
     if (root) {
       await createUnityScript({ root, runtimeVscode, logger }, { kind: 'csharpScript', targetUri });
     } else {
-      runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project before creating a C# script.');
+      runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project before creating a C# script.'));
     }
   }));
 
@@ -86,7 +89,7 @@ export function registerProjectSyncFeature(
     if (root) {
       await createUnityScript({ root, runtimeVscode, logger }, { kind: 'scriptableObject', targetUri });
     } else {
-      runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project before creating a ScriptableObject.');
+      runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project before creating a ScriptableObject.'));
     }
   }));
 
@@ -299,7 +302,9 @@ async function createUnityScript(runtime: ProjectSyncRuntime, request: CreateScr
   }
 
   const rawName = await runtime.runtimeVscode.window.showInputBox({
-    prompt: request.kind === 'scriptableObject' ? 'Create ScriptableObject script' : 'Create C# script',
+    prompt: request.kind === 'scriptableObject'
+      ? runtime.runtimeVscode.l10n.t('Create ScriptableObject script')
+      : runtime.runtimeVscode.l10n.t('Create C# script'),
     placeHolder: request.kind === 'scriptableObject' ? 'NewScriptableObject' : 'NewBehaviour'
   });
   const className = sanitizeClassName(rawName ?? '');
@@ -309,7 +314,9 @@ async function createUnityScript(runtime: ProjectSyncRuntime, request: CreateScr
 
   const scriptUri = runtime.runtimeVscode.Uri.file(join(folderUri.fsPath, `${className}${csharpExtension}`));
   if (await fileExists(runtime, scriptUri)) {
-    runtime.runtimeVscode.window.showWarningMessage(`Unity Plus: ${className}.cs already exists.`);
+    runtime.runtimeVscode.window.showWarningMessage(runtime.runtimeVscode.l10n.t('Unity Plus: {fileName} already exists.', {
+      fileName: `${className}.cs`
+    }));
     return;
   }
 
