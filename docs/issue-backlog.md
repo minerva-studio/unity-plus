@@ -10,6 +10,8 @@ Source: GitHub issue state from `minerva-studio/unity-plus`, plus local code and
 
 Validation note: `npm run compile` and `npm test` pass locally. `npm run lint` passes with one warning in test code: `src/test/renameSync.test.ts` defines unused helper `ordinaryTopLevelTypeAt`.
 
+Local assessment counts: Complete 16, Partial 4, Not started 2, Not planned 1.
+
 | Issue | GitHub state | Local assessment | Notes |
 | --- | --- | --- | --- |
 | #1 | Closed | Complete | Scaffold and package scripts are present. |
@@ -26,7 +28,7 @@ Validation note: `npm run compile` and `npm test` pass locally. `npm run lint` p
 | #12 | Open | Partial | Cancel/fallback messaging exists; explicit affected file/class preview is still incomplete. |
 | #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
 | #14 | Closed | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
-| #15 | Open | Partial | Stale deleted script includes are removed by manual refresh/delete handling; missing compile entry detection is limited to asmdef-backed creates. |
+| #15 | Open | Complete | Missing compile entries are added for asmdef-backed scripts and default `Assembly-CSharp`/`Assembly-CSharp-Editor` fallback projects; missing fallback projects show actionable warnings. |
 | #16 | Closed | Complete | Scene/prefab scanner is implemented and covered by passing event-reference tests. |
 | #17 | Closed | Complete | CodeLens provider is implemented, respects `unityPlus.eventReferences.enabled`, and is covered by passing tests. |
 | #18 | Closed | Complete | Hover details include scene/prefab path, GameObject, component, and event field information in passing tests. |
@@ -170,9 +172,11 @@ Acceptance criteria:
 
 Warn when project files appear stale.
 
+Status: Complete. Manual refresh/delete handling removes stale script includes, create handling adds missing compile entries for asmdef-backed scripts, and Assets scripts without asmdefs now fallback to Unity default assembly projects. Scripts under an `Editor` path segment use `Assembly-CSharp-Editor.csproj`; other loose Assets scripts use `Assembly-CSharp.csproj`. Missing fallback projects are skipped with a warning that the class may have been created in the wrong folder.
+
 Acceptance criteria:
 - Detects references to deleted scripts during manual refresh/delete handling.
-- Adds missing compile entries for new scripts when an asmdef-backed project can be resolved.
+- Adds missing compile entries for new scripts when an asmdef-backed project or Unity default assembly fallback project can be resolved.
 - Offers refresh command with actionable warnings when project files cannot be updated.
 
 ## 16. [feature] UnityEvent reference scanner
