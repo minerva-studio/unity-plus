@@ -125,7 +125,7 @@
         },
         "unityPlus.scan.includeScenesOutsideBuildSettings": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Scan scenes outside Unity Build Settings when looking for event references."
         },
         "unityPlus.logging.level": {
