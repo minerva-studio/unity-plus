@@ -14,9 +14,10 @@ export interface UnityEventReference {
   eventFieldName: string;
   eventScriptPath?: string;
   gameObjectName?: string;
+  targetFileId?: string;
   targetTypeName: string;
   methodName: string;
-  scriptPath: string;
+  scriptPath?: string;
 }
 
 export interface UnitySerializedAssetReferenceIndex {
@@ -439,20 +440,26 @@ async function parseUnityEventReferencesCore(
       }
 
       const targetTypeName = simplifyAssemblyTypeName(call.targetTypeName);
-      if (!targetTypeName) {
-        diagnostics.skippedMissingTargetTypeNameCount += 1;
-        continue;
-      }
-
-      const scriptPath = await resolveCSharpType(targetTypeName);
-      if (!scriptPath) {
-        diagnostics.skippedUnresolvedTargetTypeNameCount += 1;
-        continue;
-      }
-
       const target = call.targetFileId ? objects.get(call.targetFileId) : undefined;
       const owner = call.ownerFileId ? objects.get(call.ownerFileId) : objects.get(ownerFileId);
       const eventScriptPath = owner?.scriptGuid ? metadataIndex.getAssetPath(owner.scriptGuid) : undefined;
+      let scriptPath: string | undefined;
+
+      if (!targetTypeName) {
+        diagnostics.skippedMissingTargetTypeNameCount += 1;
+      } else {
+        scriptPath = await resolveCSharpType(targetTypeName);
+        if (scriptPath) {
+          diagnostics.resolvedByTargetTypeNameCount += 1;
+        } else {
+          diagnostics.skippedUnresolvedTargetTypeNameCount += 1;
+        }
+      }
+
+      if (!eventScriptPath && !scriptPath) {
+        continue;
+      }
+
       references.push({
         assetPath,
         assetKind,
@@ -461,11 +468,11 @@ async function parseUnityEventReferencesCore(
         eventFieldName: call.eventFieldName,
         eventScriptPath,
         gameObjectName: getGameObjectName(objects, target?.gameObjectFileId ?? owner?.gameObjectFileId),
+        targetFileId: call.targetFileId,
         targetTypeName,
         methodName: call.methodName,
         scriptPath
       });
-      diagnostics.resolvedByTargetTypeNameCount += 1;
     }
   }
 
@@ -983,16 +990,22 @@ function createReferenceIndex(
   const targetReferenceKeysByFieldKey = new Map<string, Set<string>>();
 
   for (const reference of references) {
-    const key = referenceKey(reference.scriptPath, reference.methodName);
-    const bucket = referencesByKey.get(key) ?? [];
-    bucket.push(reference);
-    referencesByKey.set(key, bucket);
+    if (reference.scriptPath) {
+      const key = referenceKey(reference.scriptPath, reference.methodName);
+      const bucket = referencesByKey.get(key) ?? [];
+      bucket.push(reference);
+      referencesByKey.set(key, bucket);
+    }
 
     if (reference.eventScriptPath) {
       const fieldKey = referenceKey(reference.eventScriptPath, reference.eventFieldName);
       const fieldBucket = referencesByFieldKey.get(fieldKey) ?? [];
       fieldBucket.push(reference);
       referencesByFieldKey.set(fieldKey, fieldBucket);
+
+      if (!reference.scriptPath) {
+        continue;
+      }
 
       const targetKey = referenceKey(reference.scriptPath, reference.methodName);
       const seenTargets = targetReferenceKeysByFieldKey.get(fieldKey) ?? new Set<string>();
@@ -1267,6 +1280,10 @@ async function createTargetMethodLocations(
   const locations: vscode.Location[] = [];
 
   for (const reference of references) {
+    if (!reference.scriptPath) {
+      continue;
+    }
+
     const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
     try {
       const content = await runtime.readTextFile(uri, runtime.runtimeVscode);

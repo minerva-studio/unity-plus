@@ -12,6 +12,8 @@ const gateGuid = '11111111111111111111111111111111';
 const gateScriptPath = 'Assets/Gate.cs';
 const interactableGuid = '33333333333333333333333333333333';
 const interactableScriptPath = 'Packages/com.example/Runtime/Interactable.cs';
+const tutorialGuid = '44444444444444444444444444444444';
+const tutorialScriptPath = 'Assets/TutorialCheck.cs';
 
 describe('eventReferences', () => {
   it('does not build metadata when UnityEvent references are disabled', async () => {
@@ -94,6 +96,22 @@ describe('eventReferences', () => {
     assert.strictEqual(references.length, 1);
     assert.strictEqual(references[0].assetKind, 'scene');
     assert.strictEqual(references[0].assetPath, 'Assets/Scenes/Main.unity');
+  });
+
+  it('keeps field references when UnityEvent targets are Unity built-in methods', async () => {
+    const references = await parseUnityEventReferences(createBuiltinTargetYaml(2), 'Assets/Tutorial.prefab', 'prefab', createMetadataIndex(), createTypeResolver());
+
+    assert.strictEqual(references.length, 2);
+    assert.strictEqual(references[0].eventFieldName, 'OnEquipMagicBook');
+    assert.strictEqual(references[0].eventScriptPath, tutorialScriptPath);
+    assert.strictEqual(references[0].targetFileId, '3861731173795288140');
+    assert.strictEqual(references[0].targetTypeName, 'UnityEngine.GameObject');
+    assert.strictEqual(references[0].methodName, 'SetActive');
+    assert.strictEqual(references[0].scriptPath, undefined);
+    assert.strictEqual(references[0].line, 19);
+    assert.strictEqual(references[0].character, 22);
+    assert.strictEqual(references[1].targetFileId, '1324802612482997380');
+    assert.strictEqual(references[1].scriptPath, undefined);
   });
 
   it('skips disabled persistent calls', async () => {
@@ -470,6 +488,47 @@ describe('eventReferences', () => {
     assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
   });
 
+  it('shows field references without field targets for Unity built-in methods', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/TutorialCheck.cs', [
+      'using UnityEngine.Events;',
+      'public class TutorialCheck',
+      '{',
+      '  public UnityEvent OnEquipMagicBook = new();',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Tutorial.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createBuiltinTargetYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(fieldTargetLens, undefined);
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations.length, 2);
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(19, 22));
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[1].range.start, new FakePosition(26, 22));
+  });
+
   it('detects simple and nested generic UnityEvent fields', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
@@ -582,6 +641,45 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands[1].locations.length, 1);
     assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
+  });
+
+  it('counts all field references but only resolvable field targets for mixed UnityEvent calls', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract()',
+      '  {',
+      '    return true;',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createMixedTargetYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
   });
 
   it('shows an informational message when a reference location command has no matches', async () => {
@@ -1128,6 +1226,56 @@ function createPackagePrefabYaml(callState: number): string {
   ].join('\n');
 }
 
+function createBuiltinTargetYaml(callState: number): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!1 &7022818226384243533',
+    'GameObject:',
+    '  m_Name: Tutorial Check',
+    '--- !u!1 &3861731173795288140',
+    'GameObject:',
+    '  m_Name: Disabled Target',
+    '--- !u!1 &1324802612482997380',
+    'GameObject:',
+    '  m_Name: Enabled Target',
+    '--- !u!114 &460066068064628344',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 7022818226384243533}',
+    `  m_Script: {fileID: 11500000, guid: ${tutorialGuid}, type: 3}`,
+    '  OnEquipMagicBook:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 3861731173795288140}',
+    '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+    '        m_MethodName: SetActive',
+    '        m_Mode: 6',
+    '        m_Arguments:',
+    '          m_BoolArgument: 0',
+    `        m_CallState: ${callState}`,
+    '      - m_Target: {fileID: 1324802612482997380}',
+    '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+    '        m_MethodName: SetActive',
+    '        m_Mode: 6',
+    '        m_Arguments:',
+    '          m_BoolArgument: 1',
+    `        m_CallState: ${callState}`
+  ].join('\n');
+}
+
+function createMixedTargetYaml(callState: number): string {
+  return createPrefabYaml(callState).replace(
+    `        m_CallState: ${callState}`,
+    [
+      `        m_CallState: ${callState}`,
+      '      - m_Target: {fileID: 1000}',
+      '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+      '        m_MethodName: SetActive',
+      '        m_Mode: 6',
+      `        m_CallState: ${callState}`
+    ].join('\n')
+  );
+}
+
 function createMissingTargetTypeYaml(): string {
   return [
     '%YAML 1.1',
@@ -1174,7 +1322,11 @@ function createMetadataIndex(): UnityMetadataIndex {
         return gateScriptPath;
       }
 
-      return guid === interactableGuid ? interactableScriptPath : undefined;
+      if (guid === interactableGuid) {
+        return interactableScriptPath;
+      }
+
+      return guid === tutorialGuid ? tutorialScriptPath : undefined;
     },
     dispose: () => undefined
   };
