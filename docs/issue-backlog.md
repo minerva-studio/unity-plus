@@ -28,7 +28,7 @@ Local assessment counts: Complete 17, Partial 3, Not started 2, Not planned 1.
 | #12 | Open | Complete | Explicit safety preview shows affected class, script file, and Unity meta file before applying the rename. |
 | #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
 | #14 | Closed | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
-| #15 | Open | Complete | Missing compile entries are added for asmdef-backed scripts and default `Assembly-CSharp`/`Assembly-CSharp-Editor` fallback projects; missing fallback projects show actionable warnings. |
+| #15 | Closed | Complete | Missing compile entries are added for asmdef-backed scripts and default `Assembly-CSharp`/`Assembly-CSharp-Editor` fallback projects; missing fallback projects show actionable warnings. |
 | #16 | Closed | Complete | Scene/prefab scanner is implemented and covered by passing event-reference tests. |
 | #17 | Closed | Complete | CodeLens provider is implemented, respects `unityPlus.eventReferences.enabled`, and is covered by passing tests. |
 | #18 | Closed | Complete | Hover details include scene/prefab path, GameObject, component, and event field information in passing tests. |
