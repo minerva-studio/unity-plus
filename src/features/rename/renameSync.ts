@@ -41,9 +41,27 @@ export type RenamePreviewDecision =
   | { kind: 'confirmed'; operations: readonly ScriptFileRenameOperation[] }
   | { kind: 'cancelled' };
 
+type RenameOperationKind = 'script' | 'meta';
+
+export interface RenameInputRequest {
+  oldTypeName: string;
+  filePath: string;
+  previewMode: RenamePreviewMode;
+  hasMetaFile: boolean;
+}
+
+export interface RenameInputDecision {
+  newTypeName: string;
+  operationKinds?: readonly RenameOperationKind[];
+}
+
 type RenameOperationQuickPickItem = vscode.QuickPickItem & {
   operation: ScriptFileRenameOperation;
-  operationKind: 'script' | 'meta';
+  operationKind: RenameOperationKind;
+};
+
+type RenameInputQuickPickItem = vscode.QuickPickItem & {
+  operationKind: RenameOperationKind;
 };
 
 export interface ScriptFileMove {
@@ -78,6 +96,7 @@ export interface AtomicScriptRenameRuntime {
   filePath: string;
   mode: RenameFileSyncMode;
   previewMode?: RenamePreviewMode;
+  operationKinds?: readonly RenameOperationKind[];
   currentType: CSharpTopLevelTypeSnapshot | undefined;
   cursor: CSharpPosition;
   newTypeName: string;
@@ -91,6 +110,7 @@ export interface AtomicScriptRenameRuntime {
     operations: readonly ScriptFileRenameOperation[],
     edit: vscode.WorkspaceEdit
   ): Promise<RenamePreviewDecision | boolean>;
+  confirmRenameWarning?(plan: ScriptFilenameSyncPlan, operations: readonly ScriptFileRenameOperation[], edit: vscode.WorkspaceEdit): Promise<boolean>;
   logger: UnityPlusLogger;
 }
 
@@ -107,6 +127,7 @@ export interface RenameTypeCommandRuntime {
   previewMode: RenamePreviewMode;
   languageService: CSharpLanguageService;
   showInputBox(options: { value: string; prompt: string; validateInput(value: string): string | undefined }): Promise<string | undefined>;
+  showRenameInput(request: RenameInputRequest): Promise<RenameInputDecision | undefined>;
   showProgress<T>(title: string, task: () => Promise<T>): Promise<T>;
   showInformationMessage(message: string): void;
   showWarningMessage(message: string): void;
@@ -121,6 +142,7 @@ export interface RenameTypeCommandRuntime {
     operations: readonly ScriptFileRenameOperation[],
     edit: vscode.WorkspaceEdit
   ): Promise<RenamePreviewDecision | boolean>;
+  confirmRenameWarning(plan: ScriptFilenameSyncPlan, operations: readonly ScriptFileRenameOperation[], edit: vscode.WorkspaceEdit): Promise<boolean>;
   wait(ms: number): Promise<void>;
   retryIntervalMs: number;
   settleTimeoutMs: number;
@@ -171,6 +193,7 @@ export function registerRenameFeature(
         previewMode: getPreviewMode(),
         languageService,
         showInputBox: async options => await runtimeVscode.window.showInputBox(options),
+        showRenameInput: async request => await showRenameInput(runtimeVscode, request),
         showProgress: async (title, task) => await runtimeVscode.window.withProgress({
           location: runtimeVscode.ProgressLocation.Notification,
           title
@@ -187,6 +210,7 @@ export function registerRenameFeature(
         createFileUri: path => runtimeVscode.Uri.file(path),
         applyWorkspaceEdit: async edit => await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true }),
         confirmRenamePreview: async (previewMode, plan, operations, edit) => await confirmRenamePreview(runtimeVscode, previewMode, plan, operations, edit),
+        confirmRenameWarning: async (plan, operations, edit) => await confirmDetailedRenameWarning(runtimeVscode, plan, operations, edit),
         wait,
         retryIntervalMs: 200,
         settleTimeoutMs: 2000,
@@ -365,15 +389,14 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
     return await fallbackToNativeRename(runtime, 'Using VS Code Rename Symbol because no primary top-level C# type was found.');
   }
 
-  const newTypeName = await runtime.showInputBox({
-    value: renameType.name,
-    prompt: 'Rename C# type, script file, and Unity meta file',
-    validateInput: value => isValidCSharpIdentifier(value) ? undefined : 'Enter a valid C# type name.'
-  });
-
-  if (!newTypeName || newTypeName === renameType.name) {
+  const renameInput = await readRenameInput(runtime, renameType);
+  if (!renameInput || renameInput.newTypeName === renameType.name) {
     runtime.logger.debug('Unity Plus rename command was cancelled or unchanged.');
     return { kind: 'cancelled' };
+  }
+
+  if (!isValidCSharpIdentifier(renameInput.newTypeName)) {
+    return { kind: 'failed', message: 'Enter a valid C# type name.' };
   }
 
   runtime.markSyncing(runtime.editor.filePath);
@@ -386,12 +409,14 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
         previewMode: runtime.previewMode,
         currentType: renameType,
         cursor: runtime.editor!.cursor,
-        newTypeName,
+        newTypeName: renameInput.newTypeName,
+        operationKinds: renameInput.operationKinds,
         languageService: runtime.languageService,
         fileExists: runtime.fileExists,
         createFileUri: runtime.createFileUri,
         applyWorkspaceEdit: runtime.applyWorkspaceEdit,
         confirmRenamePreview: runtime.confirmRenamePreview,
+        confirmRenameWarning: runtime.confirmRenameWarning,
         logger: runtime.logger
       })
     );
@@ -404,6 +429,101 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
   } finally {
     runtime.unmarkSyncing(runtime.editor.filePath);
   }
+}
+
+async function readRenameInput(
+  runtime: RenameTypeCommandRuntime,
+  renameType: CSharpTopLevelTypeSnapshot
+): Promise<RenameInputDecision | undefined> {
+  if (!runtime.editor) {
+    return undefined;
+  }
+
+  if (runtime.previewMode === 'silent') {
+    const newTypeName = await runtime.showInputBox({
+      value: renameType.name,
+      prompt: 'Rename C# type, script file, and Unity meta file',
+      validateInput: value => isValidCSharpIdentifier(value) ? undefined : 'Enter a valid C# type name.'
+    });
+
+    return newTypeName ? { newTypeName } : undefined;
+  }
+
+  return await runtime.showRenameInput({
+    oldTypeName: renameType.name,
+    filePath: runtime.editor.filePath,
+    previewMode: runtime.previewMode,
+    hasMetaFile: await runtime.fileExists(`${runtime.editor.filePath}.meta`)
+  });
+}
+
+function showRenameInput(
+  runtimeVscode: typeof vscode,
+  request: RenameInputRequest
+): Promise<RenameInputDecision | undefined> {
+  return new Promise(resolve => {
+    const quickPick = runtimeVscode.window.createQuickPick<RenameInputQuickPickItem>();
+    let accepted = false;
+
+    const buildItems = (newTypeName: string): RenameInputQuickPickItem[] => {
+      const newScriptName = `${newTypeName}.cs`;
+      const items: RenameInputQuickPickItem[] = [{
+        label: runtimeVscode.l10n.t('Rename script file'),
+        description: `${basename(request.filePath)} -> ${newScriptName}`,
+        picked: true,
+        operationKind: 'script'
+      }];
+
+      if (request.hasMetaFile) {
+        items.push({
+          label: runtimeVscode.l10n.t('Rename Unity meta file'),
+          description: `${basename(request.filePath)}.meta -> ${newScriptName}.meta`,
+          picked: true,
+          operationKind: 'meta'
+        });
+      }
+
+      return items;
+    };
+
+    const refreshItems = () => {
+      const previousKinds = new Set(quickPick.selectedItems.map(item => item.operationKind));
+      const items = buildItems(quickPick.value);
+      quickPick.items = items;
+      quickPick.selectedItems = items.filter(item =>
+        previousKinds.size === 0 ? item.picked : previousKinds.has(item.operationKind)
+      );
+    };
+
+    quickPick.title = runtimeVscode.l10n.t('Rename C# Type and Script');
+    quickPick.placeholder = runtimeVscode.l10n.t('Type the new C# type name, then choose file changes');
+    quickPick.canSelectMany = true;
+    quickPick.value = request.oldTypeName;
+    quickPick.items = buildItems(request.oldTypeName);
+    quickPick.selectedItems = quickPick.items.filter(item => item.picked);
+
+    quickPick.onDidChangeValue(() => refreshItems());
+    quickPick.onDidAccept(() => {
+      accepted = true;
+      const selectedKinds = new Set(quickPick.selectedItems.map(item => item.operationKind));
+      const operationKinds = selectedKinds.has('script')
+        ? quickPick.selectedItems.map(item => item.operationKind)
+        : [];
+
+      resolve({
+        newTypeName: quickPick.value.trim(),
+        operationKinds
+      });
+      quickPick.hide();
+    });
+    quickPick.onDidHide(() => {
+      if (!accepted) {
+        resolve(undefined);
+      }
+      quickPick.dispose();
+    });
+    quickPick.show();
+  });
 }
 
 async function waitForRenameCommandPrimaryTopLevelType(runtime: RenameTypeCommandRuntime): Promise<{
@@ -493,7 +613,7 @@ export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRunti
     return { kind: 'failed', message: `Script file rename preflight failed for ${basename(runtime.filePath)}.` };
   }
 
-  const previewDecision = await decideRenamePreview(runtime, plan, renameOperations, renameEdit);
+  const previewDecision = await decideRenamePreview(runtime, plan, filterRenameOperations(plan, renameOperations, runtime.operationKinds), renameEdit);
   if (previewDecision.kind === 'cancelled') {
     return { kind: 'cancelled' };
   }
@@ -546,7 +666,12 @@ async function decideRenamePreview(
   operations: readonly ScriptFileRenameOperation[],
   edit: vscode.WorkspaceEdit
 ): Promise<RenamePreviewDecision> {
-  if ((runtime.previewMode ?? 'ask') === 'silent') {
+  if ((runtime.previewMode ?? 'ask') === 'silent' || runtime.operationKinds) {
+    if ((runtime.previewMode ?? 'ask') === 'ask+warn') {
+      const confirmed = await runtime.confirmRenameWarning?.(plan, operations, edit);
+      return confirmed ? { kind: 'confirmed', operations } : { kind: 'cancelled' };
+    }
+
     return { kind: 'confirmed', operations };
   }
 
@@ -559,6 +684,26 @@ async function decideRenamePreview(
   }
 
   return decision;
+}
+
+function filterRenameOperations(
+  plan: ScriptFilenameSyncPlan,
+  operations: readonly ScriptFileRenameOperation[],
+  operationKinds: readonly RenameOperationKind[] | undefined
+): readonly ScriptFileRenameOperation[] {
+  if (!operationKinds) {
+    return operations;
+  }
+
+  const selectedKinds = new Set(operationKinds);
+  if (!selectedKinds.has('script')) {
+    return [];
+  }
+
+  return operations.filter(operation =>
+    operation.oldPath === plan.oldFilePath ||
+    (operation.oldPath === plan.oldMetaPath && selectedKinds.has('meta'))
+  );
 }
 
 async function pickRenameOperations(

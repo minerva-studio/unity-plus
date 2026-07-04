@@ -1023,7 +1023,8 @@ describe('renameSync', () => {
     ]);
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
     assert.strictEqual(runtime.messages.length, 0);
-    assert.strictEqual(runtime.previewCalls.length, 1);
+    assert.strictEqual(runtime.renameInputCalls.length, 1);
+    assert.strictEqual(runtime.previewCalls.length, 0);
     assert.strictEqual(runtime.markedSyncing.includes(plan.oldFilePath), true);
     assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
   });
@@ -1110,9 +1111,10 @@ describe('renameSync', () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
       editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      previewMode: 'ask+warn',
       primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
       inputValue: plan.newTypeName,
-      confirmRenamePreviewResult: false
+      confirmRenameWarningResult: false
     });
 
     const result = await runRenameTypeCommand(runtime);
@@ -1120,7 +1122,8 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'cancelled');
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
     assert.deepStrictEqual(runtime.appliedEdits, []);
-    assert.strictEqual(runtime.previewCalls.length, 1);
+    assert.strictEqual(runtime.renameInputCalls.length, 1);
+    assert.strictEqual(runtime.warningPreviewCalls.length, 1);
     assert.deepStrictEqual(runtime.warnings, []);
   });
 
@@ -1421,7 +1424,9 @@ interface RenameCommandRuntimeOptions {
   primaryTopLevelType?: CSharpTopLevelTypeSnapshot;
   primaryTopLevelTypes?: Array<CSharpTopLevelTypeSnapshot | undefined>;
   inputValue?: string;
+  renameOperationKinds?: Array<'script' | 'meta'>;
   confirmRenamePreviewResult?: boolean;
+  confirmRenameWarningResult?: boolean;
 }
 
 function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
@@ -1433,9 +1438,11 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const markedSyncing: string[] = [];
   const unmarkedSyncing: string[] = [];
   const inputBoxCalls: string[] = [];
+  const renameInputCalls: string[] = [];
   const atomicRenameCalls: string[] = [];
   const appliedEdits: unknown[] = [];
   const previewCalls: { plan: ScriptFilenameSyncPlan; operations: { oldPath: string; newPath: string }[] }[] = [];
+  const warningPreviewCalls: { plan: ScriptFilenameSyncPlan; operations: { oldPath: string; newPath: string }[] }[] = [];
   const waited: number[] = [];
   const languageService = options.primaryTopLevelTypes
     ? createOptionalSequenceLanguageService(options.primaryTopLevelTypes)
@@ -1449,6 +1456,17 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     async showInputBox() {
       inputBoxCalls.push('showInputBox');
       return options.inputValue;
+    },
+    async showRenameInput() {
+      renameInputCalls.push('showRenameInput');
+      if (options.inputValue === undefined) {
+        return undefined;
+      }
+
+      return {
+        newTypeName: options.inputValue,
+        operationKinds: options.renameOperationKinds ?? ['script', 'meta']
+      };
     },
     async showProgress<T>(title: string, task: () => Promise<T>): Promise<T> {
       progressTitles.push(title);
@@ -1486,6 +1504,16 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
       });
       return options.confirmRenamePreviewResult ?? true;
     },
+    async confirmRenameWarning(
+      plan: ScriptFilenameSyncPlan,
+      operations: readonly { oldPath: string; newPath: string }[]
+    ): Promise<boolean> {
+      warningPreviewCalls.push({
+        plan,
+        operations: [...operations]
+      });
+      return options.confirmRenameWarningResult ?? true;
+    },
     async wait(ms: number): Promise<void> {
       waited.push(ms);
     },
@@ -1505,9 +1533,11 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     markedSyncing,
     unmarkedSyncing,
     inputBoxCalls,
+    renameInputCalls,
     atomicRenameCalls,
     appliedEdits,
     previewCalls,
+    warningPreviewCalls,
     waited
   };
 
