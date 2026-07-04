@@ -10,6 +10,8 @@ describe('package manifest', () => {
       'onLanguage:csharp',
       'workspaceContains:**/ProjectSettings/ProjectVersion.txt',
       'onCommand:unityPlus.refreshProjectFiles',
+      'onCommand:unityPlus.createCSharpScript',
+      'onCommand:unityPlus.createScriptableObject',
       'onCommand:unityPlus.syncScriptFilename',
       'onCommand:unityPlus.syncClassName',
       'onCommand:unityPlus.showUnityEventReferences',
@@ -36,8 +38,25 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.rename.classFileSyncMode'].default, 'on');
     assert.deepStrictEqual(properties['unityPlus.rename.classFileSyncMode'].enum, ['on', 'off']);
     assert.strictEqual(properties['unityPlus.projectFiles.autoRefresh'].default, true);
+    assert.strictEqual(properties['unityPlus.templates.csharpScriptFile'].default, '');
+    assert.strictEqual(properties['unityPlus.templates.scriptableObjectFile'].default, '');
+    assert.strictEqual(properties['unityPlus.templates.csharpScript'].default, '');
+    assert.strictEqual(properties['unityPlus.templates.scriptableObject'].default, '');
     assert.strictEqual(properties['unityPlus.eventReferences.enabled'].default, true);
     assert.strictEqual(properties['unityPlus.metaFiles.hideInExplorer'].default, true);
+  });
+
+  it('contributes explicit commands for creating Unity C# scripts', () => {
+    const manifest = readPackageManifest();
+    const csharpScriptCommand = manifest.contributes.commands.find((item: { command: string }) =>
+      item.command === 'unityPlus.createCSharpScript'
+    );
+    const scriptableObjectCommand = manifest.contributes.commands.find((item: { command: string }) =>
+      item.command === 'unityPlus.createScriptableObject'
+    );
+
+    assert.strictEqual(csharpScriptCommand?.title, 'Unity Plus: Create C# Script');
+    assert.strictEqual(scriptableObjectCommand?.title, 'Unity Plus: Create ScriptableObject');
   });
 
   it('contributes an explicit command for opening Unity meta files', () => {
@@ -69,6 +88,12 @@ describe('package manifest', () => {
     const explorerOpenInUnityCommand = manifest.contributes.menus['explorer/context'].find((item: { command: string }) =>
       item.command === 'unityPlus.openInUnity'
     );
+    const explorerCreateScriptCommand = manifest.contributes.menus['explorer/context'].find((item: { command: string }) =>
+      item.command === 'unityPlus.createCSharpScript'
+    );
+    const explorerCreateScriptableObjectCommand = manifest.contributes.menus['explorer/context'].find((item: { command: string }) =>
+      item.command === 'unityPlus.createScriptableObject'
+    );
     const editorTitleOpenInUnityCommand = manifest.contributes.menus['editor/title'].find((item: { command: string }) =>
       item.command === 'unityPlus.openInUnity'
     );
@@ -77,6 +102,8 @@ describe('package manifest', () => {
     assert.strictEqual(editorTitleCommand?.when, 'resourceScheme == file');
     assert.strictEqual(explorerOpenInUnityCommand?.when, 'resourceScheme == file');
     assert.strictEqual(editorTitleOpenInUnityCommand?.when, 'resourceScheme == file');
+    assert.strictEqual(explorerCreateScriptCommand?.when, 'resourceScheme == file');
+    assert.strictEqual(explorerCreateScriptableObjectCommand?.when, 'resourceScheme == file');
   });
 
   it('enables optional F2 override for C# rename by default', () => {

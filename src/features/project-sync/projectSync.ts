@@ -1,14 +1,55 @@
+import { randomBytes } from 'node:crypto';
+import { basename, dirname, extname, isAbsolute, join, parse } from 'node:path';
 import { createRequire } from 'node:module';
 import type * as vscode from 'vscode';
 import { UnityPlusLogger } from '../../unity/logger';
 
 export const assetsCsharpGlob = 'Assets/**/*.cs';
+export const packagesCsharpGlob = 'Packages/**/*.cs';
+
+export type ScriptKind = 'csharpScript' | 'scriptableObject';
+
+export interface ProjectSyncRuntime {
+  root: vscode.Uri;
+  runtimeVscode: typeof vscode;
+  logger: UnityPlusLogger;
+}
+
+export interface ProjectSyncResult {
+  changed: number;
+  scanned: number;
+}
+
+interface CreateScriptRequest {
+  kind: ScriptKind;
+  targetUri?: vscode.Uri;
+}
+
+interface AsmdefProjectTarget {
+  asmdefName: string;
+  csprojUri: vscode.Uri;
+}
+
+interface TemplateConfig {
+  fileSetting: string;
+  textSetting: string;
+  defaultTemplate: string;
+}
+
+export interface TemplateContext {
+  className: string;
+  namespaceBlock: string;
+}
 
 export interface ProjectSyncFeatureOptions {
   root?: vscode.Uri;
   runtimeVscode?: typeof vscode;
   isAutoRefreshEnabled?: () => boolean;
 }
+
+const compileIncludePattern = /<Compile\s+Include=(["'])([^"']+)\1\s*\/>/g;
+const csharpExtension = '.cs';
+const metaExtension = '.meta';
 
 export function registerProjectSyncFeature(
   logger: UnityPlusLogger,
@@ -20,28 +61,67 @@ export function registerProjectSyncFeature(
   );
   const root = options.root;
   const disposables: vscode.Disposable[] = [];
+
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.refreshProjectFiles', async () => {
-    logger.info('Project file refresh is planned but not implemented yet.');
-    runtimeVscode.window.showInformationMessage('Unity Plus: project file refresh is planned for v0.3.');
+    if (!root) {
+      runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project before refreshing project files.');
+      return;
+    }
+
+    const result = await syncExistingProjectFileReferences({ root, runtimeVscode, logger });
+    const message = `Unity Plus: scanned ${result.scanned} C# project file(s), updated ${result.changed}.`;
+    logger.info(message);
+    runtimeVscode.window.showInformationMessage(message);
+  }));
+
+  disposables.push(runtimeVscode.commands.registerCommand('unityPlus.createCSharpScript', async (targetUri?: vscode.Uri) => {
+    if (root) {
+      await createUnityScript({ root, runtimeVscode, logger }, { kind: 'csharpScript', targetUri });
+    } else {
+      runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project before creating a C# script.');
+    }
+  }));
+
+  disposables.push(runtimeVscode.commands.registerCommand('unityPlus.createScriptableObject', async (targetUri?: vscode.Uri) => {
+    if (root) {
+      await createUnityScript({ root, runtimeVscode, logger }, { kind: 'scriptableObject', targetUri });
+    } else {
+      runtimeVscode.window.showWarningMessage('Unity Plus: Open a Unity project before creating a ScriptableObject.');
+    }
   }));
 
   if (shouldRegisterProjectSyncWatcher(root, isAutoRefreshEnabled())) {
-    const watcher = runtimeVscode.workspace.createFileSystemWatcher(
+    const runtime = { root, runtimeVscode, logger };
+    const assetsWatcher = runtimeVscode.workspace.createFileSystemWatcher(
       new runtimeVscode.RelativePattern(root, assetsCsharpGlob)
     );
-    disposables.push(watcher);
+    const packagesWatcher = runtimeVscode.workspace.createFileSystemWatcher(
+      new runtimeVscode.RelativePattern(root, packagesCsharpGlob)
+    );
+    disposables.push(assetsWatcher, packagesWatcher);
 
-    const scheduleRefresh = (uri: vscode.Uri) => {
+    const onCreate = (uri: vscode.Uri) => {
+      if (isAutoRefreshEnabled()) {
+        void handleCreatedCSharpFile(runtime, uri);
+      }
+    };
+    const onDelete = (uri: vscode.Uri) => {
+      if (isAutoRefreshEnabled()) {
+        void removeScriptFromProjects(runtime, uri);
+      }
+    };
+
+    disposables.push(assetsWatcher.onDidCreate(onCreate));
+    disposables.push(assetsWatcher.onDidDelete(onDelete));
+    disposables.push(packagesWatcher.onDidCreate(onCreate));
+    disposables.push(packagesWatcher.onDidDelete(onDelete));
+    disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
       if (!isAutoRefreshEnabled()) {
         return;
       }
 
-      // The first implementation only records intent; the debounce and Unity refresh bridge belong to v0.3.
-      logger.debug(`Observed C# file structure change that may require project refresh: ${uri.fsPath}`);
-    };
-
-    disposables.push(watcher.onDidCreate(scheduleRefresh));
-    disposables.push(watcher.onDidDelete(scheduleRefresh));
+      void handleRenamedCSharpFiles(runtime, event.files);
+    }));
   }
 
   return runtimeVscode.Disposable.from(...disposables);
@@ -52,6 +132,548 @@ export function shouldRegisterProjectSyncWatcher(
   autoRefreshEnabled: boolean
 ): root is vscode.Uri {
   return root !== undefined && autoRefreshEnabled;
+}
+
+export async function handleCreatedCSharpFile(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<void> {
+  if (!isCSharpUri(uri)) {
+    return;
+  }
+
+  const projectPath = toProjectPath(runtime.root, uri);
+  if (!projectPath || !isUnityScriptProjectPath(projectPath)) {
+    runtime.logger.debug(`C# project sync skipped non-Unity script path: ${uri.fsPath}`);
+    return;
+  }
+
+  await ensureUnityMetaFile(runtime, uri);
+  await addScriptToAsmdefProject(runtime, uri);
+}
+
+export async function handleRenamedCSharpFiles(
+  runtime: ProjectSyncRuntime,
+  files: readonly { oldUri: vscode.Uri; newUri: vscode.Uri }[]
+): Promise<void> {
+  for (const file of files) {
+    if (isCSharpUri(file.oldUri) && isCSharpUri(file.newUri)) {
+      await renameScriptInProjects(runtime, file.oldUri, file.newUri);
+      await ensureUnityMetaFile(runtime, file.newUri);
+      continue;
+    }
+
+    if (isCSharpUri(file.oldUri)) {
+      await removeScriptFromProjects(runtime, file.oldUri);
+      continue;
+    }
+
+    if (isCSharpUri(file.newUri)) {
+      await handleCreatedCSharpFile(runtime, file.newUri);
+    }
+  }
+}
+
+export async function addScriptToAsmdefProject(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<boolean> {
+  const projectPath = toProjectPath(runtime.root, uri);
+  if (!projectPath) {
+    return false;
+  }
+
+  const target = await findAsmdefProjectTarget(runtime, uri);
+  if (!target) {
+    return false;
+  }
+
+  const updated = await updateCompileIncludes(runtime, target.csprojUri, current => addInclude(current, projectPath));
+  if (updated) {
+    runtime.logger.info(`Added ${projectPath} to ${basename(target.csprojUri.fsPath)}.`);
+  }
+
+  return updated;
+}
+
+export async function renameScriptInProjects(
+  runtime: ProjectSyncRuntime,
+  oldUri: vscode.Uri,
+  newUri: vscode.Uri
+): Promise<ProjectSyncResult> {
+  const oldProjectPath = toProjectPath(runtime.root, oldUri);
+  const newProjectPath = toProjectPath(runtime.root, newUri);
+  if (!oldProjectPath || !newProjectPath) {
+    return { changed: 0, scanned: 0 };
+  }
+
+  return await updateRootProjects(runtime, current => renameInclude(current, oldProjectPath, newProjectPath));
+}
+
+export async function removeScriptFromProjects(
+  runtime: ProjectSyncRuntime,
+  uri: vscode.Uri
+): Promise<ProjectSyncResult> {
+  const projectPath = toProjectPath(runtime.root, uri);
+  if (!projectPath) {
+    return { changed: 0, scanned: 0 };
+  }
+
+  return await updateRootProjects(runtime, current => removeInclude(current, projectPath));
+}
+
+export async function ensureUnityMetaFile(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<boolean> {
+  const metaUri = runtime.runtimeVscode.Uri.file(`${uri.fsPath}${metaExtension}`);
+  if (await fileExists(runtime, metaUri)) {
+    return false;
+  }
+
+  const content = createMonoImporterMeta(generateGuid());
+  await writeTextFile(runtime, metaUri, content);
+  runtime.logger.info(`Created Unity meta file for ${basename(uri.fsPath)}.`);
+  return true;
+}
+
+export function createMonoImporterMeta(guid: string): string {
+  return [
+    'fileFormatVersion: 2',
+    `guid: ${guid}`,
+    'MonoImporter:',
+    '  externalObjects: {}',
+    '  serializedVersion: 2',
+    '  defaultReferences: []',
+    '  executionOrder: 0',
+    '  icon: {instanceID: 0}',
+    '  userData: ',
+    '  assetBundleName: ',
+    '  assetBundleVariant: ',
+    ''
+  ].join('\n');
+}
+
+export function renderTemplate(template: string, context: TemplateContext): string {
+  return template
+    .replace(/\$\{className\}/g, context.className)
+    .replace(/\$\{namespaceBlock\}/g, context.namespaceBlock);
+}
+
+export function defaultScriptTemplate(kind: ScriptKind): string {
+  if (kind === 'scriptableObject') {
+    return [
+      'using UnityEngine;',
+      '',
+      '[CreateAssetMenu]',
+      '${namespaceBlock}public class ${className} : ScriptableObject',
+      '{',
+      '}',
+      ''
+    ].join('\n');
+  }
+
+  return [
+    'using UnityEngine;',
+    '',
+    '${namespaceBlock}public class ${className} : MonoBehaviour',
+    '{',
+    '}',
+    ''
+  ].join('\n');
+}
+
+export function toProjectPath(root: vscode.Uri, uri: vscode.Uri): string | undefined {
+  const rootPath = normalizePath(root.fsPath);
+  const filePath = normalizePath(uri.fsPath);
+  if (filePath === rootPath) {
+    return '';
+  }
+
+  if (!filePath.startsWith(`${rootPath}/`)) {
+    return undefined;
+  }
+
+  return filePath.slice(rootPath.length + 1);
+}
+
+export function normalizeProjectPath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+}
+
+async function createUnityScript(runtime: ProjectSyncRuntime, request: CreateScriptRequest): Promise<void> {
+  const folderUri = await resolveCreateTargetFolder(runtime, request.targetUri);
+  if (!folderUri) {
+    return;
+  }
+
+  const rawName = await runtime.runtimeVscode.window.showInputBox({
+    prompt: request.kind === 'scriptableObject' ? 'Create ScriptableObject script' : 'Create C# script',
+    placeHolder: request.kind === 'scriptableObject' ? 'NewScriptableObject' : 'NewBehaviour'
+  });
+  const className = sanitizeClassName(rawName ?? '');
+  if (!className) {
+    return;
+  }
+
+  const scriptUri = runtime.runtimeVscode.Uri.file(join(folderUri.fsPath, `${className}${csharpExtension}`));
+  if (await fileExists(runtime, scriptUri)) {
+    runtime.runtimeVscode.window.showWarningMessage(`Unity Plus: ${className}.cs already exists.`);
+    return;
+  }
+
+  const template = await resolveTemplate(runtime, request.kind);
+  const source = renderTemplate(template, {
+    className,
+    namespaceBlock: ''
+  });
+
+  await writeTextFile(runtime, scriptUri, source);
+  await ensureUnityMetaFile(runtime, scriptUri);
+  await addScriptToAsmdefProject(runtime, scriptUri);
+  await runtime.runtimeVscode.window.showTextDocument(scriptUri);
+}
+
+async function resolveCreateTargetFolder(
+  runtime: ProjectSyncRuntime,
+  targetUri: vscode.Uri | undefined
+): Promise<vscode.Uri | undefined> {
+  if (!targetUri) {
+    const activeUri = runtime.runtimeVscode.window.activeTextEditor?.document.uri;
+    return activeUri ? runtime.runtimeVscode.Uri.file(dirname(activeUri.fsPath)) : runtime.root;
+  }
+
+  if (await isDirectory(runtime, targetUri)) {
+    return targetUri;
+  }
+
+  return runtime.runtimeVscode.Uri.file(dirname(targetUri.fsPath));
+}
+
+async function resolveTemplate(runtime: ProjectSyncRuntime, kind: ScriptKind): Promise<string> {
+  const config = templateConfig(kind);
+  const workspaceConfig = runtime.runtimeVscode.workspace.getConfiguration('unityPlus');
+  const templateFile = workspaceConfig.get<string>(config.fileSetting, '');
+
+  if (templateFile.trim().length > 0) {
+    const templateUri = resolveTemplateFileUri(runtime, templateFile);
+    const templateText = await readOptionalTextFile(runtime, templateUri);
+    if (templateText !== undefined) {
+      return templateText;
+    }
+
+    runtime.logger.warn(`Unity Plus template file was not found or could not be read: ${templateFile}`);
+  }
+
+  const configuredTemplate = workspaceConfig.get<string>(config.textSetting, '');
+  return configuredTemplate.trim().length > 0 ? configuredTemplate : config.defaultTemplate;
+}
+
+function resolveTemplateFileUri(runtime: ProjectSyncRuntime, templateFile: string): vscode.Uri {
+  return runtime.runtimeVscode.Uri.file(isAbsolute(templateFile) ? templateFile : join(runtime.root.fsPath, templateFile));
+}
+
+function templateConfig(kind: ScriptKind): TemplateConfig {
+  return kind === 'scriptableObject'
+    ? {
+        fileSetting: 'templates.scriptableObjectFile',
+        textSetting: 'templates.scriptableObject',
+        defaultTemplate: defaultScriptTemplate(kind)
+      }
+    : {
+        fileSetting: 'templates.csharpScriptFile',
+        textSetting: 'templates.csharpScript',
+        defaultTemplate: defaultScriptTemplate(kind)
+      };
+}
+
+async function syncExistingProjectFileReferences(runtime: ProjectSyncRuntime): Promise<ProjectSyncResult> {
+  // Manual refresh is intentionally conservative: it removes stale missing script includes only.
+  const projectUris = await findRootCsprojFiles(runtime);
+  let changed = 0;
+
+  for (const projectUri of projectUris) {
+    if (await updateCompileIncludes(runtime, projectUri, current => removeMissingIncludes(runtime, current))) {
+      changed += 1;
+    }
+  }
+
+  return { changed, scanned: projectUris.length };
+}
+
+async function removeMissingIncludes(
+  runtime: ProjectSyncRuntime,
+  content: string
+): Promise<string> {
+  const matches = [...content.matchAll(compileIncludePattern)];
+  let updated = content;
+
+  for (const match of matches) {
+    const include = match[2];
+    if (!include.toLowerCase().endsWith(csharpExtension)) {
+      continue;
+    }
+
+    const uri = runtime.runtimeVscode.Uri.file(join(runtime.root.fsPath, include));
+    if (!await fileExists(runtime, uri)) {
+      updated = removeInclude(updated, include);
+    }
+  }
+
+  return updated;
+}
+
+async function findAsmdefProjectTarget(
+  runtime: ProjectSyncRuntime,
+  scriptUri: vscode.Uri
+): Promise<AsmdefProjectTarget | undefined> {
+  const projectPath = toProjectPath(runtime.root, scriptUri);
+  if (!projectPath) {
+    return undefined;
+  }
+
+  const boundary = findAsmdefSearchBoundary(projectPath);
+  if (!boundary) {
+    runtime.logger.debug(`C# project sync skipped path outside Assets or Packages: ${projectPath}`);
+    return undefined;
+  }
+
+  const asmdefUri = await findNearestAsmdef(runtime, runtime.runtimeVscode.Uri.file(dirname(scriptUri.fsPath)), boundary);
+  if (!asmdefUri) {
+    if (boundary === 'Assets') {
+      // TODO: Map scripts without asmdef to Assembly-CSharp.csproj once the fallback policy is finalized.
+      runtime.logger.warn(`Unity Plus skipped ${projectPath}: Assembly-CSharp.csproj fallback is not implemented yet.`);
+    } else {
+      runtime.logger.warn(`Unity Plus skipped ${projectPath}: no asmdef was found before leaving ${boundary}.`);
+    }
+    return undefined;
+  }
+
+  const asmdefName = await readAsmdefAssemblyName(runtime, asmdefUri);
+  const csprojUri = runtime.runtimeVscode.Uri.file(join(runtime.root.fsPath, `${asmdefName}.csproj`));
+  if (!await fileExists(runtime, csprojUri)) {
+    runtime.logger.warn(`Unity Plus could not find ${asmdefName}.csproj for ${projectPath}.`);
+    return undefined;
+  }
+
+  return { asmdefName, csprojUri };
+}
+
+function findAsmdefSearchBoundary(projectPath: string): string | undefined {
+  const normalized = normalizeProjectPath(projectPath);
+  if (normalized === 'assets' || normalized.startsWith('assets/')) {
+    return 'Assets';
+  }
+
+  const parts = projectPath.replace(/\\/g, '/').split('/');
+  if (parts.length >= 2 && parts[0] === 'Packages') {
+    return `${parts[0]}/${parts[1]}`;
+  }
+
+  return undefined;
+}
+
+async function findNearestAsmdef(
+  runtime: ProjectSyncRuntime,
+  startFolder: vscode.Uri,
+  boundary: string
+): Promise<vscode.Uri | undefined> {
+  let current = normalizePath(startFolder.fsPath);
+  const boundaryPath = normalizePath(join(runtime.root.fsPath, boundary));
+
+  while (current === boundaryPath || current.startsWith(`${boundaryPath}/`)) {
+    const directoryUri = runtime.runtimeVscode.Uri.file(current);
+    const entries = await readDirectorySafe(runtime, directoryUri);
+    const asmdef = entries
+      .map(([name]) => name)
+      .filter(name => name.endsWith('.asmdef'))
+      .sort()[0];
+    if (asmdef) {
+      return runtime.runtimeVscode.Uri.file(join(current, asmdef));
+    }
+
+    const next = normalizePath(dirname(current));
+    if (next === current) {
+      break;
+    }
+    current = next;
+  }
+
+  return undefined;
+}
+
+async function readAsmdefAssemblyName(runtime: ProjectSyncRuntime, asmdefUri: vscode.Uri): Promise<string> {
+  const fallbackName = basename(asmdefUri.fsPath, '.asmdef');
+  const content = await readOptionalTextFile(runtime, asmdefUri);
+  if (!content) {
+    return fallbackName;
+  }
+
+  try {
+    const parsed = JSON.parse(content) as { name?: unknown };
+    return typeof parsed.name === 'string' && parsed.name.trim().length > 0 ? parsed.name.trim() : fallbackName;
+  } catch {
+    runtime.logger.warn(`Unity Plus could not parse ${basename(asmdefUri.fsPath)}; using the file name for csproj lookup.`);
+    return fallbackName;
+  }
+}
+
+async function updateRootProjects(
+  runtime: ProjectSyncRuntime,
+  update: (content: string) => string | Promise<string>
+): Promise<ProjectSyncResult> {
+  const projectUris = await findRootCsprojFiles(runtime);
+  let changed = 0;
+
+  for (const projectUri of projectUris) {
+    if (await updateCompileIncludes(runtime, projectUri, update)) {
+      changed += 1;
+    }
+  }
+
+  return { changed, scanned: projectUris.length };
+}
+
+async function findRootCsprojFiles(runtime: ProjectSyncRuntime): Promise<vscode.Uri[]> {
+  const entries = await readDirectorySafe(runtime, runtime.root);
+  return entries
+    .map(([name, type]) => ({ name, type }))
+    .filter(entry => entry.type === runtime.runtimeVscode.FileType.File && entry.name.endsWith('.csproj'))
+    .map(entry => runtime.runtimeVscode.Uri.file(join(runtime.root.fsPath, entry.name)));
+}
+
+async function updateCompileIncludes(
+  runtime: ProjectSyncRuntime,
+  projectUri: vscode.Uri,
+  update: (content: string) => string | Promise<string>
+): Promise<boolean> {
+  const content = await readOptionalTextFile(runtime, projectUri);
+  if (content === undefined) {
+    runtime.logger.warn(`Unity Plus could not read ${basename(projectUri.fsPath)} for project sync.`);
+    return false;
+  }
+
+  try {
+    const updated = await update(content);
+    if (updated === content) {
+      return false;
+    }
+
+    await writeTextFile(runtime, projectUri, updated);
+    return true;
+  } catch (error) {
+    runtime.logger.warn(`Unity Plus could not update ${basename(projectUri.fsPath)}: ${errorMessage(error)}`);
+    return false;
+  }
+}
+
+function addInclude(content: string, projectPath: string): string {
+  if (hasCompileInclude(content, projectPath)) {
+    return content;
+  }
+
+  const newline = detectNewline(content);
+  const include = toIncludePath(projectPath, content);
+  const itemGroupPattern = /(\s*)<\/ItemGroup>/;
+  const itemGroupMatch = itemGroupPattern.exec(content);
+  if (!itemGroupMatch) {
+    throw new Error('No ItemGroup was found for Compile Include insertion.');
+  }
+
+  const indent = `${itemGroupMatch[1]}  `;
+  const line = `${indent}<Compile Include="${include}" />${newline}`;
+  return `${content.slice(0, itemGroupMatch.index)}${line}${content.slice(itemGroupMatch.index)}`;
+}
+
+function renameInclude(content: string, oldProjectPath: string, newProjectPath: string): string {
+  return content.replace(compileIncludePattern, (match, quote: string, include: string) => {
+    if (normalizeProjectPath(include) !== normalizeProjectPath(oldProjectPath)) {
+      return match;
+    }
+
+    return match.replace(`${quote}${include}${quote}`, `${quote}${toIncludePath(newProjectPath, content)}${quote}`);
+  });
+}
+
+function removeInclude(content: string, projectPath: string): string {
+  return content.replace(/^.*<Compile\s+Include=(["'])([^"']+)\1\s*\/>.*(?:\r?\n|$)/gm, (line, _quote: string, include: string) =>
+    normalizeProjectPath(include) === normalizeProjectPath(projectPath) ? '' : line
+  );
+}
+
+function hasCompileInclude(content: string, projectPath: string): boolean {
+  return [...content.matchAll(compileIncludePattern)]
+    .some(match => normalizeProjectPath(match[2]) === normalizeProjectPath(projectPath));
+}
+
+function toIncludePath(projectPath: string, content: string): string {
+  const existing = [...content.matchAll(compileIncludePattern)].find(match => match[2].includes('\\'));
+  return existing ? projectPath.replace(/\//g, '\\') : projectPath.replace(/\\/g, '/');
+}
+
+function detectNewline(content: string): string {
+  return content.includes('\r\n') ? '\r\n' : '\n';
+}
+
+async function readOptionalTextFile(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<string | undefined> {
+  try {
+    const bytes = await runtime.runtimeVscode.workspace.fs.readFile(uri);
+    return Buffer.from(bytes).toString('utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeTextFile(runtime: ProjectSyncRuntime, uri: vscode.Uri, content: string): Promise<void> {
+  await runtime.runtimeVscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
+}
+
+async function readDirectorySafe(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<[string, vscode.FileType][]> {
+  try {
+    return await runtime.runtimeVscode.workspace.fs.readDirectory(uri);
+  } catch {
+    return [];
+  }
+}
+
+async function fileExists(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<boolean> {
+  try {
+    await runtime.runtimeVscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isDirectory(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<boolean> {
+  try {
+    const stat = await runtime.runtimeVscode.workspace.fs.stat(uri);
+    return stat.type === runtime.runtimeVscode.FileType.Directory;
+  } catch {
+    return false;
+  }
+}
+
+function isCSharpUri(uri: vscode.Uri): boolean {
+  return extname(uri.fsPath) === csharpExtension;
+}
+
+function isUnityScriptProjectPath(projectPath: string): boolean {
+  const normalized = normalizeProjectPath(projectPath);
+  return normalized.startsWith('assets/') || /^packages\/[^/]+\//.test(normalized);
+}
+
+function sanitizeClassName(value: string): string | undefined {
+  const parsedName = parse(value.trim()).name;
+  const sanitized = parsedName.replace(/[^A-Za-z0-9_]/g, '');
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(sanitized)) {
+    return undefined;
+  }
+
+  return sanitized;
+}
+
+function generateGuid(): string {
+  return randomBytes(16).toString('hex');
+}
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function loadVscode(): typeof vscode {

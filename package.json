@@ -19,6 +19,8 @@
     "onLanguage:csharp",
     "workspaceContains:**/ProjectSettings/ProjectVersion.txt",
     "onCommand:unityPlus.refreshProjectFiles",
+    "onCommand:unityPlus.createCSharpScript",
+    "onCommand:unityPlus.createScriptableObject",
     "onCommand:unityPlus.syncScriptFilename",
     "onCommand:unityPlus.syncClassName",
     "onCommand:unityPlus.showUnityEventReferences",
@@ -32,6 +34,14 @@
       {
         "command": "unityPlus.refreshProjectFiles",
         "title": "Unity Plus: Refresh Project Files"
+      },
+      {
+        "command": "unityPlus.createCSharpScript",
+        "title": "Unity Plus: Create C# Script"
+      },
+      {
+        "command": "unityPlus.createScriptableObject",
+        "title": "Unity Plus: Create ScriptableObject"
       },
       {
         "command": "unityPlus.syncScriptFilename",
@@ -67,6 +77,16 @@
     ],
     "menus": {
       "explorer/context": [
+        {
+          "command": "unityPlus.createCSharpScript",
+          "when": "resourceScheme == file",
+          "group": "unityPlus"
+        },
+        {
+          "command": "unityPlus.createScriptableObject",
+          "when": "resourceScheme == file",
+          "group": "unityPlus"
+        },
         {
           "command": "unityPlus.openMetaFile",
           "when": "resourceScheme == file",
@@ -112,6 +132,26 @@
           "type": "boolean",
           "default": true,
           "description": "Refresh Unity project files when C# files are created, moved, or deleted."
+        },
+        "unityPlus.templates.csharpScriptFile": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace-relative or absolute template file path for Unity Plus C# script creation. Takes priority over unityPlus.templates.csharpScript."
+        },
+        "unityPlus.templates.scriptableObjectFile": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace-relative or absolute template file path for Unity Plus ScriptableObject creation. Takes priority over unityPlus.templates.scriptableObject."
+        },
+        "unityPlus.templates.csharpScript": {
+          "type": "string",
+          "default": "",
+          "description": "Template text for Unity Plus C# script creation. Supports ${className} and ${namespaceBlock}."
+        },
+        "unityPlus.templates.scriptableObject": {
+          "type": "string",
+          "default": "",
+          "description": "Template text for Unity Plus ScriptableObject creation. Supports ${className} and ${namespaceBlock}."
         },
         "unityPlus.eventReferences.enabled": {
           "type": "boolean",

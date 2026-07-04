@@ -2,6 +2,40 @@
 
 This file mirrors the initial GitHub issue plan while the repository is private and connector access is being configured.
 
+## Status snapshot
+
+Updated: 2026-07-03
+
+Source: GitHub issue state from `minerva-studio/unity-plus`, plus local code and test inspection.
+
+Validation note: `npm test` currently fails during TypeScript compilation because the local working tree has an uncommitted `src/features/event-references/eventReferences.ts` interface/implementation mismatch. Treat event-reference completion below as in-progress until compile is green again.
+
+| Issue | GitHub state | Local assessment | Notes |
+| --- | --- | --- | --- |
+| #1 | Closed | Complete | Scaffold and package scripts are present. |
+| #2 | Closed | Complete | Unity workspace detector and tests are present. |
+| #3 | Closed | Complete | Shared `Unity Plus` logger is present. |
+| #4 | Closed | Complete | README includes the `Why Unity Plus` section. |
+| #5 | Closed | Complete | README includes roadmap and limitations. |
+| #6 | Closed | Complete | `.github/workflows/ci.yml` exists. |
+| #7 | Closed | Complete | Metadata index maps GUIDs and watches `.meta` changes. |
+| #8 | Closed | Complete | C# type detector covers Unity types. |
+| #9 | Closed | Complete | Class-to-file rename path is implemented and tested. |
+| #10 | Open | Partial | Rename command exists, but file-rename-event-to-class-update is not complete. |
+| #11 | Open | Partial | ScriptableObject support is present in type/rename paths, but the broader rename issue remains open. |
+| #12 | Open | Partial | Cancel/fallback messaging exists; explicit affected file/class preview is still incomplete. |
+| #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
+| #14 | Open | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
+| #15 | Open | Partial | Stale deleted script includes are removed by manual refresh/delete handling; missing compile entry detection is limited to asmdef-backed creates. |
+| #16 | Open | In progress | Scene/prefab scanner code exists, but current compile errors block completion. |
+| #17 | Open | In progress | CodeLens provider exists, but current compile errors block completion. |
+| #18 | Open | In progress | Hover detail code exists, but current compile errors block completion. |
+| #19 | Open | In progress | Prefab scanning exists, but current compile errors block completion. |
+| #20 | Open | Partial | Rescan command rebuilds metadata/cache version; summary counts are not fully logged. |
+| #21 | Open | Not started | Tests use inline fixtures; no small fixture Unity project was found. |
+| #22 | Open | Partial | Rename unit coverage is broad, but fixture-backed integration tests are not complete. |
+| #23 | Open | Not started | No private-to-public checklist document was found. |
+
 ## 1. [infra] Scaffold Unity Plus VS Code extension
 
 Create the baseline VS Code extension project.
@@ -113,17 +147,19 @@ Acceptance criteria:
 Provide a manual project file refresh command.
 
 Acceptance criteria:
-- `unityPlus.refreshProjectFiles` exists.
-- The command logs what strategy was attempted.
-- Failure messages are actionable.
+- `unityPlus.refreshProjectFiles` scans Unity root `.csproj` files.
+- Removes stale `<Compile Include>` entries that point to missing `.cs` files.
+- Logs scanned/updated project counts and actionable read/update failures.
 
 ## 14. [feature] Auto refresh csproj on C# create/move/delete
 
 Refresh project files when C# file structure changes.
 
 Acceptance criteria:
-- Watches `.cs` create/delete/rename.
-- Debounces repeated file events.
+- Watches `.cs` create/delete/rename under `Assets` and embedded `Packages`.
+- Creates missing `.cs.meta` files with standard `MonoImporter` metadata.
+- Adds created scripts to the nearest asmdef-backed `.csproj`.
+- Rewrites or removes existing compile entries on move/rename/delete.
 - Respects `unityPlus.projectFiles.autoRefresh`.
 
 ## 15. [feature] Detect stale csproj entries
@@ -131,9 +167,9 @@ Acceptance criteria:
 Warn when project files appear stale.
 
 Acceptance criteria:
-- Detects missing compile entries.
-- Detects references to deleted scripts.
-- Offers refresh command.
+- Detects references to deleted scripts during manual refresh/delete handling.
+- Adds missing compile entries for new scripts when an asmdef-backed project can be resolved.
+- Offers refresh command with actionable warnings when project files cannot be updated.
 
 ## 16. [feature] UnityEvent reference scanner
 
