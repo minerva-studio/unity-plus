@@ -14,6 +14,10 @@ const interactableGuid = '33333333333333333333333333333333';
 const interactableScriptPath = 'Packages/com.example/Runtime/Interactable.cs';
 const tutorialGuid = '44444444444444444444444444444444';
 const tutorialScriptPath = 'Assets/TutorialCheck.cs';
+const gateControllerGuid = '55555555555555555555555555555555';
+const gateControllerScriptPath = 'Assets/GateController.cs';
+const ironDoorGuid = '66666666666666666666666666666666';
+const ironDoorScriptPath = 'Assets/IronDoor.cs';
 
 describe('eventReferences', () => {
   it('does not build metadata when UnityEvent references are disabled', async () => {
@@ -169,6 +173,100 @@ describe('eventReferences', () => {
     assert.strictEqual(diagnostics.skippedMissingTargetTypeNameCount, 1);
   });
 
+  it('indexes MonoBehaviour serialized instances from prefab and scene files', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [
+        createUri('/Project/Assets/Gate.prefab'),
+        createUri('/Project/Assets/Scenes/Main.unity')
+      ],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    const instances = index.getSerializedInstances(gateScriptPath);
+
+    assert.strictEqual(instances.length, 2);
+    assert.strictEqual(index.getSerializedInstanceCount(gateScriptPath), 2);
+    assert.deepStrictEqual(instances.map(instance => instance.assetKind), ['prefab', 'scene']);
+    assert.deepStrictEqual(instances.map(instance => instance.gameObjectName), ['North Gate', 'North Gate']);
+    assert.strictEqual(instances[0].line, 7);
+    assert.strictEqual(instances[0].character, 37);
+  });
+
+  it('indexes ScriptableObject and MonoBehaviour serialized instances from asset files', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/GateConfig.asset')],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => createScriptableObjectAssetYaml(),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    const gateInstances = index.getSerializedInstances(gateScriptPath);
+    const interactableInstances = index.getSerializedInstances(interactableScriptPath);
+    const diagnostics = index.getDiagnostics();
+
+    assert.strictEqual(gateInstances.length, 1);
+    assert.strictEqual(gateInstances[0].assetKind, 'asset');
+    assert.strictEqual(gateInstances[0].name, 'Gate Config');
+    assert.strictEqual(interactableInstances.length, 1);
+    assert.strictEqual(interactableInstances[0].assetKind, 'asset');
+    assert.strictEqual(interactableInstances[0].name, 'Package Config');
+    assert.strictEqual(diagnostics.assetCount, 1);
+    assert.strictEqual(diagnostics.serializedInstanceCount, 2);
+  });
+
+  it('skips serialized instances with missing or unresolved script GUIDs', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/Broken.asset')],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => [
+        '%YAML 1.1',
+        '--- !u!114 &1',
+        'MonoBehaviour:',
+        '  m_Name: Missing Script',
+        '--- !u!114 &2',
+        'MonoBehaviour:',
+        '  m_Name: Unknown Script',
+        '  m_Script: {fileID: 11500000, guid: 99999999999999999999999999999999, type: 3}'
+      ].join('\n'),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    assert.strictEqual(index.getSerializedInstanceCount(gateScriptPath), 0);
+    assert.strictEqual(index.getDiagnostics().serializedInstanceCount, 0);
+  });
+
   it('parses m_Target fileID from nested YAML lines', async () => {
     const references = await parseUnityEventReferences(createPrefabYamlWithNestedTarget(2), 'Assets/Gate.prefab', 'prefab', createMetadataIndex(), createTypeResolver());
 
@@ -236,26 +334,33 @@ describe('eventReferences', () => {
 
     await runtime.waitForCodeLensChange();
     const lenses = await runtime.provideCodeLenses(csharpDocument);
-    assert.strictEqual(lenses.length, 3);
-    assert.strictEqual(lenses[0].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses.length, 4);
+    assert.strictEqual(lenses[0].command?.title, '1 Unity serialized instances');
     assert.strictEqual(lenses[0].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[0].command?.arguments?.[0], {
+      kind: 'serializedInstance',
+      scriptPath: gateScriptPath,
+      position: new FakePosition(1, 13)
+    });
+    assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses[1].command?.command, 'unityPlus.showUnityEventReferenceLocations');
+    assert.deepStrictEqual(lenses[1].command?.arguments?.[0], {
       kind: 'method',
       scriptPath: gateScriptPath,
       symbolName: 'CanInteract',
       position: new FakePosition(4, 14)
     });
-    assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
-    assert.strictEqual(lenses[1].command?.command, 'unityPlus.showUnityEventReferenceLocations');
-    assert.deepStrictEqual(lenses[1].command?.arguments?.[0], {
+    assert.strictEqual(lenses[2].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses[2].command?.command, 'unityPlus.showUnityEventReferenceLocations');
+    assert.deepStrictEqual(lenses[2].command?.arguments?.[0], {
       kind: 'field',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
       position: new FakePosition(3, 20)
     });
-    assert.strictEqual(lenses[2].command?.title, '1 UnityEvent targets');
-    assert.strictEqual(lenses[2].command?.command, 'unityPlus.showUnityEventReferenceLocations');
-    assert.deepStrictEqual(lenses[2].command?.arguments?.[0], {
+    assert.strictEqual(lenses[3].command?.title, '1 UnityEvent targets');
+    assert.strictEqual(lenses[3].command?.command, 'unityPlus.showUnityEventReferenceLocations');
+    assert.deepStrictEqual(lenses[3].command?.arguments?.[0], {
       kind: 'fieldTarget',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
@@ -277,16 +382,23 @@ describe('eventReferences', () => {
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[0].command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(4, 14));
+    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(1, 13));
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(7, 37));
 
-    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[2].command?.arguments?.[0]);
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[1].command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 2);
     assert.strictEqual(runtime.referenceCommands[1].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(3, 20));
-    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
+    assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(4, 14));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(13, 22));
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[3].command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 3);
+    assert.strictEqual(runtime.referenceCommands[2].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(3, 20));
+    assert.strictEqual(runtime.referenceCommands[2].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('schedules one background index build after repeated CodeLens requests', async () => {
@@ -433,8 +545,9 @@ describe('eventReferences', () => {
 
     await runtime.waitForCodeLensChange();
     const lenses = await runtime.provideCodeLenses(document);
+    const fieldLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
 
-    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[0].command?.arguments?.[0]);
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldLens?.command?.arguments?.[0]);
 
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
@@ -682,6 +795,79 @@ describe('eventReferences', () => {
     assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
   });
 
+  it('resolves UnityEvent target scripts from m_Target fileIDs before falling back to type names', async () => {
+    const runtime = createEventReferenceRuntime();
+    const controllerDocument = createTextDocument('/Project/Assets/GateController.cs', [
+      'using UnityEngine.Events;',
+      'public class GateController',
+      '{',
+      '  public UnityEvent OpenGate;',
+      '  public UnityEvent CloseGate;',
+      '  public UnityEvent OnBookPagePasted;',
+      '}'
+    ].join('\n'));
+    const doorDocument = createTextDocument('/Project/Assets/IronDoor.cs', [
+      'public class IronDoor',
+      '{',
+      '  public void Open()',
+      '  {',
+      '  }',
+      '  public void Close()',
+      '  {',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/GateController.prefab')],
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('GateController.cs')) {
+          return controllerDocument.getText();
+        }
+
+        if (uri.fsPath.endsWith('IronDoor.cs')) {
+          return doorDocument.getText();
+        }
+
+        return createGateControllerYaml(2);
+      },
+      resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? undefined : createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(controllerDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const controllerLenses = await runtime.provideCodeLenses(controllerDocument);
+    const openFieldLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field' && lens.command.arguments[0].symbolName === 'OpenGate');
+    const openTargetLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget' && lens.command.arguments[0].symbolName === 'OpenGate');
+    const closeFieldLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field' && lens.command.arguments[0].symbolName === 'CloseGate');
+    const closeTargetLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget' && lens.command.arguments[0].symbolName === 'CloseGate');
+    const pastedFieldLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field' && lens.command.arguments[0].symbolName === 'OnBookPagePasted');
+    const pastedTargetLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget' && lens.command.arguments[0].symbolName === 'OnBookPagePasted');
+
+    assert.strictEqual(openFieldLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(openTargetLens?.command?.title, '2 UnityEvent targets');
+    assert.strictEqual(closeFieldLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(closeTargetLens?.command?.title, '2 UnityEvent targets');
+    assert.strictEqual(pastedFieldLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(pastedTargetLens, undefined);
+
+    const doorLenses = await runtime.provideCodeLenses(doorDocument);
+    const openMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Open');
+    const closeMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Close');
+
+    assert.strictEqual(openMethodLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(closeMethodLens?.command?.title, '2 UnityEvent references');
+  });
+
   it('shows an informational message when a reference location command has no matches', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -839,8 +1025,10 @@ describe('eventReferences', () => {
 
     await runtime.runCommand('unityPlus.showUnityEventReferences');
 
-    assert.strictEqual(runtime.infoMessages[0].includes('scanned 0 prefab(s) and 1 scene(s)'), true);
-    assert.strictEqual(runtime.infoMessages[0].includes('resolved 0 UnityEvent reference(s)'), true);
+    assert.strictEqual(runtime.infoMessages[0].includes('scanned 0 prefab(s), 1 scene(s), and 0 asset file(s)'), true);
+    assert.strictEqual(runtime.infoMessages[0].includes('found 0 serialized instance(s)'), true);
+    assert.strictEqual(runtime.infoMessages[0].includes('found 0 UnityEvent reference(s)'), true);
+    assert.strictEqual(runtime.infoMessages[0].includes('resolved 0 UnityEvent target method(s)'), true);
   });
 
   it('scans all prefab and scene assets by default', async () => {
@@ -1139,6 +1327,20 @@ function createPrefabYamlWithNestedTarget(callState: number): string {
   );
 }
 
+function createScriptableObjectAssetYaml(): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!114 &11400000',
+    'MonoBehaviour:',
+    '  m_Name: Gate Config',
+    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
+    '--- !u!114 &11400001',
+    'MonoBehaviour:',
+    '  m_Name: Package Config',
+    `  m_Script: {fileID: 11500000, guid: ${interactableGuid}, type: 3}`
+  ].join('\n');
+}
+
 function createPrefabOverrideYaml(callState: number): string {
   return [
     '%YAML 1.1',
@@ -1276,6 +1478,78 @@ function createMixedTargetYaml(callState: number): string {
   );
 }
 
+function createGateControllerYaml(callState: number): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!1 &1000',
+    'GameObject:',
+    '  m_Name: Gate Controller',
+    '--- !u!1 &2000',
+    'GameObject:',
+    '  m_Name: West Door',
+    '--- !u!1 &3000',
+    'GameObject:',
+    '  m_Name: East Door',
+    '--- !u!1 &4000',
+    'GameObject:',
+    '  m_Name: Book Page',
+    '--- !u!1 &5000',
+    'GameObject:',
+    '  m_Name: Pasted Page',
+    '--- !u!114 &1111',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 1000}',
+    `  m_Script: {fileID: 11500000, guid: ${gateControllerGuid}, type: 3}`,
+    '  OpenGate:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 249930800342422913}',
+    '        m_TargetAssemblyTypeName: Amlos.Fixtures.IronDoor, Amlos.Gameplay.Impl.Fixtures',
+    '        m_MethodName: Open',
+    '        m_Mode: 1',
+    `        m_CallState: ${callState}`,
+    '      - m_Target: {fileID: 3184087781896535932}',
+    '        m_TargetAssemblyTypeName: Amlos.Fixtures.IronDoor, Amlos.Gameplay.Impl.Fixtures',
+    '        m_MethodName: Open',
+    '        m_Mode: 1',
+    `        m_CallState: ${callState}`,
+    '  CloseGate:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 249930800342422913}',
+    '        m_TargetAssemblyTypeName: Amlos.Fixtures.IronDoor, Amlos.Gameplay.Impl.Fixtures',
+    '        m_MethodName: Close',
+    '        m_Mode: 1',
+    `        m_CallState: ${callState}`,
+    '      - m_Target: {fileID: 3184087781896535932}',
+    '        m_TargetAssemblyTypeName: Amlos.Fixtures.IronDoor, Amlos.Gameplay.Impl.Fixtures',
+    '        m_MethodName: Close',
+    '        m_Mode: 1',
+    `        m_CallState: ${callState}`,
+    '  OnBookPagePasted:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 4000}',
+    '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+    '        m_MethodName: SetActive',
+    '        m_Mode: 6',
+    `        m_CallState: ${callState}`,
+    '      - m_Target: {fileID: 5000}',
+    '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+    '        m_MethodName: SetActive',
+    '        m_Mode: 6',
+    `        m_CallState: ${callState}`,
+    '--- !u!114 &249930800342422913',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 2000}',
+    `  m_Script: {fileID: 11500000, guid: ${ironDoorGuid}, type: 3}`,
+    '--- !u!114 &3184087781896535932',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 3000}',
+    `  m_Script: {fileID: 11500000, guid: ${ironDoorGuid}, type: 3}`
+  ].join('\n');
+}
+
 function createMissingTargetTypeYaml(): string {
   return [
     '%YAML 1.1',
@@ -1320,6 +1594,14 @@ function createMetadataIndex(): UnityMetadataIndex {
     getAssetPath: guid => {
       if (guid === gateGuid) {
         return gateScriptPath;
+      }
+
+      if (guid === gateControllerGuid) {
+        return gateControllerScriptPath;
+      }
+
+      if (guid === ironDoorGuid) {
+        return ironDoorScriptPath;
       }
 
       if (guid === interactableGuid) {

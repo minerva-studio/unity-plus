@@ -33,13 +33,18 @@
   "{count} UnityEvent references": "{count} UnityEvent 引用",
   "Unity Plus: UnityEvent reference index is still building.": "Unity Plus: UnityEvent 引用索引仍在构建中。",
   "Unity Plus: no UnityEvent references found for this symbol.": "Unity Plus: 未找到此符号的 UnityEvent 引用。",
+  "Unity Plus: no Unity serialized instances found for this script.": "Unity Plus: 未找到此脚本的 Unity 序列化实例。",
   "discovered {count} serialized asset(s)": "发现 {count} 个序列化资源",
+  "scanned {prefabCount} prefab(s), {sceneCount} scene(s), and {assetCount} asset file(s)": "已扫描 {prefabCount} 个 prefab、{sceneCount} 个场景和 {assetCount} 个 asset 文件",
   "scanned {prefabCount} prefab(s) and {sceneCount} scene(s)": "已扫描 {prefabCount} 个 prefab 和 {sceneCount} 个场景",
   "found {count} persistent call(s)": "找到 {count} 个持久化调用",
-  "resolved {count} UnityEvent reference(s) by target type name": "按目标类型名解析了 {count} 个 UnityEvent 引用",
+  "found {count} serialized instance(s)": "找到 {count} 个序列化实例",
   "skipped {callCount} call(s) and {assetCount} asset(s)": "已跳过 {callCount} 个调用和 {assetCount} 个资源",
   "finished in {elapsedMilliseconds}ms": "耗时 {elapsedMilliseconds}ms",
   "Unity Plus: open a Unity project to scan UnityEvent references. Workspace roots: {roots}. Required markers: Assets, ProjectSettings, Packages/manifest.json.": "Unity Plus: 请打开 Unity 项目以扫描 UnityEvent 引用。工作区根目录: {roots}。所需标记: Assets、ProjectSettings、Packages/manifest.json。",
   "... {count} more": "... 还有 {count} 项",
-  "{count} UnityEvent targets": "{count} UnityEvent targets"
+  "{count} Unity serialized instances": "{count} 个 Unity 序列化实例",
+  "{count} UnityEvent targets": "{count} UnityEvent targets",
+  "found {count} UnityEvent reference(s)": "found {count} UnityEvent reference(s)",
+  "resolved {count} UnityEvent target method(s)": "resolved {count} UnityEvent target method(s)"
 }
