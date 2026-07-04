@@ -340,6 +340,7 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(lenses[0].command?.arguments?.[0], {
       kind: 'serializedInstance',
       scriptPath: gateScriptPath,
+      typeName: 'Gate',
       position: new FakePosition(1, 13)
     });
     assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
@@ -348,6 +349,7 @@ describe('eventReferences', () => {
       kind: 'method',
       scriptPath: gateScriptPath,
       symbolName: 'CanInteract',
+      typeName: 'Gate',
       position: new FakePosition(4, 14)
     });
     assert.strictEqual(lenses[2].command?.title, '1 UnityEvent references');
@@ -356,6 +358,7 @@ describe('eventReferences', () => {
       kind: 'field',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
+      typeName: 'Gate',
       position: new FakePosition(3, 20)
     });
     assert.strictEqual(lenses[3].command?.title, '1 UnityEvent targets');
@@ -364,6 +367,7 @@ describe('eventReferences', () => {
       kind: 'fieldTarget',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
+      typeName: 'Gate',
       position: new FakePosition(3, 20)
     });
 
@@ -599,6 +603,82 @@ describe('eventReferences', () => {
 
     assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
     assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+  });
+
+  it('uses m_EditorClassIdentifier to show field references when owner script GUID is not indexed', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/UI_Tutorial_Inventory_EquipedCheck.cs', [
+      'using UnityEngine.Events;',
+      'namespace Amlos.UI.Tutorial',
+      '{',
+      '  public class UI_Tutorial_Inventory_EquipedCheck',
+      '  {',
+      '    public UnityEvent OnBookPagePasted = new();',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Tutorial.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createEditorClassIdentifierOwnerYaml(2),
+      resolveCSharpType: async () => undefined
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(fieldTargetLens, undefined);
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations.length, 2);
+  });
+
+  it('uses m_EditorClassIdentifier to show serialized instances when script GUID is not indexed', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/UI_Tutorial_Inventory_EquipedCheck.cs', [
+      'namespace Amlos.UI.Tutorial',
+      '{',
+      '  public class UI_Tutorial_Inventory_EquipedCheck',
+      '  {',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/TutorialConfig.asset')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createEditorClassIdentifierAssetYaml(),
+      resolveCSharpType: async () => undefined
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(csharpDocument), []);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const serializedInstanceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance');
+
+    assert.strictEqual(serializedInstanceLens?.command?.title, '1 Unity serialized instances');
   });
 
   it('shows field references without field targets for Unity built-in methods', async () => {
@@ -1461,6 +1541,50 @@ function createBuiltinTargetYaml(callState: number): string {
     '        m_Arguments:',
     '          m_BoolArgument: 1',
     `        m_CallState: ${callState}`
+  ].join('\n');
+}
+
+function createEditorClassIdentifierOwnerYaml(callState: number): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!1 &7022818226384243533',
+    'GameObject:',
+    '  m_Name: Tutorial Check',
+    '--- !u!1 &2594932129069825706',
+    'GameObject:',
+    '  m_Name: Book Page',
+    '--- !u!1 &5566378938482836897',
+    'GameObject:',
+    '  m_Name: Pasted Page',
+    '--- !u!114 &460066068064628344',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 7022818226384243533}',
+    '  m_Script: {fileID: 11500000, guid: 99999999999999999999999999999999, type: 3}',
+    '  m_EditorClassIdentifier: Amlos.UI::Amlos.UI.Tutorial.UI_Tutorial_Inventory_EquipedCheck',
+    '  OnBookPagePasted:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 2594932129069825706}',
+    '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+    '        m_MethodName: SetActive',
+    '        m_Mode: 6',
+    `        m_CallState: ${callState}`,
+    '      - m_Target: {fileID: 5566378938482836897}',
+    '        m_TargetAssemblyTypeName: UnityEngine.GameObject, UnityEngine',
+    '        m_MethodName: SetActive',
+    '        m_Mode: 6',
+    `        m_CallState: ${callState}`
+  ].join('\n');
+}
+
+function createEditorClassIdentifierAssetYaml(): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!114 &11400000',
+    'MonoBehaviour:',
+    '  m_Name: Tutorial Config',
+    '  m_Script: {fileID: 11500000, guid: 99999999999999999999999999999999, type: 3}',
+    '  m_EditorClassIdentifier: Amlos.UI::Amlos.UI.Tutorial.UI_Tutorial_Inventory_EquipedCheck'
   ].join('\n');
 }
 

@@ -13,11 +13,13 @@ export interface UnityEventReference {
   character: number;
   eventFieldName: string;
   eventScriptPath?: string;
+  eventOwnerTypeName?: string;
   gameObjectName?: string;
   targetFileId?: string;
   targetTypeName: string;
   methodName: string;
   scriptPath?: string;
+  scriptTypeName?: string;
 }
 
 export interface UnitySerializedInstanceLocation {
@@ -26,20 +28,21 @@ export interface UnitySerializedInstanceLocation {
   line: number;
   character: number;
   fileId: string;
-  scriptPath: string;
+  scriptPath?: string;
+  scriptTypeName?: string;
   name?: string;
   gameObjectName?: string;
 }
 
 export interface UnitySerializedAssetReferenceIndex {
-  getReferences(scriptPath: string, methodName: string): readonly UnityEventReference[];
-  getReferenceCount(scriptPath: string, methodName: string): number;
-  getFieldReferences(scriptPath: string, fieldName: string): readonly UnityEventReference[];
-  getFieldReferenceCount(scriptPath: string, fieldName: string): number;
-  getFieldTargets(scriptPath: string, fieldName: string): readonly UnityEventReference[];
-  getFieldTargetCount(scriptPath: string, fieldName: string): number;
-  getSerializedInstances(scriptPath: string): readonly UnitySerializedInstanceLocation[];
-  getSerializedInstanceCount(scriptPath: string): number;
+  getReferences(scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[];
+  getReferenceCount(scriptPath: string, methodName: string, typeName?: string): number;
+  getFieldReferences(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];
+  getFieldReferenceCount(scriptPath: string, fieldName: string, typeName?: string): number;
+  getFieldTargets(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];
+  getFieldTargetCount(scriptPath: string, fieldName: string, typeName?: string): number;
+  getSerializedInstances(scriptPath: string, typeName?: string): readonly UnitySerializedInstanceLocation[];
+  getSerializedInstanceCount(scriptPath: string, typeName?: string): number;
   getAllReferences(): readonly UnityEventReference[];
   getDiagnostics(): UnityEventReferenceDiagnostics;
 }
@@ -55,6 +58,12 @@ export interface UnityEventReferenceDiagnostics {
   serializedInstanceCount: number;
   resolvedReferenceCount: number;
   resolvedByTargetTypeNameCount: number;
+  resolvedOwnerScriptGuidCount: number;
+  resolvedOwnerEditorClassIdentifierCount: number;
+  unresolvedOwnerScriptCount: number;
+  resolvedSerializedInstanceScriptGuidCount: number;
+  resolvedSerializedInstanceEditorClassIdentifierCount: number;
+  unresolvedSerializedInstanceScriptCount: number;
   skippedDisabledCallCount: number;
   skippedMissingTargetTypeNameCount: number;
   skippedUnresolvedTargetTypeNameCount: number;
@@ -116,8 +125,16 @@ interface SerializedObjectRecord {
   name?: string;
   gameObjectFileId?: string;
   scriptGuid?: string;
+  editorClassIdentifier?: string;
+  editorTypeName?: string;
   scriptLine?: number;
   scriptCharacter?: number;
+}
+
+interface SerializedObjectScriptIdentity {
+  scriptPath?: string;
+  typeName?: string;
+  source?: 'guid' | 'editorClassIdentifier';
 }
 
 interface PersistentCallSnapshot {
@@ -135,23 +152,28 @@ interface PersistentCallSnapshot {
 
 interface CSharpMethodSnapshot {
   name: string;
+  typeName?: string;
   range: vscode.Range;
 }
 
 interface CSharpFieldSnapshot {
   name: string;
+  typeName?: string;
   range: vscode.Range;
 }
 
 interface CSharpTypeSnapshot {
   name: string;
+  fullName: string;
   range: vscode.Range;
+  offset: number;
 }
 
 interface EventReferenceLocationTarget {
   kind: 'method' | 'field' | 'fieldTarget' | 'serializedInstance';
   scriptPath: string;
   symbolName?: string;
+  typeName?: string;
   position: vscode.Position;
 }
 
@@ -445,16 +467,19 @@ async function parseUnityEventReferencesCore(
     const object = parseSerializedObject(document);
     objects.set(document.fileId, object);
 
-    if (object.scriptGuid) {
-      const scriptPath = metadataIndex.getAssetPath(object.scriptGuid);
-      if (scriptPath) {
+    if (hasSerializedScriptIdentity(object)) {
+      const scriptIdentity = await resolveSerializedObjectScriptIdentity(object, metadataIndex, resolveCSharpType);
+      trackSerializedInstanceScriptIdentity(diagnostics, object, scriptIdentity);
+
+      if (scriptIdentity.scriptPath || scriptIdentity.typeName) {
         serializedInstances.push({
           assetPath,
           assetKind,
           line: object.scriptLine ?? document.startLine,
           character: object.scriptCharacter ?? 0,
           fileId: document.fileId,
-          scriptPath,
+          scriptPath: scriptIdentity.scriptPath,
+          scriptTypeName: scriptIdentity.typeName,
           name: object.name,
           gameObjectName: getGameObjectName(objects, object.gameObjectFileId)
         });
@@ -494,22 +519,30 @@ async function parseUnityEventReferencesCore(
       const targetTypeName = simplifyAssemblyTypeName(call.targetTypeName);
       const target = call.targetFileId ? objects.get(call.targetFileId) : undefined;
       const owner = call.ownerFileId ? objects.get(call.ownerFileId) : objects.get(ownerFileId);
-      const eventScriptPath = owner?.scriptGuid ? metadataIndex.getAssetPath(owner.scriptGuid) : undefined;
-      let scriptPath = resolveTargetScriptPathFromFileId(target, metadataIndex);
+      const ownerIdentity = await resolveSerializedObjectScriptIdentity(owner, metadataIndex, resolveCSharpType);
+      const targetIdentity = await resolveSerializedObjectScriptIdentity(target, metadataIndex, resolveCSharpType);
+      trackOwnerScriptIdentity(diagnostics, owner, ownerIdentity);
 
-      if (!targetTypeName) {
+      const eventScriptPath = ownerIdentity.scriptPath;
+      const eventOwnerTypeName = ownerIdentity.typeName;
+      const resolvedTargetTypeName = targetTypeName || targetIdentity.typeName || '';
+      let scriptPath = targetIdentity.scriptPath;
+      let scriptTypeName = targetIdentity.typeName;
+
+      if (!resolvedTargetTypeName) {
         diagnostics.skippedMissingTargetTypeNameCount += 1;
       } else if (!scriptPath) {
-        scriptPath = await resolveCSharpType(targetTypeName);
+        scriptPath = await resolveCSharpType(resolvedTargetTypeName);
+        scriptTypeName = scriptTypeName ?? resolvedTargetTypeName;
       }
 
       if (scriptPath) {
         diagnostics.resolvedByTargetTypeNameCount += 1;
-      } else if (targetTypeName) {
+      } else if (resolvedTargetTypeName) {
         diagnostics.skippedUnresolvedTargetTypeNameCount += 1;
       }
 
-      if (!eventScriptPath && !scriptPath) {
+      if (!eventScriptPath && !eventOwnerTypeName && !scriptPath && !scriptTypeName) {
         continue;
       }
 
@@ -520,11 +553,13 @@ async function parseUnityEventReferencesCore(
         character: call.character,
         eventFieldName: call.eventFieldName,
         eventScriptPath,
+        eventOwnerTypeName,
         gameObjectName: getGameObjectName(objects, target?.gameObjectFileId ?? owner?.gameObjectFileId),
         targetFileId: call.targetFileId,
-        targetTypeName,
+        targetTypeName: resolvedTargetTypeName,
         methodName: call.methodName,
-        scriptPath
+        scriptPath,
+        scriptTypeName
       });
     }
   }
@@ -652,10 +687,15 @@ function createEventReferenceProvider(
       const types = findCSharpTypes(runtime.runtimeVscode, document);
       const codeLenses: vscode.CodeLens[] = [];
       const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-      const serializedInstanceCount = index.getSerializedInstanceCount(scriptPath);
+      let serializedInstanceLensCount = 0;
+      let methodLensCount = 0;
+      let fieldReferenceLensCount = 0;
+      let fieldTargetLensCount = 0;
 
-      if (serializedInstanceCount > 0) {
-        for (const type of types) {
+      for (const type of types) {
+        const serializedInstanceCount = index.getSerializedInstanceCount(scriptPath, type.fullName);
+        if (serializedInstanceCount > 0) {
+          serializedInstanceLensCount += 1;
           codeLenses.push(new runtime.runtimeVscode.CodeLens(type.range, {
             title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
               count: serializedInstanceCount
@@ -664,6 +704,7 @@ function createEventReferenceProvider(
             arguments: [{
               kind: 'serializedInstance',
               scriptPath,
+              typeName: type.fullName,
               position: type.range.start
             } satisfies EventReferenceLocationTarget]
           }));
@@ -671,8 +712,9 @@ function createEventReferenceProvider(
       }
 
       for (const method of methods) {
-        const count = index.getReferenceCount(scriptPath, method.name);
+        const count = index.getReferenceCount(scriptPath, method.name, method.typeName);
         if (count > 0) {
+          methodLensCount += 1;
           codeLenses.push(new runtime.runtimeVscode.CodeLens(method.range, {
             title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count }),
             command: 'unityPlus.showUnityEventReferenceLocations',
@@ -680,6 +722,7 @@ function createEventReferenceProvider(
               kind: 'method',
               scriptPath,
               symbolName: method.name,
+              typeName: method.typeName,
               position: method.range.start
             } satisfies EventReferenceLocationTarget]
           }));
@@ -687,8 +730,9 @@ function createEventReferenceProvider(
       }
 
       for (const field of fields) {
-        const count = index.getFieldReferenceCount(scriptPath, field.name);
+        const count = index.getFieldReferenceCount(scriptPath, field.name, field.typeName);
         if (count > 0) {
+          fieldReferenceLensCount += 1;
           codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
             title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count }),
             command: 'unityPlus.showUnityEventReferenceLocations',
@@ -696,13 +740,15 @@ function createEventReferenceProvider(
               kind: 'field',
               scriptPath,
               symbolName: field.name,
+              typeName: field.typeName,
               position: field.range.start
             } satisfies EventReferenceLocationTarget]
           }));
         }
 
-        const targetCount = index.getFieldTargetCount(scriptPath, field.name);
+        const targetCount = index.getFieldTargetCount(scriptPath, field.name, field.typeName);
         if (targetCount > 0) {
+          fieldTargetLensCount += 1;
           codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
             title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: targetCount }),
             command: 'unityPlus.showUnityEventReferenceLocations',
@@ -710,11 +756,14 @@ function createEventReferenceProvider(
               kind: 'fieldTarget',
               scriptPath,
               symbolName: field.name,
+              typeName: field.typeName,
               position: field.range.start
             } satisfies EventReferenceLocationTarget]
           }));
         }
       }
+
+      runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
 
       return codeLenses;
     },
@@ -733,7 +782,7 @@ function createEventReferenceProvider(
       const method = findMethodAtPosition(runtime.runtimeVscode, document, position);
 
       if (method) {
-        const references = index.getReferences(scriptPath, method.name);
+        const references = index.getReferences(scriptPath, method.name, method.typeName);
         if (references.length > 0) {
           return new runtime.runtimeVscode.Hover(createHoverMarkdown(runtime.runtimeVscode, references), method.range);
         }
@@ -741,7 +790,7 @@ function createEventReferenceProvider(
 
       const field = findUnityEventFieldAtPosition(runtime.runtimeVscode, document, position);
       if (field) {
-        const references = index.getFieldReferences(scriptPath, field.name);
+        const references = index.getFieldReferences(scriptPath, field.name, field.typeName);
         if (references.length > 0) {
           return new runtime.runtimeVscode.Hover(createHoverMarkdown(runtime.runtimeVscode, references), field.range);
         }
@@ -852,6 +901,7 @@ function parseSerializedObject(document: SerializedDocument): SerializedObjectRe
   const scriptReference = document.classId === monoBehaviourClassId
     ? findGuidValueWithPosition(document.body, 'm_Script', document.startLine)
     : undefined;
+  const editorClassIdentifier = findScalarValue(document.body, 'm_EditorClassIdentifier');
 
   return {
     classId: document.classId,
@@ -859,20 +909,79 @@ function parseSerializedObject(document: SerializedDocument): SerializedObjectRe
     name: findScalarValue(document.body, 'm_Name'),
     gameObjectFileId: findFileIdValue(document.body, 'm_GameObject'),
     scriptGuid: scriptReference?.guid,
+    editorClassIdentifier,
+    editorTypeName: parseEditorClassIdentifier(editorClassIdentifier),
     scriptLine: scriptReference?.line,
     scriptCharacter: scriptReference?.character
   };
 }
 
-function resolveTargetScriptPathFromFileId(
-  target: SerializedObjectRecord | undefined,
-  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>
-): string | undefined {
-  if (target?.classId !== monoBehaviourClassId || !target.scriptGuid) {
-    return undefined;
+function hasSerializedScriptIdentity(object: SerializedObjectRecord): boolean {
+  return object.classId === monoBehaviourClassId && (object.scriptGuid !== undefined || object.editorTypeName !== undefined);
+}
+
+async function resolveSerializedObjectScriptIdentity(
+  object: SerializedObjectRecord | undefined,
+  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
+  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
+): Promise<SerializedObjectScriptIdentity> {
+  if (!object || object.classId !== monoBehaviourClassId) {
+    return {};
   }
 
-  return metadataIndex.getAssetPath(target.scriptGuid);
+  if (object.scriptGuid) {
+    const scriptPath = metadataIndex.getAssetPath(object.scriptGuid);
+    if (scriptPath) {
+      return {
+        scriptPath,
+        typeName: object.editorTypeName,
+        source: 'guid'
+      };
+    }
+  }
+
+  if (!object.editorTypeName) {
+    return {};
+  }
+
+  // Unity sometimes preserves the type in m_EditorClassIdentifier even when the MonoScript GUID is not indexed.
+  return {
+    scriptPath: await resolveCSharpType(object.editorTypeName),
+    typeName: object.editorTypeName,
+    source: 'editorClassIdentifier'
+  };
+}
+
+function trackOwnerScriptIdentity(
+  diagnostics: UnityEventReferenceDiagnostics,
+  object: SerializedObjectRecord | undefined,
+  identity: SerializedObjectScriptIdentity
+): void {
+  if (!object || object.classId !== monoBehaviourClassId) {
+    return;
+  }
+
+  if (identity.source === 'guid') {
+    diagnostics.resolvedOwnerScriptGuidCount += 1;
+  } else if (identity.source === 'editorClassIdentifier') {
+    diagnostics.resolvedOwnerEditorClassIdentifierCount += 1;
+  } else if (object.scriptGuid || object.editorTypeName) {
+    diagnostics.unresolvedOwnerScriptCount += 1;
+  }
+}
+
+function trackSerializedInstanceScriptIdentity(
+  diagnostics: UnityEventReferenceDiagnostics,
+  object: SerializedObjectRecord,
+  identity: SerializedObjectScriptIdentity
+): void {
+  if (identity.source === 'guid') {
+    diagnostics.resolvedSerializedInstanceScriptGuidCount += 1;
+  } else if (identity.source === 'editorClassIdentifier') {
+    diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount += 1;
+  } else if (object.scriptGuid || object.editorTypeName) {
+    diagnostics.unresolvedSerializedInstanceScriptCount += 1;
+  }
 }
 
 function parsePersistentCalls(body: string, startLine: number): PersistentCallSnapshot[] {
@@ -1093,72 +1202,100 @@ function createReferenceIndex(
   diagnostics: UnityEventReferenceDiagnostics = createEmptyDiagnostics()
 ): UnitySerializedAssetReferenceIndex {
   const referencesByKey = new Map<string, UnityEventReference[]>();
+  const referencesByTypeKey = new Map<string, UnityEventReference[]>();
   const referencesByFieldKey = new Map<string, UnityEventReference[]>();
+  const referencesByFieldTypeKey = new Map<string, UnityEventReference[]>();
   const targetReferencesByFieldKey = new Map<string, UnityEventReference[]>();
+  const targetReferencesByFieldTypeKey = new Map<string, UnityEventReference[]>();
   const targetReferenceKeysByFieldKey = new Map<string, Set<string>>();
+  const targetReferenceKeysByFieldTypeKey = new Map<string, Set<string>>();
   const serializedInstancesByScriptPath = new Map<string, UnitySerializedInstanceLocation[]>();
+  const serializedInstancesByScriptTypeName = new Map<string, UnitySerializedInstanceLocation[]>();
 
   for (const reference of references) {
     if (reference.scriptPath) {
       const key = referenceKey(reference.scriptPath, reference.methodName);
-      const bucket = referencesByKey.get(key) ?? [];
-      bucket.push(reference);
-      referencesByKey.set(key, bucket);
+      appendMapValue(referencesByKey, key, reference);
+    }
+
+    if (reference.scriptTypeName) {
+      appendMapValue(referencesByTypeKey, typeReferenceKey(reference.scriptTypeName, reference.methodName), reference);
     }
 
     if (reference.eventScriptPath) {
       const fieldKey = referenceKey(reference.eventScriptPath, reference.eventFieldName);
-      const fieldBucket = referencesByFieldKey.get(fieldKey) ?? [];
-      fieldBucket.push(reference);
-      referencesByFieldKey.set(fieldKey, fieldBucket);
+      appendMapValue(referencesByFieldKey, fieldKey, reference);
 
-      if (!reference.scriptPath) {
-        continue;
+      if (reference.scriptPath) {
+        addTargetFieldReference(targetReferencesByFieldKey, targetReferenceKeysByFieldKey, fieldKey, reference);
       }
+    }
 
-      const targetKey = `${referenceKey(reference.scriptPath, reference.methodName)}#${reference.targetFileId ?? ''}`;
-      const seenTargets = targetReferenceKeysByFieldKey.get(fieldKey) ?? new Set<string>();
-      if (!seenTargets.has(targetKey)) {
-        const targetBucket = targetReferencesByFieldKey.get(fieldKey) ?? [];
-        targetBucket.push(reference);
-        targetReferencesByFieldKey.set(fieldKey, targetBucket);
-        seenTargets.add(targetKey);
-        targetReferenceKeysByFieldKey.set(fieldKey, seenTargets);
+    if (reference.eventOwnerTypeName) {
+      const fieldTypeKey = fieldTypeReferenceKey(reference.eventOwnerTypeName, reference.eventFieldName);
+      appendMapValue(referencesByFieldTypeKey, fieldTypeKey, reference);
+
+      if (reference.scriptPath) {
+        addTargetFieldReference(targetReferencesByFieldTypeKey, targetReferenceKeysByFieldTypeKey, fieldTypeKey, reference);
       }
     }
   }
 
   for (const location of serializedInstances) {
-    const key = toNormalizedPath(location.scriptPath).toLowerCase();
-    const bucket = serializedInstancesByScriptPath.get(key) ?? [];
-    bucket.push(location);
-    serializedInstancesByScriptPath.set(key, bucket);
+    if (location.scriptPath) {
+      appendMapValue(serializedInstancesByScriptPath, pathReferenceKey(location.scriptPath), location);
+    }
+
+    if (location.scriptTypeName) {
+      appendMapValue(serializedInstancesByScriptTypeName, typeKey(location.scriptTypeName), location);
+    }
   }
 
+  const getReferences = (scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[] =>
+    mergeUniqueReferences(
+      filterByType(referencesByKey.get(referenceKey(scriptPath, methodName)), typeName, reference => reference.scriptTypeName),
+      typeName ? referencesByTypeKey.get(typeReferenceKey(typeName, methodName)) : undefined
+    );
+  const getFieldReferences = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
+    mergeUniqueReferences(
+      filterByType(referencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
+      typeName ? referencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
+    );
+  const getFieldTargets = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
+    mergeUniqueReferences(
+      filterByType(targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
+      typeName ? targetReferencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
+    );
+  const getSerializedInstances = (scriptPath: string, typeName?: string): readonly UnitySerializedInstanceLocation[] =>
+    mergeUniqueReferences(
+      filterByType(serializedInstancesByScriptPath.get(pathReferenceKey(scriptPath)), typeName, location => location.scriptTypeName),
+      typeName ? serializedInstancesByScriptTypeName.get(typeKey(typeName)) : undefined
+    );
+
   return {
-    getReferences(scriptPath, methodName) {
-      return referencesByKey.get(referenceKey(scriptPath, methodName)) ?? [];
+    getReferences(scriptPath, methodName, typeName) {
+      return getReferences(scriptPath, methodName, typeName);
     },
-    getReferenceCount(scriptPath, methodName) {
-      return referencesByKey.get(referenceKey(scriptPath, methodName))?.length ?? 0;
+    getReferenceCount(scriptPath, methodName, typeName) {
+      return getReferences(scriptPath, methodName, typeName).length;
     },
-    getFieldReferences(scriptPath, fieldName) {
-      return referencesByFieldKey.get(referenceKey(scriptPath, fieldName)) ?? [];
+    getFieldReferences(scriptPath, fieldName, typeName) {
+      return getFieldReferences(scriptPath, fieldName, typeName);
     },
-    getFieldReferenceCount(scriptPath, fieldName) {
-      return referencesByFieldKey.get(referenceKey(scriptPath, fieldName))?.length ?? 0;
+    getFieldReferenceCount(scriptPath, fieldName, typeName) {
+      return getFieldReferences(scriptPath, fieldName, typeName).length;
     },
-    getFieldTargets(scriptPath, fieldName) {
-      return targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)) ?? [];
+    getFieldTargets(scriptPath, fieldName, typeName) {
+      return getFieldTargets(scriptPath, fieldName, typeName);
     },
-    getFieldTargetCount(scriptPath, fieldName) {
-      return targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName))?.length ?? 0;
+    getFieldTargetCount(scriptPath, fieldName, typeName) {
+      return getFieldTargets(scriptPath, fieldName, typeName).length;
     },
-    getSerializedInstances(scriptPath) {
-      return serializedInstancesByScriptPath.get(toNormalizedPath(scriptPath).toLowerCase()) ?? [];
+    getSerializedInstances(scriptPath, typeName) {
+      return getSerializedInstances(scriptPath, typeName);
     },
-    getSerializedInstanceCount(scriptPath) {
-      return serializedInstancesByScriptPath.get(toNormalizedPath(scriptPath).toLowerCase())?.length ?? 0;
+    getSerializedInstanceCount(scriptPath, typeName) {
+      return getSerializedInstances(scriptPath, typeName).length;
     },
     getAllReferences() {
       return references;
@@ -1167,6 +1304,73 @@ function createReferenceIndex(
       return diagnostics;
     }
   };
+}
+
+function appendMapValue<T>(map: Map<string, T[]>, key: string, value: T): void {
+  const bucket = map.get(key) ?? [];
+  bucket.push(value);
+  map.set(key, bucket);
+}
+
+function addTargetFieldReference(
+  referencesByFieldKey: Map<string, UnityEventReference[]>,
+  seenReferencesByFieldKey: Map<string, Set<string>>,
+  fieldKey: string,
+  reference: UnityEventReference
+): void {
+  if (!reference.scriptPath) {
+    return;
+  }
+
+  const targetKey = `${referenceKey(reference.scriptPath, reference.methodName)}#${reference.targetFileId ?? ''}`;
+  const seenTargets = seenReferencesByFieldKey.get(fieldKey) ?? new Set<string>();
+  if (seenTargets.has(targetKey)) {
+    return;
+  }
+
+  appendMapValue(referencesByFieldKey, fieldKey, reference);
+  seenTargets.add(targetKey);
+  seenReferencesByFieldKey.set(fieldKey, seenTargets);
+}
+
+function mergeUniqueReferences<T>(first: readonly T[] | undefined, second: readonly T[] | undefined): readonly T[] {
+  if (!first?.length) {
+    return second ?? [];
+  }
+
+  if (!second?.length) {
+    return first;
+  }
+
+  const merged: T[] = [];
+  const seen = new Set<T>();
+
+  for (const value of [...first, ...second]) {
+    if (seen.has(value)) {
+      continue;
+    }
+
+    seen.add(value);
+    merged.push(value);
+  }
+
+  return merged;
+}
+
+function filterByType<T>(
+  references: readonly T[] | undefined,
+  typeName: string | undefined,
+  getTypeName: (reference: T) => string | undefined
+): readonly T[] | undefined {
+  if (!references || !typeName) {
+    return references;
+  }
+
+  const requestedTypeKey = typeKey(typeName);
+  return references.filter(reference => {
+    const referenceTypeName = getTypeName(reference);
+    return !referenceTypeName || typeKey(referenceTypeName) === requestedTypeKey;
+  });
 }
 
 function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
@@ -1181,6 +1385,12 @@ function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
     serializedInstanceCount: 0,
     resolvedReferenceCount: 0,
     resolvedByTargetTypeNameCount: 0,
+    resolvedOwnerScriptGuidCount: 0,
+    resolvedOwnerEditorClassIdentifierCount: 0,
+    unresolvedOwnerScriptCount: 0,
+    resolvedSerializedInstanceScriptGuidCount: 0,
+    resolvedSerializedInstanceEditorClassIdentifierCount: 0,
+    unresolvedSerializedInstanceScriptCount: 0,
     skippedDisabledCallCount: 0,
     skippedMissingTargetTypeNameCount: 0,
     skippedUnresolvedTargetTypeNameCount: 0,
@@ -1210,6 +1420,12 @@ function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityE
   target.serializedInstanceCount += source.serializedInstanceCount;
   target.resolvedReferenceCount += source.resolvedReferenceCount;
   target.resolvedByTargetTypeNameCount += source.resolvedByTargetTypeNameCount;
+  target.resolvedOwnerScriptGuidCount += source.resolvedOwnerScriptGuidCount;
+  target.resolvedOwnerEditorClassIdentifierCount += source.resolvedOwnerEditorClassIdentifierCount;
+  target.unresolvedOwnerScriptCount += source.unresolvedOwnerScriptCount;
+  target.resolvedSerializedInstanceScriptGuidCount += source.resolvedSerializedInstanceScriptGuidCount;
+  target.resolvedSerializedInstanceEditorClassIdentifierCount += source.resolvedSerializedInstanceEditorClassIdentifierCount;
+  target.unresolvedSerializedInstanceScriptCount += source.unresolvedSerializedInstanceScriptCount;
   target.skippedDisabledCallCount += source.skippedDisabledCallCount;
   target.skippedMissingTargetTypeNameCount += source.skippedMissingTargetTypeNameCount;
   target.skippedUnresolvedTargetTypeNameCount += source.skippedUnresolvedTargetTypeNameCount;
@@ -1239,6 +1455,16 @@ function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEvent
     runtimeVscode.l10n.t('resolved {count} UnityEvent target method(s)', {
       count: diagnostics.resolvedByTargetTypeNameCount
     }),
+    runtimeVscode.l10n.t('owner scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved', {
+      guidCount: diagnostics.resolvedOwnerScriptGuidCount,
+      editorCount: diagnostics.resolvedOwnerEditorClassIdentifierCount,
+      unresolvedCount: diagnostics.unresolvedOwnerScriptCount
+    }),
+    runtimeVscode.l10n.t('serialized instance scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved', {
+      guidCount: diagnostics.resolvedSerializedInstanceScriptGuidCount,
+      editorCount: diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount,
+      unresolvedCount: diagnostics.unresolvedSerializedInstanceScriptCount
+    }),
     runtimeVscode.l10n.t('skipped {callCount} call(s) and {assetCount} asset(s)', {
       callCount: skipped,
       assetCount: skippedAssets
@@ -1260,6 +1486,7 @@ function createMissingWorkspaceMessage(runtimeVscode: typeof vscode): string {
 
 function findCSharpMethods(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpMethodSnapshot[] {
   const text = document.getText();
+  const types = findCSharpTypes(runtimeVscode, document);
   const methods: CSharpMethodSnapshot[] = [];
   let match: RegExpExecArray | null;
 
@@ -1269,7 +1496,11 @@ function findCSharpMethods(runtimeVscode: typeof vscode, document: vscode.TextDo
     const nameStart = match.index + match[0].lastIndexOf(name);
     const start = document.positionAt(nameStart);
     const end = document.positionAt(nameStart + name.length);
-    methods.push({ name, range: new runtimeVscode.Range(start, end) });
+    methods.push({
+      name,
+      typeName: findNearestCSharpType(types, nameStart)?.fullName,
+      range: new runtimeVscode.Range(start, end)
+    });
   }
 
   return methods;
@@ -1277,6 +1508,8 @@ function findCSharpMethods(runtimeVscode: typeof vscode, document: vscode.TextDo
 
 function findCSharpTypes(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpTypeSnapshot[] {
   const text = document.getText();
+  const namespaceMatches = [...text.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
+  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(text)?.[1];
   const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
   const types: CSharpTypeSnapshot[] = [];
   let match: RegExpExecArray | null;
@@ -1286,10 +1519,30 @@ function findCSharpTypes(runtimeVscode: typeof vscode, document: vscode.TextDocu
     const nameStart = match.index + match[0].lastIndexOf(name);
     const start = document.positionAt(nameStart);
     const end = document.positionAt(nameStart + name.length);
-    types.push({ name, range: new runtimeVscode.Range(start, end) });
+    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
+    types.push({
+      name,
+      fullName: namespaceName ? `${namespaceName}.${name}` : name,
+      offset: nameStart,
+      range: new runtimeVscode.Range(start, end)
+    });
   }
 
   return types;
+}
+
+function findNearestCSharpType(types: readonly CSharpTypeSnapshot[], offset: number): CSharpTypeSnapshot | undefined {
+  let nearest: CSharpTypeSnapshot | undefined;
+
+  for (const type of types) {
+    if (type.offset > offset) {
+      break;
+    }
+
+    nearest = type;
+  }
+
+  return nearest;
 }
 
 function findMethodAtPosition(
@@ -1306,6 +1559,7 @@ function findMethodAtPosition(
 
 function findUnityEventFields(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpFieldSnapshot[] {
   const text = document.getText();
+  const types = findCSharpTypes(runtimeVscode, document);
   const fields: CSharpFieldSnapshot[] = [];
   let match: RegExpExecArray | null;
 
@@ -1323,7 +1577,11 @@ function findUnityEventFields(runtimeVscode: typeof vscode, document: vscode.Tex
 
     const start = document.positionAt(nameStart);
     const end = document.positionAt(nameStart + name.length);
-    fields.push({ name, range: new runtimeVscode.Range(start, end) });
+    fields.push({
+      name,
+      typeName: findNearestCSharpType(types, nameStart)?.fullName,
+      range: new runtimeVscode.Range(start, end)
+    });
   }
 
   return fields;
@@ -1415,7 +1673,7 @@ function getReferencesForLocationTarget(
   target: EventReferenceLocationTarget
 ): readonly (UnityEventReference | UnitySerializedInstanceLocation)[] {
   if (target.kind === 'serializedInstance') {
-    return index.getSerializedInstances(target.scriptPath);
+    return index.getSerializedInstances(target.scriptPath, target.typeName);
   }
 
   if (!target.symbolName) {
@@ -1423,14 +1681,14 @@ function getReferencesForLocationTarget(
   }
 
   if (target.kind === 'method') {
-    return index.getReferences(target.scriptPath, target.symbolName);
+    return index.getReferences(target.scriptPath, target.symbolName, target.typeName);
   }
 
   if (target.kind === 'fieldTarget') {
-    return index.getFieldTargets(target.scriptPath, target.symbolName);
+    return index.getFieldTargets(target.scriptPath, target.symbolName, target.typeName);
   }
 
-  return index.getFieldReferences(target.scriptPath, target.symbolName);
+  return index.getFieldReferences(target.scriptPath, target.symbolName, target.typeName);
 }
 
 async function createTargetMethodLocations(
@@ -1829,12 +2087,44 @@ function simplifyAssemblyTypeName(typeName: string): string {
   return typeName.split(',')[0]?.trim() ?? typeName;
 }
 
+function parseEditorClassIdentifier(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+
+  const separatorIndex = trimmed.lastIndexOf('::');
+  return separatorIndex === -1
+    ? trimmed
+    : trimmed.slice(separatorIndex + 2).trim();
+}
+
 function shortTypeName(fullTypeName: string): string {
   return fullTypeName.split('.').at(-1) ?? fullTypeName;
 }
 
 function referenceKey(scriptPath: string, methodName: string): string {
-  return `${toNormalizedPath(scriptPath).toLowerCase()}#${methodName}`;
+  return `${pathReferenceKey(scriptPath)}#${methodName}`;
+}
+
+function typeReferenceKey(typeName: string, methodName: string): string {
+  return `${typeKey(typeName)}#${methodName}`;
+}
+
+function fieldTypeReferenceKey(typeName: string, fieldName: string): string {
+  return `${typeKey(typeName)}#${fieldName}`;
+}
+
+function pathReferenceKey(scriptPath: string): string {
+  return toNormalizedPath(scriptPath).toLowerCase();
+}
+
+function typeKey(typeName: string): string {
+  return typeName.toLowerCase();
 }
 
 function toProjectPath(root: vscode.Uri, uri: vscode.Uri): string {
