@@ -10,7 +10,7 @@ Source: GitHub issue state from `minerva-studio/unity-plus`, plus local code and
 
 Validation note: `npm run compile` and `npm test` pass locally. `npm run lint` passes with one warning in test code: `src/test/renameSync.test.ts` defines unused helper `ordinaryTopLevelTypeAt`.
 
-Local assessment counts: Complete 16, Partial 4, Not started 2, Not planned 1.
+Local assessment counts: Complete 17, Partial 3, Not started 2, Not planned 1.
 
 | Issue | GitHub state | Local assessment | Notes |
 | --- | --- | --- | --- |
@@ -25,7 +25,7 @@ Local assessment counts: Complete 16, Partial 4, Not started 2, Not planned 1.
 | #9 | Closed | Complete | Class-to-file rename path is implemented and tested. |
 | #10 | Closed | Not planned | File-rename-event-to-class-update is no longer planned; rename sync stays class-to-file. |
 | #11 | Closed | Complete | Rename sync now supports matching primary top-level C# type/file pairs, including `ScriptableObject`, while preserving namespaces. |
-| #12 | Open | Partial | Cancel/fallback messaging exists; explicit affected file/class preview is still incomplete. |
+| #12 | Open | Complete | Explicit safety preview shows affected class, script file, and Unity meta file before applying the rename. |
 | #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
 | #14 | Closed | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
 | #15 | Open | Complete | Missing compile entries are added for asmdef-backed scripts and default `Assembly-CSharp`/`Assembly-CSharp-Editor` fallback projects; missing fallback projects show actionable warnings. |
@@ -142,6 +142,8 @@ Acceptance criteria:
 ## 12. [feature] Add rename safety preview
 
 Preview rename edits before applying them.
+
+Status: Complete. The explicit rename command previews the affected class, script file, and Unity meta file after preflight and before applying the workspace edit; canceling the preview stops the rename without falling back.
 
 Acceptance criteria:
 - Shows affected file and class.

@@ -73,6 +73,7 @@ export interface AtomicScriptRenameRuntime {
   fileExists(path: string): Promise<boolean>;
   createFileUri(path: string): vscode.Uri;
   applyWorkspaceEdit(edit: vscode.WorkspaceEdit): Promise<boolean>;
+  confirmRenamePreview(plan: ScriptFilenameSyncPlan, operations: readonly ScriptFileRenameOperation[]): Promise<boolean>;
   logger: UnityPlusLogger;
 }
 
@@ -96,6 +97,7 @@ export interface RenameTypeCommandRuntime {
   fileExists(path: string): Promise<boolean>;
   createFileUri(path: string): vscode.Uri;
   applyWorkspaceEdit(edit: vscode.WorkspaceEdit): Promise<boolean>;
+  confirmRenamePreview(plan: ScriptFilenameSyncPlan, operations: readonly ScriptFileRenameOperation[]): Promise<boolean>;
   wait(ms: number): Promise<void>;
   retryIntervalMs: number;
   settleTimeoutMs: number;
@@ -115,6 +117,7 @@ export type RenameTypeCommandResult =
 export type AtomicScriptRenameResult =
   | { kind: 'applied'; oldTypeName: string; newTypeName: string }
   | { kind: 'fallback'; reason: string }
+  | { kind: 'cancelled' }
   | { kind: 'failed'; message: string };
 
 export function registerRenameFeature(
@@ -158,6 +161,7 @@ export function registerRenameFeature(
         fileExists: async path => await fileExists(runtimeVscode, path),
         createFileUri: path => runtimeVscode.Uri.file(path),
         applyWorkspaceEdit: async edit => await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true }),
+        confirmRenamePreview: async (plan, operations) => await confirmRenamePreview(runtimeVscode, plan, operations),
         wait,
         retryIntervalMs: 200,
         settleTimeoutMs: 2000,
@@ -361,6 +365,7 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
         fileExists: runtime.fileExists,
         createFileUri: runtime.createFileUri,
         applyWorkspaceEdit: runtime.applyWorkspaceEdit,
+        confirmRenamePreview: runtime.confirmRenamePreview,
         logger: runtime.logger
       })
     );
@@ -462,6 +467,12 @@ export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRunti
     return { kind: 'failed', message: `Script file rename preflight failed for ${basename(runtime.filePath)}.` };
   }
 
+  // Preview happens after preflight and before the workspace edit is applied, so it shows the exact safe operations.
+  const confirmed = await runtime.confirmRenamePreview(plan, renameOperations);
+  if (!confirmed) {
+    return { kind: 'cancelled' };
+  }
+
   for (const operation of renameOperations) {
     renameEdit.renameFile(
       runtime.createFileUri(operation.oldPath),
@@ -480,6 +491,44 @@ export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRunti
     oldTypeName: currentType.name,
     newTypeName: runtime.newTypeName
   };
+}
+
+async function confirmRenamePreview(
+  runtimeVscode: typeof vscode,
+  plan: ScriptFilenameSyncPlan,
+  operations: readonly ScriptFileRenameOperation[]
+): Promise<boolean> {
+  const scriptOperation = operations.find(operation => operation.oldPath === plan.oldFilePath);
+  const metaOperation = operations.find(operation => operation.oldPath === plan.oldMetaPath);
+  const lines = [
+    runtimeVscode.l10n.t('Unity Plus will rename:'),
+    runtimeVscode.l10n.t('Class: {oldName} -> {newName}', {
+      oldName: plan.oldTypeName,
+      newName: plan.newTypeName
+    })
+  ];
+
+  if (scriptOperation) {
+    lines.push(runtimeVscode.l10n.t('Script file: {oldName} -> {newName}', {
+      oldName: basename(scriptOperation.oldPath),
+      newName: basename(scriptOperation.newPath)
+    }));
+  }
+
+  if (metaOperation) {
+    lines.push(runtimeVscode.l10n.t('Unity meta file: {oldName} -> {newName}', {
+      oldName: basename(metaOperation.oldPath),
+      newName: basename(metaOperation.newPath)
+    }));
+  }
+
+  const confirmLabel = runtimeVscode.l10n.t('Rename');
+  const selected = await runtimeVscode.window.showWarningMessage(
+    lines.join('\n'),
+    { modal: true },
+    confirmLabel
+  );
+  return selected === confirmLabel;
 }
 
 export async function syncScriptRenameAfterClassChange(runtime: ScriptRenameSyncRuntime): Promise<{

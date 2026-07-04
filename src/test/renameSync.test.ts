@@ -526,6 +526,7 @@ describe('renameSync', () => {
         appliedEdit = edit as unknown as FakeWorkspaceEdit;
         return true;
       },
+      confirmRenamePreview: async () => true,
       logger: createTestLogger()
     });
 
@@ -535,6 +536,73 @@ describe('renameSync', () => {
       { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
       { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
     ]);
+  });
+
+  it('previews atomic class, script, and Unity meta rename before applying', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    const order: string[] = [];
+    let previewPlan: ScriptFilenameSyncPlan | undefined;
+    let previewOperations: readonly { oldPath: string; newPath: string }[] = [];
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => {
+        order.push('apply');
+        return true;
+      },
+      confirmRenamePreview: async (previewedPlan, operations) => {
+        order.push('preview');
+        previewPlan = previewedPlan;
+        previewOperations = [...operations];
+        return true;
+      },
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'applied');
+    assert.deepStrictEqual(order, ['preview', 'apply']);
+    assert.deepStrictEqual(previewPlan, plan);
+    assert.deepStrictEqual(previewOperations, [
+      { oldPath: plan.oldFilePath, newPath: plan.newFilePath },
+      { oldPath: plan.oldMetaPath, newPath: plan.newMetaPath }
+    ]);
+  });
+
+  it('cancels atomic rename from the safety preview without applying edits', async () => {
+    const plan = createSyncPlan();
+    const csharpEdit = new FakeWorkspaceEdit();
+    let applyCalled = false;
+
+    const result = await executeAtomicScriptRename({
+      uri: fakeUri(plan.oldFilePath),
+      filePath: plan.oldFilePath,
+      mode: 'on',
+      currentType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      cursor: { line: 2, character: 18 },
+      newTypeName: plan.newTypeName,
+      languageService: createFakeLanguageService(topLevelTypeAt(plan.oldTypeName, 2, 14), csharpEdit),
+      fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
+      createFileUri: fakeUri,
+      applyWorkspaceEdit: async () => {
+        applyCalled = true;
+        return true;
+      },
+      confirmRenamePreview: async () => false,
+      logger: createTestLogger()
+    });
+
+    assert.strictEqual(result.kind, 'cancelled');
+    assert.strictEqual(applyCalled, false);
+    assert.deepStrictEqual(csharpEdit.fileRenames, []);
   });
 
   it('applies atomic class rename without Unity meta when the old meta is missing', async () => {
@@ -552,6 +620,7 @@ describe('renameSync', () => {
       fileExists: async path => path === plan.oldFilePath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => true,
+      confirmRenamePreview: async () => true,
       logger: createTestLogger()
     });
 
@@ -575,6 +644,7 @@ describe('renameSync', () => {
       fileExists: async () => true,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => true,
+      confirmRenamePreview: async () => true,
       logger: createTestLogger()
     });
 
@@ -600,6 +670,7 @@ describe('renameSync', () => {
         applyCalled = true;
         return true;
       },
+      confirmRenamePreview: async () => true,
       logger: createTestLogger()
     });
 
@@ -627,6 +698,7 @@ describe('renameSync', () => {
         applyCalled = true;
         return true;
       },
+      confirmRenamePreview: async () => true,
       logger: createTestLogger()
     });
 
@@ -649,6 +721,7 @@ describe('renameSync', () => {
       fileExists: async path => path === plan.oldFilePath || path === plan.oldMetaPath,
       createFileUri: fakeUri,
       applyWorkspaceEdit: async () => false,
+      confirmRenamePreview: async () => true,
       logger: createTestLogger()
     });
 
@@ -760,6 +833,7 @@ describe('renameSync', () => {
     ]);
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
     assert.strictEqual(runtime.messages.length, 0);
+    assert.strictEqual(runtime.previewCalls.length, 1);
     assert.strictEqual(runtime.markedSyncing.includes(plan.oldFilePath), true);
     assert.strictEqual(runtime.unmarkedSyncing.includes(plan.oldFilePath), true);
   });
@@ -839,6 +913,24 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'cancelled');
     assert.deepStrictEqual(runtime.nativeRenameCalls, []);
     assert.deepStrictEqual(runtime.appliedEdits, []);
+    assert.deepStrictEqual(runtime.warnings, []);
+  });
+
+  it('cancels visible rename command without falling back when safety preview is cancelled', async () => {
+    const plan = createSyncPlan();
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(plan.oldFilePath, { line: 2, character: 18 }),
+      primaryTopLevelType: topLevelTypeAt(plan.oldTypeName, 2, 14),
+      inputValue: plan.newTypeName,
+      confirmRenamePreviewResult: false
+    });
+
+    const result = await runRenameTypeCommand(runtime);
+
+    assert.strictEqual(result.kind, 'cancelled');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, []);
+    assert.deepStrictEqual(runtime.appliedEdits, []);
+    assert.strictEqual(runtime.previewCalls.length, 1);
     assert.deepStrictEqual(runtime.warnings, []);
   });
 
@@ -1125,6 +1217,7 @@ interface RenameCommandRuntimeOptions {
   primaryTopLevelType?: CSharpTopLevelTypeSnapshot;
   primaryTopLevelTypes?: Array<CSharpTopLevelTypeSnapshot | undefined>;
   inputValue?: string;
+  confirmRenamePreviewResult?: boolean;
 }
 
 function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
@@ -1138,6 +1231,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const inputBoxCalls: string[] = [];
   const atomicRenameCalls: string[] = [];
   const appliedEdits: unknown[] = [];
+  const previewCalls: { plan: ScriptFilenameSyncPlan; operations: { oldPath: string; newPath: string }[] }[] = [];
   const waited: number[] = [];
   const languageService = options.primaryTopLevelTypes
     ? createOptionalSequenceLanguageService(options.primaryTopLevelTypes)
@@ -1176,6 +1270,13 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
       appliedEdits.push(edit);
       return true;
     },
+    async confirmRenamePreview(plan: ScriptFilenameSyncPlan, operations: readonly { oldPath: string; newPath: string }[]): Promise<boolean> {
+      previewCalls.push({
+        plan,
+        operations: [...operations]
+      });
+      return options.confirmRenamePreviewResult ?? true;
+    },
     async wait(ms: number): Promise<void> {
       waited.push(ms);
     },
@@ -1197,6 +1298,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     inputBoxCalls,
     atomicRenameCalls,
     appliedEdits,
+    previewCalls,
     waited
   };
 
