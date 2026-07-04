@@ -69,6 +69,7 @@ describe('package manifest', () => {
 
     assert.strictEqual(bundle['Open In Unity'], '在 Unity 中打开');
     assert.strictEqual(bundle['Unity Plus: UnityEvent references are disabled.'], 'Unity Plus: UnityEvent 引用已禁用。');
+    assert.ok(bundle['Unity Plus: Install the Unity Visual Studio Editor package (com.unity.ide.visualstudio) in this Unity project.']);
     assert.ok(bundle['Unity Plus: Open a Unity project before creating a C# script.']);
     assert.ok(bundle['UnityEvent references: {count}']);
   });

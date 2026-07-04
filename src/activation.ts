@@ -27,6 +27,7 @@ export interface UnityPlusActivationDependencies {
   registerEventReferenceFeature(logger: UnityPlusLogger, options?: EventReferenceFeatureOptions): vscode.Disposable;
   registerMetaFilesFeature(logger: UnityPlusLogger, options?: MetaFilesFeatureOptions): vscode.Disposable;
   hideMetaFilesInExplorerIfEnabled(logger: UnityPlusLogger): Promise<void>;
+  checkUnityVisualStudioEditorPackage(root: vscode.Uri): Promise<boolean>;
 }
 
 export async function activateUnityPlus(
@@ -54,6 +55,7 @@ export async function activateUnityPlus(
 
   if (unityWorkspace.root) {
     await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
+    await dependencies.checkUnityVisualStudioEditorPackage(unityWorkspace.root);
   }
 
   context.subscriptions.push(
@@ -76,6 +78,7 @@ export async function activateUnityPlus(
 
       if (refreshed.root) {
         await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
+        await dependencies.checkUnityVisualStudioEditorPackage(refreshed.root);
       }
 
       if (metadataIndex && refreshed.root && sameWorkspaceRoot(metadataIndex.root, refreshed.root)) {

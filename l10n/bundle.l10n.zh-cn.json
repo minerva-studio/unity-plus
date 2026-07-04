@@ -19,6 +19,7 @@
   "Unity Plus: No active file found for Open In Unity.": "Unity Plus: 未找到可在 Unity 中打开的活动文件。",
   "Unity Plus: Open In Unity only supports Assets folder resources.": "Unity Plus: “在 Unity 中打开”仅支持 Assets 文件夹中的资源。",
   "Unity Plus: Unity IDE messaging endpoint was not found. Open Unity and enable the Visual Studio Editor package.": "Unity Plus: 未找到 Unity IDE 消息端点。请打开 Unity 并启用 Visual Studio Editor 包。",
+  "Unity Plus: Install the Unity Visual Studio Editor package (com.unity.ide.visualstudio) in this Unity project.": "Unity Plus: 请在此 Unity 项目中安装 Unity Visual Studio Editor 包 (com.unity.ide.visualstudio)。",
   "Unity Plus: UnityEvent references are disabled.": "Unity Plus: UnityEvent 引用已禁用。",
   "Unity Plus: scanning UnityEvent references": "Unity Plus: 正在扫描 UnityEvent 引用",
   "Preparing Unity metadata": "正在准备 Unity 元数据",

@@ -6,6 +6,7 @@ import { registerProjectSyncFeature } from './features/project-sync/projectSync'
 import { registerRenameFeature } from './features/rename/renameSync';
 import { createLogger } from './unity/logger';
 import { createLazyUnityMetadataIndex } from './unity/metadataIndex';
+import { checkUnityVisualStudioEditorPackage } from './unity/visualStudioEditorPackage';
 import { detectUnityWorkspace } from './unity/workspaceDetector';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -22,7 +23,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerProjectSyncFeature,
     registerEventReferenceFeature,
     registerMetaFilesFeature,
-    hideMetaFilesInExplorerIfEnabled: async logger => await hideMetaFilesInExplorerIfEnabled(vscode, logger)
+    hideMetaFilesInExplorerIfEnabled: async logger => await hideMetaFilesInExplorerIfEnabled(vscode, logger),
+    checkUnityVisualStudioEditorPackage: async root => await checkUnityVisualStudioEditorPackage(root, {
+      runtimeVscode: vscode,
+      logger
+    })
   });
 }
 

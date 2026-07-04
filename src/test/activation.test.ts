@@ -45,7 +45,8 @@ describe('activation', () => {
       registerProjectSyncFeature: () => createDisposable(),
       registerEventReferenceFeature: () => createDisposable(),
       registerMetaFilesFeature: () => createDisposable(),
-      hideMetaFilesInExplorerIfEnabled: async () => undefined
+      hideMetaFilesInExplorerIfEnabled: async () => undefined,
+      checkUnityVisualStudioEditorPackage: async () => true
     });
 
     assert.strictEqual(lazyIndexCreated, 1);
@@ -61,6 +62,7 @@ describe('activation', () => {
     let eventReferenceOptions: EventReferenceFeatureOptions | undefined;
     let metaFilesRegistered = 0;
     let hideMetaFilesCalls = 0;
+    let packageChecks = 0;
 
     await activateUnityPlus(createContext(), {
       workspaceFolders: [],
@@ -92,6 +94,10 @@ describe('activation', () => {
       },
       hideMetaFilesInExplorerIfEnabled: async () => {
         hideMetaFilesCalls += 1;
+      },
+      checkUnityVisualStudioEditorPackage: async () => {
+        packageChecks += 1;
+        return true;
       }
     });
 
@@ -101,6 +107,7 @@ describe('activation', () => {
     assert.strictEqual(eventReferenceOptions?.metadataIndex, undefined);
     assert.strictEqual(metaFilesRegistered, 1);
     assert.strictEqual(hideMetaFilesCalls, 0);
+    assert.strictEqual(packageChecks, 0);
   });
 
   it('rebuilds the lazy metadata index only when the rescan command is executed', async () => {
@@ -134,7 +141,8 @@ describe('activation', () => {
         return createDisposable();
       },
       registerMetaFilesFeature: () => createDisposable(),
-      hideMetaFilesInExplorerIfEnabled: async () => undefined
+      hideMetaFilesInExplorerIfEnabled: async () => undefined,
+      checkUnityVisualStudioEditorPackage: async () => true
     });
 
     assert.strictEqual(rebuilds, 0);
@@ -148,6 +156,7 @@ describe('activation', () => {
     const root = createUri('/Project');
     const commands = new Map<string, (...args: unknown[]) => unknown>();
     let hideMetaFilesCalls = 0;
+    let packageChecks = 0;
 
     await activateUnityPlus(createContext(), {
       workspaceFolders: [],
@@ -168,14 +177,21 @@ describe('activation', () => {
       registerMetaFilesFeature: () => createDisposable(),
       hideMetaFilesInExplorerIfEnabled: async () => {
         hideMetaFilesCalls += 1;
+      },
+      checkUnityVisualStudioEditorPackage: async checkRoot => {
+        assert.strictEqual(checkRoot, root);
+        packageChecks += 1;
+        return true;
       }
     });
 
     assert.strictEqual(hideMetaFilesCalls, 1);
+    assert.strictEqual(packageChecks, 1);
 
     await Promise.resolve(commands.get('unityPlus.rescanUnityProject')?.());
 
     assert.strictEqual(hideMetaFilesCalls, 2);
+    assert.strictEqual(packageChecks, 2);
   });
 });
 

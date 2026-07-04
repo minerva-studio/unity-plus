@@ -14,6 +14,11 @@ Unity Plus exists because this should not be every Unity developer's private mai
 - Auto refresh project files when `.cs` files are created, moved, or deleted.
 - Show UnityEvent references from scenes and prefabs inside C# files.
 
+## Requirements
+
+- Install the VS Code extensions declared by Unity Plus: Microsoft's official Unity extension for VS Code (`VisualStudioToolsForUnity.vstuc`), C# Dev Kit (`ms-dotnettools.csdevkit`), and C# (`ms-dotnettools.csharp`).
+- Enable Unity's official Visual Studio Editor package (`com.unity.ide.visualstudio`) in each Unity project. Unity Plus relies on that Editor-side package for project-file generation and Unity IDE messaging.
+
 ## Roadmap
 
 - `v0.1 Foundation`: VS Code extension scaffold, Unity workspace detection, logging, and CI.
