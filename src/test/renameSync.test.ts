@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import { normalize } from 'node:path';
 import type * as vscode from 'vscode';
-import { applyScriptFilenameSyncPlan, buildAssetMetaRenameOperations, buildScriptFilenameSyncOperations, confirmRenamePreview, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, RenamePreviewMode, runRenameTypeCommand, ScriptFilenameSyncPlan, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
+import { applyScriptFilenameSyncPlan, buildAssetMetaRenameOperations, buildScriptFilenameSyncOperations, confirmRenamePreview, executeAtomicScriptRename, invertScriptFilenameSyncPlan, planScriptFilenameSync, registerRenameFeature, RenameFileSyncMode, RenamePreviewMode, runRenameTypeCommand, ScriptFilenameSyncPlan, showRenameInput, syncScriptRenameAfterClassChange } from '../features/rename/renameSync';
 import { CSharpTopLevelTypeSnapshot, CSharpLanguageService } from '../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 
@@ -1049,6 +1049,26 @@ describe('renameSync', () => {
     ]);
   });
 
+  it('keeps rename picker options visible after typing the new class name', async () => {
+    const plan = createSyncPlan();
+    const quickPickRuntime = createRenameInputRuntime(plan.newTypeName);
+
+    const decision = await showRenameInput(quickPickRuntime.runtime, {
+      oldTypeName: plan.oldTypeName,
+      filePath: plan.oldFilePath,
+      previewMode: 'ask',
+      hasMetaFile: true
+    });
+
+    assert.deepStrictEqual(decision, {
+      newTypeName: plan.newTypeName,
+      operationKinds: ['script', 'meta']
+    });
+    assert.strictEqual(quickPickRuntime.lastItems.length, 2);
+    assert.strictEqual(quickPickRuntime.lastItems.every(item => item.alwaysShow === true), true);
+    assert.strictEqual(quickPickRuntime.lastItems[0].description?.includes('HeroController.cs'), true);
+  });
+
   it('renames only the C# type when the combined rename input disables file changes', async () => {
     const plan = createSyncPlan();
     const runtime = createRenameCommandRuntime({
@@ -1763,6 +1783,82 @@ function createRenamePreviewRuntime(options: {
   return {
     runtime,
     warningMessages
+  };
+}
+
+function createRenameInputRuntime(inputValue: string) {
+  const state = {
+    lastItems: [] as Array<vscode.QuickPickItem & { operationKind?: string }>,
+    changeValueHandler: undefined as (() => void) | undefined,
+    acceptHandler: undefined as (() => void) | undefined,
+    hideHandler: undefined as (() => void) | undefined
+  };
+
+  const runtime = {
+    l10n: {
+      t(message: string, args?: Record<string, unknown>) {
+        return args
+          ? Object.entries(args).reduce((current, [key, value]) => current.replace(`{${key}}`, String(value)), message)
+          : message;
+      }
+    },
+    window: {
+      createQuickPick() {
+        const quickPick = {
+          title: undefined as string | undefined,
+          placeholder: undefined as string | undefined,
+          prompt: undefined as string | undefined,
+          canSelectMany: false,
+          matchOnDescription: true,
+          matchOnDetail: true,
+          value: '',
+          selectedItems: [] as Array<vscode.QuickPickItem & { operationKind?: string }>,
+          get items() {
+            return state.lastItems;
+          },
+          set items(items: Array<vscode.QuickPickItem & { operationKind?: string }>) {
+            state.lastItems = items;
+          },
+          onDidChangeValue(handler: () => void) {
+            state.changeValueHandler = handler;
+            return createDisposable();
+          },
+          onDidChangeSelection() {
+            return createDisposable();
+          },
+          onDidAccept(handler: () => void) {
+            state.acceptHandler = handler;
+            return createDisposable();
+          },
+          onDidHide(handler: () => void) {
+            state.hideHandler = handler;
+            return createDisposable();
+          },
+          show() {
+            this.value = inputValue;
+            state.changeValueHandler?.();
+            this.selectedItems = state.lastItems;
+            state.acceptHandler?.();
+          },
+          hide() {
+            state.hideHandler?.();
+          },
+          dispose() {
+            return undefined;
+          }
+        };
+
+        return quickPick;
+      },
+      showWarningMessage: () => undefined
+    }
+  } as unknown as typeof vscode;
+
+  return {
+    runtime,
+    get lastItems() {
+      return state.lastItems;
+    }
   };
 }
 
