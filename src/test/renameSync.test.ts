@@ -709,6 +709,25 @@ describe('renameSync', () => {
     assert.strictEqual(result.kind, 'fallback');
     assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
     assert.deepStrictEqual(runtime.messages, []);
+    assert.deepStrictEqual(runtime.inputBoxCalls, []);
+    assert.deepStrictEqual(runtime.atomicRenameCalls, []);
+    assert.deepStrictEqual(runtime.waited, []);
+  });
+
+  it('falls back silently for field rename even when type and file names do not match', async () => {
+    const runtime = createRenameCommandRuntime({
+      editor: createCSharpEditor(normalize('/Project/Assets/CustomName.cs'), { line: 8, character: 12 }),
+      primaryTopLevelType: topLevelTypeAt('PlayerController', 2, 14)
+    });
+
+    const result = await runRenameTypeCommand(runtime);
+
+    assert.strictEqual(result.kind, 'fallback');
+    assert.deepStrictEqual(runtime.nativeRenameCalls, ['editor.action.rename']);
+    assert.deepStrictEqual(runtime.messages, []);
+    assert.deepStrictEqual(runtime.inputBoxCalls, []);
+    assert.deepStrictEqual(runtime.atomicRenameCalls, []);
+    assert.deepStrictEqual(runtime.waited, []);
   });
 
   it('falls back with a visible message when type and file names do not match', async () => {
@@ -1116,6 +1135,8 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
   const nativeRenameCalls: string[] = [];
   const markedSyncing: string[] = [];
   const unmarkedSyncing: string[] = [];
+  const inputBoxCalls: string[] = [];
+  const atomicRenameCalls: string[] = [];
   const appliedEdits: unknown[] = [];
   const waited: number[] = [];
   const languageService = options.primaryTopLevelTypes
@@ -1127,6 +1148,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     mode: options.mode ?? 'on',
     languageService,
     async showInputBox() {
+      inputBoxCalls.push('showInputBox');
       return options.inputValue;
     },
     async showProgress<T>(title: string, task: () => Promise<T>): Promise<T> {
@@ -1143,6 +1165,7 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
       nativeRenameCalls.push('editor.action.rename');
     },
     async executeAtomicRename(request: Parameters<typeof executeAtomicScriptRename>[0]) {
+      atomicRenameCalls.push(request.newTypeName);
       return await executeAtomicScriptRename(request);
     },
     async fileExists(path: string): Promise<boolean> {
@@ -1171,6 +1194,8 @@ function createRenameCommandRuntime(options: RenameCommandRuntimeOptions) {
     nativeRenameCalls,
     markedSyncing,
     unmarkedSyncing,
+    inputBoxCalls,
+    atomicRenameCalls,
     appliedEdits,
     waited
   };

@@ -807,12 +807,13 @@ function getAtomicRenameFallbackReason(
     return 'Using VS Code Rename Symbol because the primary top-level type location is unavailable.';
   }
 
-  if (basename(filePath) !== `${currentType.name}.cs`) {
-    return 'Using VS Code Rename Symbol because type/file names do not match.';
+  if (!isPositionInRange(cursor, currentType.nameRange)) {
+    // Field and member renames should pass through to the native C# rename provider immediately.
+    return 'Using VS Code Rename Symbol because the cursor is not on the primary top-level type name.';
   }
 
-  if (!isPositionInRange(cursor, currentType.nameRange)) {
-    return 'Using VS Code Rename Symbol because the cursor is not on the primary top-level type name.';
+  if (basename(filePath) !== `${currentType.name}.cs`) {
+    return 'Using VS Code Rename Symbol because type/file names do not match.';
   }
 
   return undefined;
