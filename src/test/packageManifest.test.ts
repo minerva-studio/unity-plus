@@ -92,6 +92,7 @@ describe('package manifest', () => {
     );
 
     assert.strictEqual(command?.title, '%command.openMetaFile.title%');
+    assert.strictEqual(command?.icon, '$(file-code)');
   });
 
   it('contributes an explicit command for opening resources in Unity', () => {
@@ -101,6 +102,16 @@ describe('package manifest', () => {
     );
 
     assert.strictEqual(command?.title, '%command.openInUnity.title%');
+    assert.strictEqual(command?.icon, '$(rocket)');
+  });
+
+  it('keeps Unity Plus command ownership through categories', () => {
+    const manifest = readPackageManifest();
+    const packageNls = readJson<Record<string, string>>('package.nls.json');
+    const commands = manifest.contributes.commands as Array<{ category?: string }>;
+
+    assert.strictEqual(packageNls['command.category'], 'Unity Plus');
+    assert.ok(commands.every(command => command.category === '%command.category%'));
   });
 
   it('shows Unity resource commands in Explorer and editor title menus', () => {

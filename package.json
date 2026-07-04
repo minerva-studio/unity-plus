@@ -34,39 +34,50 @@
     "commands": [
       {
         "command": "unityPlus.refreshProjectFiles",
-        "title": "%command.refreshProjectFiles.title%"
+        "title": "%command.refreshProjectFiles.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.createCSharpScript",
-        "title": "%command.createCSharpScript.title%"
+        "title": "%command.createCSharpScript.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.createScriptableObject",
-        "title": "%command.createScriptableObject.title%"
+        "title": "%command.createScriptableObject.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.syncScriptFilename",
-        "title": "%command.syncScriptFilename.title%"
+        "title": "%command.syncScriptFilename.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.syncClassName",
-        "title": "%command.syncClassName.title%"
+        "title": "%command.syncClassName.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.showUnityEventReferences",
-        "title": "%command.showUnityEventReferences.title%"
+        "title": "%command.showUnityEventReferences.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.openMetaFile",
-        "title": "%command.openMetaFile.title%"
+        "title": "%command.openMetaFile.title%",
+        "category": "%command.category%",
+        "icon": "$(file-code)"
       },
       {
         "command": "unityPlus.openInUnity",
-        "title": "%command.openInUnity.title%"
+        "title": "%command.openInUnity.title%",
+        "category": "%command.category%",
+        "icon": "$(rocket)"
       },
       {
         "command": "unityPlus.rescanUnityProject",
-        "title": "%command.rescanUnityProject.title%"
+        "title": "%command.rescanUnityProject.title%",
+        "category": "%command.category%"
       }
     ],
     "keybindings": [
