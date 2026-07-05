@@ -533,7 +533,7 @@ describe('eventReferences', () => {
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[3].command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 3);
     assert.strictEqual(runtime.referenceCommands[2].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(3, 20));
+    assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(4, 14));
     assert.strictEqual(runtime.referenceCommands[2].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
   });
@@ -1318,8 +1318,60 @@ describe('eventReferences', () => {
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', checkTargetLens?.command?.arguments?.[0]);
 
     assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(6, 14));
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(6, 14));
+  });
+
+  it('projects field targets from YAML target methods instead of C# invocation call sites', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool InvokeFromCode()',
+      '  {',
+      '    OnCheckEnable.Invoke();',
+      '    return CanInteract();',
+      '  }',
+      '  public bool CanInteract()',
+      '  {',
+      '    return true;',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(9, 14));
+    assert.strictEqual(runtime.referenceCommands[0].locations.length, 1);
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(9, 14));
   });
 
   it('deduplicates UnityEvent field target CodeLens locations across normal and override bindings', async () => {

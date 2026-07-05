@@ -172,6 +172,12 @@ interface CSharpMethodSnapshot {
   range: vscode.Range;
 }
 
+interface CSharpMethodDeclaration {
+  name: string;
+  nameStart: number;
+  nameEnd: number;
+}
+
 interface CSharpFieldSnapshot {
   name: string;
   typeName?: string;
@@ -280,9 +286,11 @@ const serializedAssetSearchGlobs = ['Assets/**/*.{prefab,unity,asset}', 'Package
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
 const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
-const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+const csharpMethodNameCandidatePattern = /\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^;{}()[\]\n]*>)?\s*\(/g;
 const unityEventTokenPattern = /(?:UnityEngine\.Events\.)?UnityEvent\b/g;
 const identifierPattern = /[A-Za-z_][A-Za-z0-9_]*/y;
+const csharpMethodNameKeywordPattern = /^(?:if|for|foreach|while|switch|catch|using|lock|return|throw|yield|await|new|nameof|typeof|sizeof|default|checked|unchecked|fixed|base|this)$/;
+const csharpNonDeclarationPrefixKeywordPattern = /\b(?:if|for|foreach|while|switch|catch|using|lock|return|throw|yield|await|new)\b/;
 
 export function registerEventReferenceFeature(
   logger: UnityPlusLogger,
@@ -942,12 +950,7 @@ function createEventReferenceProvider(
             return;
           }
 
-          await runtime.runtimeVscode.commands.executeCommand(
-            'editor.action.showReferences',
-            toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
-            target.position,
-            locations
-          );
+          await showTargetMethodLocations(runtime, locations);
           return;
         }
 
@@ -998,12 +1001,7 @@ function createEventReferenceProvider(
           return;
         }
 
-        await runtime.runtimeVscode.commands.executeCommand(
-          'editor.action.showReferences',
-          toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
-          target.position,
-          locations
-        );
+        await showTargetMethodLocations(runtime, locations);
         return;
       }
 
@@ -2035,23 +2033,158 @@ function createMissingWorkspaceMessage(runtimeVscode: typeof vscode): string {
 function findCSharpMethods(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpMethodSnapshot[] {
   const text = document.getText();
   const types = findCSharpTypes(runtimeVscode, document);
-  const methods: CSharpMethodSnapshot[] = [];
-  let match: RegExpExecArray | null;
-
-  methodPattern.lastIndex = 0;
-  while ((match = methodPattern.exec(text))) {
-    const name = match[1];
-    const nameStart = match.index + match[0].lastIndexOf(name);
+  return findCSharpMethodDeclarations(text).map(declaration => {
+    const nameStart = declaration.nameStart;
     const start = document.positionAt(nameStart);
-    const end = document.positionAt(nameStart + name.length);
-    methods.push({
-      name,
+    const end = document.positionAt(declaration.nameEnd);
+    return {
+      name: declaration.name,
       typeName: findNearestCSharpType(types, nameStart)?.fullName,
       range: new runtimeVscode.Range(start, end)
+    };
+  });
+}
+
+/** Finds C# method declarations without treating ordinary calls as Unity target methods. */
+function findCSharpMethodDeclarations(text: string, methodName?: string): CSharpMethodDeclaration[] {
+  const declarations: CSharpMethodDeclaration[] = [];
+  let match: RegExpExecArray | null;
+
+  csharpMethodNameCandidatePattern.lastIndex = 0;
+  while ((match = csharpMethodNameCandidatePattern.exec(text))) {
+    const name = match[1];
+    if (methodName && name !== methodName) {
+      continue;
+    }
+
+    const nameStart = match.index;
+    const openParen = match.index + match[0].lastIndexOf('(');
+    if (!isCSharpMethodDeclarationCandidate(text, name, nameStart, openParen)) {
+      continue;
+    }
+
+    declarations.push({
+      name,
+      nameStart,
+      nameEnd: nameStart + name.length
     });
   }
 
-  return methods;
+  return declarations;
+}
+
+/** Validates a method-name candidate against declaration-only C# syntax markers. */
+function isCSharpMethodDeclarationCandidate(
+  text: string,
+  name: string,
+  nameStart: number,
+  openParen: number
+): boolean {
+  if (csharpMethodNameKeywordPattern.test(name) || !hasCSharpMethodDeclarationPrefix(text, nameStart)) {
+    return false;
+  }
+
+  const closeParen = findMatchingParenthesis(text, openParen);
+  if (closeParen === -1) {
+    return false;
+  }
+
+  const terminator = skipCSharpMethodConstraints(text, skipWhitespace(text, closeParen + 1));
+  return text[terminator] === '{' ||
+    text[terminator] === ';' ||
+    (text[terminator] === '=' && text[terminator + 1] === '>');
+}
+
+/** Checks the text before a candidate method name for declaration shape instead of call shape. */
+function hasCSharpMethodDeclarationPrefix(text: string, nameStart: number): boolean {
+  const previousTokenOffset = findPreviousNonWhitespaceOffset(text, nameStart - 1);
+  if (previousTokenOffset === undefined) {
+    return false;
+  }
+
+  const previousChar = text[previousTokenOffset];
+  if (!/[A-Za-z0-9_\]>]/.test(previousChar)) {
+    return false;
+  }
+
+  const lineStart = text.lastIndexOf('\n', nameStart - 1) + 1;
+  const prefix = text.slice(lineStart, nameStart).trim();
+  if (!prefix || prefix.includes('=') || csharpNonDeclarationPrefixKeywordPattern.test(prefix)) {
+    return false;
+  }
+
+  return true;
+}
+
+/** Finds the previous non-whitespace character offset before a parser cursor. */
+function findPreviousNonWhitespaceOffset(text: string, offset: number): number | undefined {
+  for (let index = offset; index >= 0; index -= 1) {
+    if (!/\s/.test(text[index])) {
+      return index;
+    }
+  }
+
+  return undefined;
+}
+
+/** Finds a balanced closing parenthesis for a C# parameter list candidate. */
+function findMatchingParenthesis(text: string, openParen: number): number {
+  let depth = 0;
+
+  for (let index = openParen; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '"' || char === "'") {
+      index = skipQuotedCSharpLiteral(text, index);
+      continue;
+    }
+
+    if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+}
+
+/** Skips over a quoted C# literal while scanning a candidate method signature. */
+function skipQuotedCSharpLiteral(text: string, quoteOffset: number): number {
+  const quote = text[quoteOffset];
+
+  for (let index = quoteOffset + 1; index < text.length; index += 1) {
+    if (text[index] === '\\') {
+      index += 1;
+      continue;
+    }
+
+    if (text[index] === quote) {
+      return index;
+    }
+  }
+
+  return text.length - 1;
+}
+
+/** Skips simple C# generic constraints between a parameter list and declaration body. */
+function skipCSharpMethodConstraints(text: string, offset: number): number {
+  let cursor = offset;
+  if (!text.startsWith('where ', cursor)) {
+    return cursor;
+  }
+
+  while (cursor < text.length) {
+    if (text[cursor] === '{' || text[cursor] === ';' || (text[cursor] === '=' && text[cursor + 1] === '>')) {
+      return cursor;
+    }
+
+    cursor += 1;
+  }
+
+  return cursor;
 }
 
 function findCSharpTypes(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpTypeSnapshot[] {
@@ -2258,6 +2391,7 @@ async function createTargetMethodLocations(
   references: readonly UnityEventReference[]
 ): Promise<vscode.Location[]> {
   const locations: vscode.Location[] = [];
+  const seenLocations = new Set<string>();
 
   for (const reference of references) {
     if (!reference.scriptPath) {
@@ -2269,7 +2403,7 @@ async function createTargetMethodLocations(
       const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
       const position = findCSharpMethodPosition(runtime.runtimeVscode, content, reference.methodName);
       if (position) {
-        locations.push(new runtime.runtimeVscode.Location(uri, position));
+        appendUniqueLocation(locations, seenLocations, new runtime.runtimeVscode.Location(uri, position));
       }
     } catch {
       // Missing or unreadable scripts cannot provide target locations, but other targets may still resolve.
@@ -2279,23 +2413,45 @@ async function createTargetMethodLocations(
   return locations;
 }
 
+/** Shows YAML-declared target methods using the first target declaration as the peek anchor. */
+async function showTargetMethodLocations(
+  runtime: EventReferenceRuntime,
+  locations: readonly vscode.Location[]
+): Promise<void> {
+  const anchor = locations[0];
+  await runtime.runtimeVscode.commands.executeCommand(
+    'editor.action.showReferences',
+    anchor.uri,
+    anchor.range.start,
+    locations
+  );
+}
+
+/** Appends one location while avoiding repeated target declarations in the peek list. */
+function appendUniqueLocation(
+  locations: vscode.Location[],
+  seenLocations: Set<string>,
+  location: vscode.Location
+): void {
+  const key = `${location.uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
+  if (seenLocations.has(key)) {
+    return;
+  }
+
+  seenLocations.add(key);
+  locations.push(location);
+}
+
 function findCSharpMethodPosition(
   runtimeVscode: typeof vscode,
   content: string,
   methodName: string
 ): vscode.Position | undefined {
-  methodPattern.lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = methodPattern.exec(content))) {
-    if (match[1] !== methodName) {
-      continue;
-    }
-
-    const nameStart = match.index + match[0].lastIndexOf(methodName);
-    const line = countLineBreaks(content, 0, nameStart);
-    const previousLineBreak = content.lastIndexOf('\n', nameStart - 1);
-    const character = nameStart - previousLineBreak - 1;
+  const declaration = findCSharpMethodDeclarations(content, methodName)[0];
+  if (declaration) {
+    const line = countLineBreaks(content, 0, declaration.nameStart);
+    const previousLineBreak = content.lastIndexOf('\n', declaration.nameStart - 1);
+    const character = declaration.nameStart - previousLineBreak - 1;
     return new runtimeVscode.Position(line, character);
   }
 
