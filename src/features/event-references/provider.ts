@@ -1,6 +1,5 @@
 import type * as vscode from 'vscode';
 import { isCSharpFile } from './assetDiscovery';
-import { findMethodAtPosition, findUnityEventFieldAtPosition } from './csharpSource';
 import { createCodeLensesFromIndex, createScanStateCodeLenses } from './codeLens';
 import { createEmptyPriorityScanResult, buildPriorityReferenceIndex } from './priorityScan';
 import { createHoverMarkdown, showReferenceLocations } from './referenceLocations';
@@ -29,7 +28,7 @@ export function createEventReferenceProvider(
 
         if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
           controller.scheduleBuild();
-          return createScanStateCodeLenses(runtime, document, scriptPath, '-');
+          return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
         }
 
         const priorityKey = `${runtime.getCacheVersion()}:${scriptPath}`;
@@ -70,23 +69,23 @@ export function createEventReferenceProvider(
         }
 
         if (priorityScan.status === 'ready' && priorityScan.result) {
-          return createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
+          return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
             embedReferences: true,
             includeZeroSummaryLenses: true
           });
         }
 
         if (priorityScan.status === 'failed' && priorityScan.result) {
-          return createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
+          return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
             embedReferences: true,
             includeZeroSummaryLenses: true
           });
         }
 
-        return createScanStateCodeLenses(runtime, document, scriptPath, '-');
+        return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
       }
 
-      return createCodeLensesFromIndex(runtime, document, index, {
+      return await createCodeLensesFromIndex(runtime, document, index, {
         embedReferences: false,
         includeZeroSummaryLenses: true
       });
@@ -105,20 +104,20 @@ export function createEventReferenceProvider(
       }
 
       const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-      const method = findMethodAtPosition(runtime.runtimeVscode, document, position);
+      const method = await runtime.csharpLanguageService?.findMethodAtPosition(document.uri, position);
 
       if (method) {
         const references = index.getReferences(scriptPath, method.name, method.typeName);
         if (references.length > 0) {
-          return new runtime.runtimeVscode.Hover(createHoverMarkdown(runtime.runtimeVscode, references), method.range);
+          return new runtime.runtimeVscode.Hover(createHoverMarkdown(runtime.runtimeVscode, references), toVscodeRange(runtime.runtimeVscode, method.range));
         }
       }
 
-      const field = findUnityEventFieldAtPosition(runtime.runtimeVscode, document, position);
+      const field = await runtime.csharpLanguageService?.findUnityEventFieldAtPosition(document.uri, position);
       if (field) {
         const references = index.getFieldReferences(scriptPath, field.name, field.typeName);
         if (references.length > 0) {
-          return new runtime.runtimeVscode.Hover(createHoverMarkdown(runtime.runtimeVscode, references), field.range);
+          return new runtime.runtimeVscode.Hover(createHoverMarkdown(runtime.runtimeVscode, references), toVscodeRange(runtime.runtimeVscode, field.range));
         }
       }
 
@@ -134,4 +133,12 @@ export function createEventReferenceProvider(
       );
     }
   };
+}
+
+/** Converts language-service ranges back into VS Code ranges for hover rendering. */
+function toVscodeRange(runtimeVscode: typeof vscode, range: { start: { line: number; character: number }; end: { line: number; character: number } }): vscode.Range {
+  return new runtimeVscode.Range(
+    new runtimeVscode.Position(range.start.line, range.start.character),
+    new runtimeVscode.Position(range.end.line, range.end.character)
+  );
 }

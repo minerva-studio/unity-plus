@@ -1,17 +1,17 @@
 import type * as vscode from 'vscode';
-import { findCSharpMethods, findCSharpTypes, findUnityEventFields, type CSharpTypeSnapshot } from './csharpSource';
+import type { CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
 import type { UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
 import { typeKey } from './referenceIndex';
 import type { CodeLensRenderOptions, EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
 import { toProjectPath } from './utils';
 
-export function createScanStateCodeLenses(
+export async function createScanStateCodeLenses(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument,
   scriptPath: string,
   marker: '-' | '0'
-): vscode.CodeLens[] {
-  const anchorRange = findCodeLensStatusAnchorRange(runtime.runtimeVscode, document);
+): Promise<vscode.CodeLens[]> {
+  const anchorRange = await findCodeLensStatusAnchorRange(runtime, document);
   const position = anchorRange.start;
 
   return [
@@ -49,24 +49,30 @@ export function createScanStateCodeLenses(
 }
 
 /** Picks a stable class-level range for scan state and zero-count summary CodeLens entries. */
-function findCodeLensStatusAnchorRange(
-  runtimeVscode: typeof vscode,
+async function findCodeLensStatusAnchorRange(
+  runtime: EventReferenceRuntime,
   document: vscode.TextDocument
-): vscode.Range {
-  return findCSharpTypes(runtimeVscode, document)[0]?.range ??
-    new runtimeVscode.Range(new runtimeVscode.Position(0, 0), new runtimeVscode.Position(0, 0));
+): Promise<vscode.Range> {
+  const types = await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
+  return types[0] ? toVscodeRange(runtime.runtimeVscode, types[0].range) :
+    new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
 }
 
 /** Converts a reference index into CodeLens entries for one C# document. */
-export function createCodeLensesFromIndex(
+export async function createCodeLensesFromIndex(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument,
   index: UnitySerializedAssetReferenceIndex,
   options: CodeLensRenderOptions
-): vscode.CodeLens[] {
-  const methods = findCSharpMethods(runtime.runtimeVscode, document);
-  const fields = findUnityEventFields(runtime.runtimeVscode, document);
-  const types = findCSharpTypes(runtime.runtimeVscode, document);
+): Promise<vscode.CodeLens[]> {
+  const csharpLanguageService = runtime.csharpLanguageService;
+  if (!csharpLanguageService) {
+    return [];
+  }
+
+  const methods = await csharpLanguageService.findMethods(document.uri);
+  const fields = await csharpLanguageService.findUnityEventFields(document.uri);
+  const types = await csharpLanguageService.findTypes(document.uri);
   const codeLenses: vscode.CodeLens[] = [];
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
   const serializedInstanceAnchor = findSerializedInstanceAnchorType(types, scriptPath);
@@ -83,8 +89,9 @@ export function createCodeLensesFromIndex(
     );
 
     if (serializedInstances.length > 0) {
+      const typeRange = toVscodeRange(runtime.runtimeVscode, type.range);
       serializedInstanceLensCount += 1;
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(type.range, {
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(typeRange, {
         title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
           count: serializedInstances.length
         }),
@@ -94,7 +101,7 @@ export function createCodeLensesFromIndex(
           scriptPath,
           typeName: type.fullName,
           ...(options.embedReferences || type !== serializedInstanceAnchor ? { serializedInstances } : {}),
-          position: type.range.start
+        position: typeRange.start
         } satisfies EventReferenceLocationTarget]
       }));
     }
@@ -104,7 +111,8 @@ export function createCodeLensesFromIndex(
     const references = index.getReferences(scriptPath, method.name, method.typeName);
     if (references.length > 0) {
       methodLensCount += 1;
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(method.range, {
+      const range = toVscodeRange(runtime.runtimeVscode, method.range);
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(range, {
         title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length }),
         command: 'unityPlus.showUnityEventReferenceLocations',
         arguments: [{
@@ -113,7 +121,7 @@ export function createCodeLensesFromIndex(
           symbolName: method.name,
           typeName: method.typeName,
           ...(options.embedReferences ? { eventReferences: references } : {}),
-          position: method.range.start
+          position: range.start
         } satisfies EventReferenceLocationTarget]
       }));
     }
@@ -122,7 +130,8 @@ export function createCodeLensesFromIndex(
   for (const field of fields) {
     const fieldReferences = index.getFieldReferences(scriptPath, field.name, field.typeName);
     fieldReferenceLensCount += 1;
-    codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+    const fieldRange = toVscodeRange(runtime.runtimeVscode, field.range);
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: fieldReferences.length }),
       command: 'unityPlus.showUnityEventReferenceLocations',
       arguments: [{
@@ -131,13 +140,13 @@ export function createCodeLensesFromIndex(
         symbolName: field.name,
         typeName: field.typeName,
         ...(options.embedReferences ? { eventReferences: fieldReferences } : {}),
-        position: field.range.start
+        position: fieldRange.start
       } satisfies EventReferenceLocationTarget]
     }));
 
     const fieldTargets = index.getFieldTargets(scriptPath, field.name, field.typeName);
     fieldTargetLensCount += 1;
-    codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
       command: 'unityPlus.showUnityEventReferenceLocations',
       arguments: [{
@@ -146,13 +155,13 @@ export function createCodeLensesFromIndex(
         symbolName: field.name,
         typeName: field.typeName,
         ...(options.embedReferences ? { eventReferences: fieldTargets } : {}),
-        position: field.range.start
+        position: fieldRange.start
       } satisfies EventReferenceLocationTarget]
     }));
   }
 
   if (options.includeZeroSummaryLenses) {
-    const anchorRange = findCodeLensStatusAnchorRange(runtime.runtimeVscode, document);
+    const anchorRange = await findCodeLensStatusAnchorRange(runtime, document);
     const position = anchorRange.start;
 
     if (serializedInstanceLensCount === 0) {
@@ -175,9 +184,9 @@ export function createCodeLensesFromIndex(
 
 /** Chooses the single C# type that should receive path-based serialized instance counts. */
 function findSerializedInstanceAnchorType(
-  types: readonly CSharpTypeSnapshot[],
+  types: readonly CSharpTypeSymbolSnapshot[],
   scriptPath: string
-): CSharpTypeSnapshot | undefined {
+): CSharpTypeSymbolSnapshot | undefined {
   if (types.length <= 1) {
     return types[0];
   }
@@ -185,6 +194,14 @@ function findSerializedInstanceAnchorType(
   const fileName = scriptPath.split(/[\\/]/).pop() ?? '';
   const typeNameFromFile = fileName.replace(/\.cs$/i, '').toLowerCase();
   return types.find(type => type.name.toLowerCase() === typeNameFromFile) ?? types[0];
+}
+
+/** Converts language-service ranges back into VS Code ranges for CodeLens rendering. */
+function toVscodeRange(runtimeVscode: typeof vscode, range: { start: { line: number; character: number }; end: { line: number; character: number } }): vscode.Range {
+  return new runtimeVscode.Range(
+    new runtimeVscode.Position(range.start.line, range.start.character),
+    new runtimeVscode.Position(range.end.line, range.end.character)
+  );
 }
 
 /** Filters type-only fallback instances while keeping path hits on the selected anchor type. */

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import type * as vscode from 'vscode';
 import { UnityPlusLogger } from '../../unity/logger';
+import { createVscodeCSharpLanguageService } from '../../unity/csharpLanguageService';
 import { findDefaultAssetFiles, findDefaultAssetFilesContainingText, findDefaultCSharpFiles, watchUnitySerializedAssetFiles } from './assetDiscovery';
 import { formatDiagnostics } from './diagnostics';
 import { createEventReferenceIndexController } from './indexController';
@@ -55,6 +56,7 @@ export function registerEventReferenceFeature(
       getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion,
       resolveCSharpType: options.resolveCSharpType,
       buildCSharpTypeIndex: options.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex,
+      csharpLanguageService: options.csharpLanguageService ?? createVscodeCSharpLanguageService(runtimeVscode),
       scanStatus
     };
     indexController = createEventReferenceIndexController(featureRuntime);

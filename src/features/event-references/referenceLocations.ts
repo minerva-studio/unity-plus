@@ -1,5 +1,4 @@
 import type * as vscode from 'vscode';
-import { findCSharpTargetMethodPosition } from './csharpSource';
 import type { UnityEventReference, UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
 import type { EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
 import { isUnityBuiltInTargetTypeName } from './targetTypes';
@@ -80,15 +79,13 @@ async function createTargetMethodLocations(
 
     const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
     try {
-      const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
-      const position = findCSharpTargetMethodPosition(
-        runtime.runtimeVscode,
-        content,
+      const position = await runtime.csharpLanguageService?.findTargetMethodPosition(
+        uri,
         reference.targetTypeName,
         reference.methodName
       );
       if (position) {
-        appendUniqueLocation(locations, seenLocations, new runtime.runtimeVscode.Location(uri, position));
+        appendUniqueLocation(locations, seenLocations, new runtime.runtimeVscode.Location(uri, toVscodePosition(runtime.runtimeVscode, position)));
       }
     } catch {
       // Missing or unreadable scripts cannot provide target locations, but other targets may still resolve.
@@ -145,6 +142,11 @@ function toSerializedInstanceLocation(
 ): vscode.Location {
   const position = new runtimeVscode.Position(reference.line, reference.character);
   return new runtimeVscode.Location(toWorkspaceUri(runtimeVscode, root, reference.assetPath), position);
+}
+
+/** Converts language-service positions back into VS Code positions for peek locations. */
+function toVscodePosition(runtimeVscode: typeof vscode, position: { line: number; character: number }): vscode.Position {
+  return new runtimeVscode.Position(position.line, position.character);
 }
 
 /** Shows references or serialized instances for a CodeLens command target. */

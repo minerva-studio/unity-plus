@@ -2,11 +2,11 @@ import type { UnityEventReferenceBuildContext } from './model';
 import type { CSharpTypeIndex, EventReferenceRuntime } from './runtime';
 import { backgroundScanYieldEvery, defaultAssetScanConcurrency, progressReportInterval, scanYieldEvery } from './runtime';
 import { getBackgroundScanConcurrency } from './settings';
-import { findNearestNamespace, isCancellationRequested, runWithConcurrency, shortTypeName, throwIfCancellationRequested, toProjectPath, UnityEventReferenceScanCanceledError } from './utils';
+import { isCancellationRequested, runWithConcurrency, shortTypeName, throwIfCancellationRequested, toProjectPath, UnityEventReferenceScanCanceledError } from './utils';
 
-/** Builds a fallback C# type-name index from project source files. */
+/** Builds a fallback C# type-name index from C# language-server symbols. */
 export async function buildDefaultCSharpTypeIndex(
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
   context: UnityEventReferenceBuildContext = { mode: 'background' }
 ): Promise<CSharpTypeIndex> {
   throwIfCancellationRequested(context.cancellationToken);
@@ -19,17 +19,17 @@ export async function buildDefaultCSharpTypeIndex(
     throwIfCancellationRequested(context.cancellationToken);
 
     try {
-      const content = await runtime.readTextFile(file, runtime.runtimeVscode);
+      const types = await runtime.csharpLanguageService?.findTypes(file) ?? [];
       throwIfCancellationRequested(context.cancellationToken);
 
       const path = toProjectPath(runtime.metadataIndex.root, file);
-      matches.push(...findCSharpTypeDeclarations(content).map(type => ({ ...type, path })));
+      matches.push(...types.map(type => ({ fullName: type.fullName, shortName: type.name, path })));
     } catch {
       if (isCancellationRequested(context.cancellationToken)) {
         throw new UnityEventReferenceScanCanceledError();
       }
 
-      // Source scan is a fallback resolver; unreadable files simply cannot contribute candidates.
+      // Language-server symbol failures simply cannot contribute fallback type candidates.
     }
   }, context.mode === 'background' ? getBackgroundScanConcurrency(runtime.runtimeVscode) : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
@@ -81,24 +81,4 @@ function setUniquePath(map: Map<string, string | undefined>, key: string, path: 
   if (map.get(key) !== path) {
     map.set(key, undefined);
   }
-}
-
-/** Finds top-level C# type declarations with their nearest namespace context. */
-function findCSharpTypeDeclarations(content: string): Array<{ fullName: string; shortName: string }> {
-  const declarations: Array<{ fullName: string; shortName: string }> = [];
-  const namespaceMatches = [...content.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
-  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(content)?.[1];
-  const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = typePattern.exec(content))) {
-    const shortName = match[1];
-    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
-    declarations.push({
-      shortName,
-      fullName: namespaceName ? `${namespaceName}.${shortName}` : shortName
-    });
-  }
-
-  return declarations;
 }

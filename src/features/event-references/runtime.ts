@@ -2,6 +2,7 @@ import type * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
 import type { LazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityTextSearchFileResult } from '../../unity/textSearch';
+import type { CSharpSymbolLanguageService } from '../../unity/csharpLanguageService';
 import type {
   UnityEventReference,
   UnityEventReferenceBuildContext,
@@ -23,6 +24,7 @@ export interface EventReferenceFeatureOptions {
   getCacheVersion?: () => number;
   resolveCSharpType?: CSharpTypeResolver;
   buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
+  csharpLanguageService?: CSharpSymbolLanguageService;
 }
 
 export interface EventReferenceRuntime {
@@ -37,6 +39,7 @@ export interface EventReferenceRuntime {
   getCacheVersion: () => number;
   resolveCSharpType?: CSharpTypeResolver;
   buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
+  csharpLanguageService?: CSharpSymbolLanguageService;
   scanStatus?: UnityEventReferenceScanStatusReporter;
 }
 
@@ -49,7 +52,7 @@ export type UnityAssetTextSearch = (
 
 export type CSharpTypeResolver = (
   fullTypeName: string,
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
   context?: UnityEventReferenceBuildContext
 ) => Promise<string | undefined>;
 
@@ -59,7 +62,7 @@ export interface CSharpTypeIndex {
 }
 
 export type CSharpTypeIndexBuilder = (
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
   context?: UnityEventReferenceBuildContext
 ) => Promise<CSharpTypeIndex>;
 

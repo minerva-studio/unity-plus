@@ -7,6 +7,7 @@ import {
 } from '../features/event-references/eventReferences';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 import { createLazyUnityMetadataIndex, UnityMetadataIndex } from '../unity/metadataIndex';
+import type { CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../unity/csharpLanguageService';
 
 const gateGuid = '11111111111111111111111111111111';
 const gateScriptPath = 'Assets/Gate.cs';
@@ -1916,7 +1917,7 @@ describe('eventReferences', () => {
     assert.strictEqual(references[0].scriptPath, gateScriptPath);
   });
 
-  it('falls back to C# source scanning when workspace symbols do not resolve a target type', async () => {
+  it('falls back to C# language server symbols when workspace symbols do not resolve a target type', async () => {
     const runtime = createEventReferenceRuntime();
     let csharpFileScans = 0;
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -1936,7 +1937,17 @@ describe('eventReferences', () => {
       },
       readTextFile: async uri => uri.fsPath.endsWith('.cs')
         ? ['namespace Amlos.Fixtures;', 'public class Gate', '{', '  public void Interact() {}', '}'].join('\n')
-        : createInstanceTargetYaml(2)
+        : createInstanceTargetYaml(2),
+      csharpLanguageService: createFakeCSharpSymbolLanguageService({
+        '/Project/Assets/Scripts/Gate.cs': [{
+          name: 'Gate',
+          fullName: 'Amlos.Fixtures.Gate',
+          range: {
+            start: { line: 1, character: 13 },
+            end: { line: 1, character: 17 }
+          }
+        }]
+      })
     }, createMetadataIndex());
 
     assert.strictEqual(index.getReferenceCount('Assets/Scripts/Gate.cs', 'Interact'), 1);
@@ -2157,6 +2168,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
   const referenceCommands: Array<{ uri: vscode.Uri; position: vscode.Position; locations: vscode.Location[] }> = [];
   const codeLensChangeResolvers: Array<() => void> = [];
   const fileSystemWatchers: FakeFileSystemWatcher[] = [];
+  const textDocuments = new Map<string, vscode.TextDocument>();
   let codeLensChangeCount = 0;
   const runtime = {
     commands: {
@@ -2164,9 +2176,16 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
         commands.set(command, callback);
         return createDisposable();
       },
-      executeCommand: async (command: string, uri: vscode.Uri, position: vscode.Position, locations: vscode.Location[]) => {
+      executeCommand: async (command: string, ...args: unknown[]) => {
         if (command === 'editor.action.showReferences') {
+          const [uri, position, locations] = args as [vscode.Uri, vscode.Position, vscode.Location[]];
           referenceCommands.push({ uri, position, locations });
+        }
+
+        if (command === 'vscode.executeDocumentSymbolProvider') {
+          const [uri] = args as [vscode.Uri];
+          const document = textDocuments.get(uri.fsPath);
+          return document ? createFakeDocumentSymbols(runtime as unknown as typeof vscode, document) : [];
         }
       }
     },
@@ -2238,6 +2257,15 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
     StatusBarAlignment: {
       Left: 1
     },
+    SymbolKind: {
+      Class: 4,
+      Method: 5,
+      Field: 7,
+      Interface: 10,
+      Namespace: 3,
+      Struct: 22,
+      Enum: 9
+    },
     ProgressLocation: {
       Notification: 15
     },
@@ -2270,6 +2298,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       await Promise.resolve(commands.get(command)?.(...args));
     },
     async provideCodeLenses(document: vscode.TextDocument, token: vscode.CancellationToken = new FakeCancellationToken() as unknown as vscode.CancellationToken): Promise<vscode.CodeLens[]> {
+      textDocuments.set(document.uri.fsPath, document);
       const results = await Promise.all(codeLensProviders.map(async provider =>
         await provider.provideCodeLenses(document, token) ?? []
       ));
@@ -2280,6 +2309,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       position: vscode.Position,
       token: vscode.CancellationToken = new FakeCancellationToken() as unknown as vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
+      textDocuments.set(document.uri.fsPath, document);
       return await hoverProviders[0]?.provideHover(document, position, token) ?? undefined;
     },
     fireSerializedAssetChange(uri: vscode.Uri): void {
@@ -2782,6 +2812,127 @@ function createTextDocument(fsPath: string, text: string): vscode.TextDocument {
   } as vscode.TextDocument;
 }
 
+/** Builds language-server-like C# document symbols for UnityEvent feature tests. */
+function createFakeDocumentSymbols(runtimeVscode: typeof vscode, document: vscode.TextDocument): vscode.DocumentSymbol[] {
+  const text = document.getText();
+  const namespaceMatch = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:;|\{)/m.exec(text);
+  const namespaceName = namespaceMatch?.[1];
+  const classSymbols = findFakeClassSymbols(runtimeVscode, document, text);
+
+  if (!namespaceName) {
+    return classSymbols;
+  }
+
+  const namespaceOffset = namespaceMatch?.index ?? 0;
+  return [
+    new FakeDocumentSymbol(
+      namespaceName,
+      '',
+      runtimeVscode.SymbolKind.Namespace,
+      createRangeFromOffsets(runtimeVscode, document, namespaceOffset, namespaceOffset + namespaceName.length),
+      createRangeFromOffsets(runtimeVscode, document, namespaceOffset, namespaceOffset + namespaceName.length),
+      classSymbols
+    ) as unknown as vscode.DocumentSymbol
+  ];
+}
+
+/** Finds top-level fake class symbols and attaches member symbols from their bodies. */
+function findFakeClassSymbols(runtimeVscode: typeof vscode, document: vscode.TextDocument, text: string): vscode.DocumentSymbol[] {
+  const symbols: vscode.DocumentSymbol[] = [];
+  const classPattern = /\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = classPattern.exec(text))) {
+    const name = match[1];
+    const nameStart = match.index + match[0].lastIndexOf(name);
+    const bodyStart = text.indexOf('{', classPattern.lastIndex);
+    const bodyEnd = bodyStart === -1 ? text.length : findFakeMatchingBrace(text, bodyStart) ?? text.length;
+    const children = findFakeMemberSymbols(runtimeVscode, document, text, bodyStart, bodyEnd);
+    symbols.push(new FakeDocumentSymbol(
+      name,
+      '',
+      runtimeVscode.SymbolKind.Class,
+      createRangeFromOffsets(runtimeVscode, document, nameStart, nameStart + name.length),
+      createRangeFromOffsets(runtimeVscode, document, nameStart, nameStart + name.length),
+      children
+    ) as unknown as vscode.DocumentSymbol);
+  }
+
+  return symbols;
+}
+
+/** Finds fake method and UnityEvent field symbols inside a class body. */
+function findFakeMemberSymbols(
+  runtimeVscode: typeof vscode,
+  document: vscode.TextDocument,
+  text: string,
+  bodyStart: number,
+  bodyEnd: number
+): vscode.DocumentSymbol[] {
+  const symbols: vscode.DocumentSymbol[] = [];
+  const body = text.slice(bodyStart, bodyEnd);
+  const methodPattern = /\b(?:void|bool|int|string|float|double|Task|IEnumerator)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+  const fieldPattern = /\b((?:UnityEngine\.Events\.)?UnityEvent(?:<[^;\n]+>)?)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = methodPattern.exec(body))) {
+    const name = match[1];
+    const nameStart = bodyStart + match.index + match[0].lastIndexOf(name);
+    symbols.push(new FakeDocumentSymbol(
+      name,
+      '',
+      runtimeVscode.SymbolKind.Method,
+      createRangeFromOffsets(runtimeVscode, document, nameStart, nameStart + name.length),
+      createRangeFromOffsets(runtimeVscode, document, nameStart, nameStart + name.length)
+    ) as unknown as vscode.DocumentSymbol);
+  }
+
+  while ((match = fieldPattern.exec(body))) {
+    const detail = match[1];
+    const name = match[2];
+    const nameStart = bodyStart + match.index + match[0].lastIndexOf(name);
+    symbols.push(new FakeDocumentSymbol(
+      name,
+      detail,
+      runtimeVscode.SymbolKind.Field,
+      createRangeFromOffsets(runtimeVscode, document, nameStart, nameStart + name.length),
+      createRangeFromOffsets(runtimeVscode, document, nameStart, nameStart + name.length)
+    ) as unknown as vscode.DocumentSymbol);
+  }
+
+  return symbols.sort((left, right) =>
+    left.selectionRange.start.line - right.selectionRange.start.line ||
+    left.selectionRange.start.character - right.selectionRange.start.character
+  );
+}
+
+/** Creates a VS Code range from source offsets in the fake text document. */
+function createRangeFromOffsets(
+  runtimeVscode: typeof vscode,
+  document: vscode.TextDocument,
+  start: number,
+  end: number
+): vscode.Range {
+  return new runtimeVscode.Range(document.positionAt(start), document.positionAt(end));
+}
+
+/** Finds the matching class-body brace for fake symbol nesting. */
+function findFakeMatchingBrace(text: string, openBrace: number): number | undefined {
+  let depth = 0;
+  for (let index = openBrace; index < text.length; index += 1) {
+    if (text[index] === '{') {
+      depth += 1;
+    } else if (text[index] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function createUri(fsPath: string): vscode.Uri {
   return {
     fsPath,
@@ -2793,6 +2944,39 @@ function localize(message: string, args?: Record<string, string | number | boole
   return Object.entries(args ?? {}).reduce((current, [key, value]) =>
     current.replace(new RegExp(`\\{${key}\\}`, 'g'), String(value)), message
   );
+}
+
+/** Creates a narrow C# symbol service mock for tests that call index builders directly. */
+function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CSharpTypeSymbolSnapshot[]>): CSharpSymbolLanguageService {
+  return {
+    async getPrimaryTopLevelType() {
+      return undefined;
+    },
+    async findMethods() {
+      return [];
+    },
+    async findTypes(uri) {
+      return typesByPath[uri.fsPath] ?? [];
+    },
+    async findUnityEventFields() {
+      return [];
+    },
+    async findMethodAtPosition() {
+      return undefined;
+    },
+    async findUnityEventFieldAtPosition() {
+      return undefined;
+    },
+    async findTargetMethodPosition() {
+      return undefined;
+    },
+    async findReferences() {
+      return [];
+    },
+    async buildRenameEdit() {
+      return undefined;
+    }
+  };
 }
 
 /** Asserts the visible CodeLens feedback shown while Unity references are still scanning. */
@@ -2835,6 +3019,18 @@ class FakeCodeLens {
   constructor(
     public readonly range: vscode.Range,
     public readonly command?: vscode.Command
+  ) {}
+}
+
+/** Represents the subset of VS Code DocumentSymbol used by the fake C# language server. */
+class FakeDocumentSymbol {
+  constructor(
+    public readonly name: string,
+    public readonly detail: string,
+    public readonly kind: vscode.SymbolKind,
+    public readonly range: vscode.Range,
+    public readonly selectionRange: vscode.Range,
+    public readonly children: vscode.DocumentSymbol[] = []
   ) {}
 }
 

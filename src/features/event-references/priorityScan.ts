@@ -1,14 +1,14 @@
 import type * as vscode from 'vscode';
+import type { CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
 import { parseUnityMetaGuid, type UnityMetadataIndex } from '../../unity/metadataIndex';
 import { getAssetKind } from './assetDiscovery';
-import { findCSharpTypes } from './csharpSource';
 import { createEmptyDiagnostics, mergeDiagnostics } from './diagnostics';
 import type { UnityEventReference, UnitySerializedInstanceLocation } from './model';
 import { parseUnityEventReferencesWithDiagnostics } from './parser';
 import { createReferenceIndex, pathReferenceKey, typeKey } from './referenceIndex';
 import type { EventReferenceRuntime, PriorityScanResult } from './runtime';
 import { findCurrentScriptCandidateAssetFiles } from './scanner';
-import { errorMessage, findNearestNamespace, isCancellationRequested, shortTypeName, throwIfCancellationRequested, toProjectPath, toWorkspaceUri, yieldToEventLoop, UnityEventReferenceScanCanceledError } from './utils';
+import { errorMessage, isCancellationRequested, shortTypeName, throwIfCancellationRequested, toProjectPath, toWorkspaceUri, yieldToEventLoop, UnityEventReferenceScanCanceledError } from './utils';
 
 export async function buildPriorityReferenceIndex(
   runtime: EventReferenceRuntime,
@@ -62,7 +62,8 @@ export async function buildPriorityReferenceIndex(
   const candidateUris = discovery.files;
   const references: UnityEventReference[] = [];
   const serializedInstances: UnitySerializedInstanceLocation[] = [];
-  const resolveCSharpType = createCurrentDocumentTypeResolver(runtime, document, scriptPath, token);
+  const currentTypes = await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
+  const resolveCSharpType = createCurrentDocumentTypeResolver(currentTypes, scriptPath, token);
   const metadata = createPriorityMetadataIndex(scriptPath, scriptGuid, currentScriptMetadata.metadata);
 
   diagnostics.discoveredAssetCount = candidateUris.length;
@@ -131,10 +132,10 @@ export async function buildPriorityReferenceIndex(
     const locations = parsed.serializedInstances.filter(location =>
       location.scriptPath
         ? pathReferenceKey(location.scriptPath) === pathReferenceKey(scriptPath)
-        : location.scriptTypeName !== undefined && isCurrentDocumentType(document, location.scriptTypeName)
+        : location.scriptTypeName !== undefined && isCurrentDocumentType(currentTypes, location.scriptTypeName)
     );
     const currentReferences = parsed.references.filter(reference =>
-      isCurrentScriptReference(scriptPath, document, reference)
+      isCurrentScriptReference(scriptPath, currentTypes, reference)
     );
 
     mergeDiagnostics(diagnostics, parsed.diagnostics);
@@ -250,13 +251,10 @@ export function createEmptyPriorityScanResult(
 
 /** Resolves editor-class identifiers only against the current C# file for fast priority scans. */
 function createCurrentDocumentTypeResolver(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument,
+  currentTypes: readonly CSharpTypeSymbolSnapshot[],
   scriptPath: string,
   token: vscode.CancellationToken
 ): (fullTypeName: string) => Promise<string | undefined> {
-  const currentTypes = findCSharpTypes(runtime.runtimeVscode, document);
-
   return async fullTypeName => {
     throwIfCancellationRequested(token);
 
@@ -274,30 +272,19 @@ function createCurrentDocumentTypeResolver(
 /** Checks whether a Unity YAML reference belongs to the current script by path or current C# type name. */
 function isCurrentScriptReference(
   scriptPath: string,
-  document: vscode.TextDocument,
+  currentTypes: readonly CSharpTypeSymbolSnapshot[],
   reference: UnityEventReference
 ): boolean {
   return pathReferenceKey(reference.scriptPath ?? '') === pathReferenceKey(scriptPath) ||
     pathReferenceKey(reference.eventScriptPath ?? '') === pathReferenceKey(scriptPath) ||
-    (!!reference.scriptTypeName && isCurrentDocumentType(document, reference.scriptTypeName)) ||
-    (!!reference.eventOwnerTypeName && isCurrentDocumentType(document, reference.eventOwnerTypeName));
+    (!!reference.scriptTypeName && isCurrentDocumentType(currentTypes, reference.scriptTypeName)) ||
+    (!!reference.eventOwnerTypeName && isCurrentDocumentType(currentTypes, reference.eventOwnerTypeName));
 }
 
-/** Checks whether a full type name resolves to any type declared in the current C# document. */
-function isCurrentDocumentType(document: vscode.TextDocument, typeName: string): boolean {
-  const text = document.getText();
-  const namespaceMatches = [...text.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
-  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(text)?.[1];
-  const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = typePattern.exec(text))) {
-    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
-    const fullName = namespaceName ? `${namespaceName}.${match[1]}` : match[1];
-    if (typeKey(fullName) === typeKey(typeName)) {
-      return true;
-    }
-  }
-
-  return false;
+/** Checks whether a full type name resolves to any language-server type in the current C# document. */
+function isCurrentDocumentType(currentTypes: readonly CSharpTypeSymbolSnapshot[], typeName: string): boolean {
+  return currentTypes.some(type =>
+    typeKey(type.fullName) === typeKey(typeName) ||
+    typeKey(type.name) === typeKey(shortTypeName(typeName))
+  );
 }
