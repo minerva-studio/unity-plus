@@ -193,6 +193,65 @@ describe('activation', () => {
     assert.strictEqual(hideMetaFilesCalls, 2);
     assert.strictEqual(packageChecks, 2);
   });
+
+  it('replaces workspace-scoped feature registrations when a rescan finds a different Unity root', async () => {
+    const firstRoot = createUri('/ProjectA');
+    const secondRoot = createUri('/ProjectB');
+    const commands = new Map<string, (...args: unknown[]) => unknown>();
+    const disposedMetadataRoots: string[] = [];
+    const projectSyncRoots: Array<string | undefined> = [];
+    const eventReferenceRoots: Array<string | undefined> = [];
+    let detectCalls = 0;
+    let secondRootRebuilds = 0;
+
+    await activateUnityPlus(createContext(), {
+      workspaceFolders: [],
+      registerCommand: (command, callback) => {
+        commands.set(command, callback);
+        return createDisposable();
+      }
+    }, {
+      logger: createTestLogger(),
+      detectUnityWorkspace: async () => {
+        detectCalls += 1;
+        return {
+          isUnityProject: true,
+          root: detectCalls === 1 ? firstRoot : secondRoot
+        };
+      },
+      createLazyMetadataIndex: options => createLazyIndex(options.root, {
+        rebuild: async () => {
+          if (options.root === secondRoot) {
+            secondRootRebuilds += 1;
+          }
+
+          return createMetadataIndex();
+        },
+        dispose: () => {
+          disposedMetadataRoots.push(options.root.fsPath);
+        }
+      }),
+      registerRenameFeature: () => createDisposable(),
+      registerProjectSyncFeature: (_logger, options) => {
+        projectSyncRoots.push(options?.root?.fsPath);
+        return createDisposable();
+      },
+      registerEventReferenceFeature: (_logger, options) => {
+        eventReferenceRoots.push(options?.metadataIndex?.root.fsPath);
+        return createDisposable();
+      },
+      registerMetaFilesFeature: () => createDisposable(),
+      hideMetaFilesInExplorerIfEnabled: async () => undefined,
+      checkUnityVisualStudioEditorPackage: async () => true
+    });
+
+    await Promise.resolve(commands.get('unityPlus.rescanUnityProject')?.());
+
+    assert.deepStrictEqual(projectSyncRoots, ['/ProjectA', '/ProjectB']);
+    assert.deepStrictEqual(eventReferenceRoots, ['/ProjectA', '/ProjectB']);
+    assert.deepStrictEqual(disposedMetadataRoots, ['/ProjectA']);
+    assert.strictEqual(secondRootRebuilds, 1);
+  });
 });
 
 function createContext(): UnityPlusActivationContext {
@@ -206,14 +265,14 @@ function createContext(): UnityPlusActivationContext {
 
 function createLazyIndex(
   root: vscode.Uri,
-  overrides: Partial<Pick<LazyUnityMetadataIndex, 'getOrBuild' | 'rebuild' | 'isBuilt'>> = {}
+  overrides: Partial<Pick<LazyUnityMetadataIndex, 'getOrBuild' | 'rebuild' | 'isBuilt' | 'dispose'>> = {}
 ): LazyUnityMetadataIndex {
   return {
     root,
     getOrBuild: overrides.getOrBuild ?? (async () => createMetadataIndex()),
     rebuild: overrides.rebuild ?? (async () => createMetadataIndex()),
     isBuilt: overrides.isBuilt ?? (() => false),
-    dispose: () => undefined
+    dispose: overrides.dispose ?? (() => undefined)
   };
 }
 

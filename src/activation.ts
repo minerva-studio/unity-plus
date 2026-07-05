@@ -30,6 +30,11 @@ export interface UnityPlusActivationDependencies {
   checkUnityVisualStudioEditorPackage(root: vscode.Uri): Promise<boolean>;
 }
 
+interface UnityPlusWorkspaceSession extends vscode.Disposable {
+  apply(workspace: UnityWorkspaceInfo, reason: 'initial' | 'rescan'): Promise<void>;
+  getCacheVersion(): number;
+}
+
 export async function activateUnityPlus(
   context: UnityPlusActivationContext,
   runtime: UnityPlusActivationRuntime,
@@ -38,56 +43,117 @@ export async function activateUnityPlus(
   const logger = dependencies.logger;
   context.subscriptions.push(logger);
 
+  const session = createUnityPlusWorkspaceSession(dependencies);
+  context.subscriptions.push(session);
+
   const unityWorkspace = await dependencies.detectUnityWorkspace(runtime.workspaceFolders ?? []);
   logWorkspaceDetection(logger, unityWorkspace, 'detected');
-
-  const metadataIndex = unityWorkspace.root
-    ? dependencies.createLazyMetadataIndex({
-      root: unityWorkspace.root,
-      logger
-    })
-    : undefined;
-  let eventReferenceCacheVersion = 0;
-
-  if (metadataIndex) {
-    context.subscriptions.push(metadataIndex);
-  }
-
-  if (unityWorkspace.root) {
-    await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
-    await dependencies.checkUnityVisualStudioEditorPackage(unityWorkspace.root);
-  }
+  await session.apply(unityWorkspace, 'initial');
 
   context.subscriptions.push(
-    dependencies.registerRenameFeature(logger, {
-      isUnityWorkspace: unityWorkspace.root !== undefined
-    }),
-    dependencies.registerProjectSyncFeature(logger, {
-      root: unityWorkspace.root
-    }),
-    dependencies.registerEventReferenceFeature(logger, {
-      metadataIndex,
-      getCacheVersion: () => eventReferenceCacheVersion
-    }),
-    dependencies.registerMetaFilesFeature(logger, {
-      root: unityWorkspace.root
-    }),
     runtime.registerCommand('unityPlus.rescanUnityProject', async () => {
       const refreshed = await dependencies.detectUnityWorkspace(runtime.workspaceFolders ?? []);
       logWorkspaceDetection(logger, refreshed, 'rescan found');
-
-      if (refreshed.root) {
-        await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
-        await dependencies.checkUnityVisualStudioEditorPackage(refreshed.root);
-      }
-
-      if (metadataIndex && refreshed.root && sameWorkspaceRoot(metadataIndex.root, refreshed.root)) {
-        await metadataIndex.rebuild();
-        eventReferenceCacheVersion += 1;
-        logger.info('Unity metadata index rebuilt after project rescan.');
-      }
+      await session.apply(refreshed, 'rescan');
     })
   );
+}
+
+function createUnityPlusWorkspaceSession(dependencies: UnityPlusActivationDependencies): UnityPlusWorkspaceSession {
+  const logger = dependencies.logger;
+  let metadataIndex: LazyUnityMetadataIndex | undefined;
+  let featureRegistration: vscode.Disposable | undefined;
+  let eventReferenceCacheVersion = 0;
+
+  return {
+    async apply(workspace, reason) {
+      if (workspace.root) {
+        await dependencies.hideMetaFilesInExplorerIfEnabled(logger);
+        await dependencies.checkUnityVisualStudioEditorPackage(workspace.root);
+      }
+
+      if (reason === 'rescan' && metadataIndex && workspace.root && sameWorkspaceRoot(metadataIndex.root, workspace.root)) {
+        await rebuildMetadataIndex(metadataIndex, logger);
+        eventReferenceCacheVersion += 1;
+        return;
+      }
+
+      if (!sameOptionalWorkspaceRoot(metadataIndex?.root, workspace.root)) {
+        disposeCurrentRegistration();
+        metadataIndex?.dispose();
+        metadataIndex = workspace.root
+          ? dependencies.createLazyMetadataIndex({
+            root: workspace.root,
+            logger
+          })
+          : undefined;
+        if (reason === 'rescan') {
+          eventReferenceCacheVersion += 1;
+        }
+        featureRegistration = registerWorkspaceFeatures(dependencies, metadataIndex, workspace, () => eventReferenceCacheVersion);
+
+        if (reason === 'rescan' && metadataIndex) {
+          await rebuildMetadataIndex(metadataIndex, logger);
+        }
+      } else if (!featureRegistration) {
+        featureRegistration = registerWorkspaceFeatures(dependencies, metadataIndex, workspace, () => eventReferenceCacheVersion);
+      }
+    },
+    getCacheVersion: () => eventReferenceCacheVersion,
+    dispose() {
+      disposeCurrentRegistration();
+      metadataIndex?.dispose();
+    }
+  };
+
+  function disposeCurrentRegistration(): void {
+    featureRegistration?.dispose();
+    featureRegistration = undefined;
+  }
+}
+
+function registerWorkspaceFeatures(
+  dependencies: UnityPlusActivationDependencies,
+  metadataIndex: LazyUnityMetadataIndex | undefined,
+  workspace: UnityWorkspaceInfo,
+  getCacheVersion: () => number
+): vscode.Disposable {
+  const logger = dependencies.logger;
+  const disposables = [
+    dependencies.registerRenameFeature(logger, {
+      isUnityWorkspace: workspace.root !== undefined
+    }),
+    dependencies.registerProjectSyncFeature(logger, {
+      root: workspace.root
+    }),
+    dependencies.registerEventReferenceFeature(logger, {
+      metadataIndex,
+      getCacheVersion
+    }),
+    dependencies.registerMetaFilesFeature(logger, {
+      root: workspace.root
+    })
+  ];
+
+  return {
+    dispose: () => {
+      for (const disposable of disposables) {
+        disposable.dispose();
+      }
+    }
+  };
+}
+
+async function rebuildMetadataIndex(metadataIndex: LazyUnityMetadataIndex, logger: UnityPlusLogger): Promise<void> {
+  const rebuiltIndex = await metadataIndex.rebuild();
+  const statistics = rebuiltIndex.getStatistics?.();
+
+  if (!statistics) {
+    logger.info('Unity metadata index rebuilt after project rescan.');
+    return;
+  }
+
+  logger.info(`Unity metadata index rebuilt after project rescan: found=${statistics.foundMetaFileCount}, parsed GUIDs=${statistics.parsedGuidCount}, malformed=${statistics.malformedMetaFileCount}, read errors=${statistics.readErrorCount}.`);
 }
 
 function logWorkspaceDetection(
@@ -106,5 +172,17 @@ function logWorkspaceDetection(
 }
 
 function sameWorkspaceRoot(first: vscode.Uri, second: vscode.Uri): boolean {
-  return first.fsPath === second.fsPath;
+  return normalizeWorkspaceRoot(first.fsPath) === normalizeWorkspaceRoot(second.fsPath);
+}
+
+function sameOptionalWorkspaceRoot(first: vscode.Uri | undefined, second: vscode.Uri | undefined): boolean {
+  if (!first || !second) {
+    return first === second;
+  }
+
+  return sameWorkspaceRoot(first, second);
+}
+
+function normalizeWorkspaceRoot(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }

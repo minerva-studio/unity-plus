@@ -585,6 +585,59 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
   });
 
+  it('invalidates ready CodeLens results when serialized assets change', async () => {
+    const runtime = createEventReferenceRuntime();
+    const prefabUri = createUri('/Project/Assets/Gate.prefab');
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'public class Gate',
+      '{',
+      '  public bool CanInteract()',
+      '  {',
+      '    return true;',
+      '  }',
+      '}'
+    ].join('\n'));
+    let prefabContent = createPrefabYaml(2);
+    let scanCount = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => {
+        scanCount += 1;
+        return [prefabUri];
+      },
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : prefabContent,
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+    await runtime.waitForCodeLensChange();
+    assert.strictEqual((await runtime.provideCodeLenses(csharpDocument)).some(lens =>
+      lens.command?.title === '1 UnityEvent references'
+    ), true);
+
+    const invalidationChangeCount = runtime.codeLensChangeCount;
+    prefabContent = createSerializedScriptInstanceYaml(gateGuid);
+    runtime.fireSerializedAssetChange(prefabUri);
+    await runtime.waitForCodeLensChangeAfter(invalidationChangeCount);
+
+    const rebuildChangeCount = runtime.codeLensChangeCount;
+    await assertPendingCodeLenses(runtime, csharpDocument);
+    await runtime.waitForCodeLensChangeAfter(rebuildChangeCount);
+    const refreshedLenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(scanCount, 2);
+    assert.strictEqual(refreshedLenses.some(lens => lens.command?.title === '1 UnityEvent references'), false);
+    assert.strictEqual(refreshedLenses.some(lens => lens.command?.title === '1 Unity serialized instances'), true);
+  });
+
   it('shows and hides status bar progress for background index builds', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -2077,6 +2130,7 @@ interface EventReferenceRuntime {
   runCommand(command: string, ...args: unknown[]): Promise<void>;
   provideCodeLenses(document: vscode.TextDocument, token?: vscode.CancellationToken): Promise<vscode.CodeLens[]>;
   provideHover(document: vscode.TextDocument, position: vscode.Position, token?: vscode.CancellationToken): Promise<vscode.Hover | undefined>;
+  fireSerializedAssetChange(uri: vscode.Uri): void;
   waitForCodeLensChange(): Promise<void>;
   waitForCodeLensChangeAfter(count: number): Promise<void>;
 }
@@ -2102,6 +2156,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
   const progressTokens: FakeCancellationToken[] = [];
   const referenceCommands: Array<{ uri: vscode.Uri; position: vscode.Position; locations: vscode.Location[] }> = [];
   const codeLensChangeResolvers: Array<() => void> = [];
+  const fileSystemWatchers: FakeFileSystemWatcher[] = [];
   let codeLensChangeCount = 0;
   const runtime = {
     commands: {
@@ -2133,6 +2188,11 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       findFiles: async (pattern: unknown, exclude?: unknown) =>
         await options.findFiles?.(pattern, exclude) ?? [],
       findTextInFiles: options.findTextInFiles,
+      createFileSystemWatcher: () => {
+        const watcher = new FakeFileSystemWatcher();
+        fileSystemWatchers.push(watcher);
+        return watcher as unknown as vscode.FileSystemWatcher;
+      },
       getConfiguration: () => ({
         get: (key: string, defaultValue?: unknown) => Object.prototype.hasOwnProperty.call(configuration, key)
           ? configuration[key as keyof typeof configuration]
@@ -2221,6 +2281,11 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       token: vscode.CancellationToken = new FakeCancellationToken() as unknown as vscode.CancellationToken
     ): Promise<vscode.Hover | undefined> {
       return await hoverProviders[0]?.provideHover(document, position, token) ?? undefined;
+    },
+    fireSerializedAssetChange(uri: vscode.Uri): void {
+      for (const watcher of fileSystemWatchers) {
+        watcher.fireChange(uri);
+      }
     },
     async waitForCodeLensChange(): Promise<void> {
       if (codeLensChangeCount > 0) {
@@ -2794,6 +2859,45 @@ class FakeStatusBarItem {
   /** Records that the feature disposed the status bar item. */
   dispose(): void {
     this.disposeCount += 1;
+  }
+}
+
+/** Captures file watcher callbacks so tests can trigger serialized asset changes. */
+class FakeFileSystemWatcher {
+  private readonly createListeners: Array<(uri: vscode.Uri) => unknown> = [];
+  private readonly changeListeners: Array<(uri: vscode.Uri) => unknown> = [];
+  private readonly deleteListeners: Array<(uri: vscode.Uri) => unknown> = [];
+
+  /** Registers a create listener. */
+  onDidCreate(listener: (uri: vscode.Uri) => unknown): vscode.Disposable {
+    this.createListeners.push(listener);
+    return createDisposable();
+  }
+
+  /** Registers a change listener. */
+  onDidChange(listener: (uri: vscode.Uri) => unknown): vscode.Disposable {
+    this.changeListeners.push(listener);
+    return createDisposable();
+  }
+
+  /** Registers a delete listener. */
+  onDidDelete(listener: (uri: vscode.Uri) => unknown): vscode.Disposable {
+    this.deleteListeners.push(listener);
+    return createDisposable();
+  }
+
+  /** Fires the change callbacks used by cache invalidation tests. */
+  fireChange(uri: vscode.Uri): void {
+    for (const listener of this.changeListeners) {
+      listener(uri);
+    }
+  }
+
+  /** Disposes the watcher listeners. */
+  dispose(): void {
+    this.createListeners.length = 0;
+    this.changeListeners.length = 0;
+    this.deleteListeners.length = 0;
   }
 }
 

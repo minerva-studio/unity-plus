@@ -14,6 +14,16 @@ import {
   parseUnityYamlAsset
 } from '../../unity/unityYaml';
 import type { UnityYamlDocument, UnityYamlPersistentCall, UnityYamlSerializedScriptDocument } from '../../unity/unityYaml';
+import {
+  findCSharpMethods,
+  findCSharpTargetMethodPosition,
+  findCSharpTypes,
+  findMethodAtPosition,
+  findUnityEventFieldAtPosition,
+  findUnityEventFields,
+  type CSharpTypeSnapshot
+} from './csharpSource';
+import { createUnityEventReferenceScanStatus, type UnityEventReferenceScanStatusReporter } from './scanStatus';
 
 export type UnitySerializedAssetKind = 'prefab' | 'scene' | 'asset';
 
@@ -166,38 +176,6 @@ interface SerializedObjectScriptIdentity {
 
 type PersistentCallSnapshot = UnityYamlPersistentCall;
 
-interface CSharpMethodSnapshot {
-  name: string;
-  typeName?: string;
-  range: vscode.Range;
-}
-
-interface CSharpMethodDeclaration {
-  name: string;
-  nameStart: number;
-  nameEnd: number;
-}
-
-interface CSharpTypeBodyDeclaration {
-  shortName: string;
-  fullName: string;
-  bodyStart: number;
-  bodyEnd: number;
-}
-
-interface CSharpFieldSnapshot {
-  name: string;
-  typeName?: string;
-  range: vscode.Range;
-}
-
-interface CSharpTypeSnapshot {
-  name: string;
-  fullName: string;
-  range: vscode.Range;
-  offset: number;
-}
-
 interface EventReferenceLocationTarget {
   kind: 'method' | 'field' | 'fieldTarget' | 'serializedInstance';
   scriptPath: string;
@@ -226,31 +204,6 @@ export interface UnityEventReferenceBuildContext {
   cancellationToken?: vscode.CancellationToken;
   progress?: vscode.Progress<{ message?: string; increment?: number }>;
   scanStatus?: UnityEventReferenceScanStatusReporter;
-}
-
-interface UnityEventReferenceScanStatusReporter {
-  /** Shows the background scan status item with the first visible phase. */
-  start(phase: string, label?: string): void;
-  /** Updates the status item with bounded scan progress. */
-  update(status: UnityEventReferenceScanStatus): void;
-  /** Hides the status item and records the final scan result. */
-  finish(result: 'completed' | 'failed' | 'canceled', diagnostics?: UnityEventReferenceDiagnostics, status?: UnityEventReferenceScanStatus): void;
-  /** Releases the status item when the extension feature is disposed. */
-  dispose(): void;
-}
-
-interface UnityEventReferenceScanStatus {
-  phase: string;
-  label?: string;
-  scriptPath?: string;
-  scriptGuid?: string;
-  metadataGuidCount?: number;
-  candidateCount?: number;
-  scannedCount?: number;
-  totalCount?: number;
-  referenceCount?: number;
-  instanceCount?: number;
-  elapsedMilliseconds?: number;
 }
 
 interface PriorityScanState {
@@ -286,18 +239,12 @@ const defaultAssetScanConcurrency = 4;
 const scanYieldEvery = 4;
 const backgroundScanYieldEvery = 1;
 const backgroundBuildDebounceMilliseconds = 150;
-const scanStatusRetainMilliseconds = 8000;
 const progressReportInterval = 10;
 const eventReferenceCandidateTexts = ['m_Script', 'm_PersistentCalls', '.m_PersistentCalls.'];
 const serializedAssetSearchGlobs = ['Assets/**/*.{prefab,unity,asset}', 'Packages/**/*.{prefab,unity,asset}'];
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
 const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
-const csharpMethodNameCandidatePattern = /\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^;{}()[\]\n]*>)?\s*\(/g;
-const unityEventTokenPattern = /(?:UnityEngine\.Events\.)?UnityEvent\b/g;
-const identifierPattern = /[A-Za-z_][A-Za-z0-9_]*/y;
-const csharpMethodNameKeywordPattern = /^(?:if|for|foreach|while|switch|catch|using|lock|return|throw|yield|await|new|nameof|typeof|sizeof|default|checked|unchecked|fixed|base|this)$/;
-const csharpNonDeclarationPrefixKeywordPattern = /\b(?:if|for|foreach|while|switch|catch|using|lock|return|throw|yield|await|new)\b/;
 
 export function registerEventReferenceFeature(
   logger: UnityPlusLogger,
@@ -309,12 +256,13 @@ export function registerEventReferenceFeature(
   );
   const disposables: vscode.Disposable[] = [];
   let indexController: UnityEventReferenceIndexController | undefined;
+  let serializedAssetCacheVersion = 0;
 
   if (options.metadataIndex) {
     const useDefaultAssetSearch = !options.findAssetFiles &&
       !options.findAssetFilesContainingText &&
       !options.searchAssetFilesContainingText;
-    const scanStatus = createUnityEventReferenceScanStatus(runtimeVscode, logger);
+    const scanStatus = createUnityEventReferenceScanStatus(runtimeVscode, logger, formatDiagnostics);
     const featureRuntime: EventReferenceRuntime = {
       runtimeVscode,
       logger,
@@ -324,7 +272,7 @@ export function registerEventReferenceFeature(
       searchAssetFilesContainingText: options.searchAssetFilesContainingText ?? (useDefaultAssetSearch ? findDefaultAssetFilesContainingText : undefined),
       findCSharpFiles: options.findCSharpFiles ?? findDefaultCSharpFiles,
       readTextFile: options.readTextFile ?? readDefaultTextFile,
-      getCacheVersion: options.getCacheVersion ?? (() => 0),
+      getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion,
       resolveCSharpType: options.resolveCSharpType,
       buildCSharpTypeIndex: options.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex,
       scanStatus
@@ -334,6 +282,11 @@ export function registerEventReferenceFeature(
 
     disposables.push(
       scanStatus,
+      watchUnitySerializedAssetFiles(runtimeVscode, options.metadataIndex.root, uri => {
+        serializedAssetCacheVersion += 1;
+        logger.debug(`UnityEvent reference cache invalidated by serialized asset change: ${uri.fsPath}`);
+        indexController?.notifyCodeLensesChanged();
+      }),
       runtimeVscode.languages.registerCodeLensProvider({ language: 'csharp' }, provider),
       runtimeVscode.languages.registerHoverProvider({ language: 'csharp' }, provider),
       runtimeVscode.commands.registerCommand('unityPlus.showUnityEventReferenceLocations', async (target: EventReferenceLocationTarget) => {
@@ -628,8 +581,6 @@ async function parseUnityEventReferencesCore(
 
   const references: UnityEventReference[] = [];
   for (const [ownerFileId, calls] of callsByDocument) {
-    const owner = objects.get(ownerFileId);
-
     for (const call of calls) {
       if (call.callState === 0) {
         diagnostics.skippedDisabledCallCount += 1;
@@ -2056,304 +2007,6 @@ function createMissingWorkspaceMessage(runtimeVscode: typeof vscode): string {
   });
 }
 
-function findCSharpMethods(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpMethodSnapshot[] {
-  const text = document.getText();
-  const types = findCSharpTypes(runtimeVscode, document);
-  return findCSharpMethodDeclarations(text).map(declaration => {
-    const nameStart = declaration.nameStart;
-    const start = document.positionAt(nameStart);
-    const end = document.positionAt(declaration.nameEnd);
-    return {
-      name: declaration.name,
-      typeName: findNearestCSharpType(types, nameStart)?.fullName,
-      range: new runtimeVscode.Range(start, end)
-    };
-  });
-}
-
-/** Finds C# method declarations without treating ordinary calls as Unity target methods. */
-function findCSharpMethodDeclarations(text: string, methodName?: string): CSharpMethodDeclaration[] {
-  const declarations: CSharpMethodDeclaration[] = [];
-  let match: RegExpExecArray | null;
-
-  csharpMethodNameCandidatePattern.lastIndex = 0;
-  while ((match = csharpMethodNameCandidatePattern.exec(text))) {
-    const name = match[1];
-    if (methodName && name !== methodName) {
-      continue;
-    }
-
-    const nameStart = match.index;
-    const openParen = match.index + match[0].lastIndexOf('(');
-    if (!isCSharpMethodDeclarationCandidate(text, name, nameStart, openParen)) {
-      continue;
-    }
-
-    declarations.push({
-      name,
-      nameStart,
-      nameEnd: nameStart + name.length
-    });
-  }
-
-  return declarations;
-}
-
-/** Validates a method-name candidate against declaration-only C# syntax markers. */
-function isCSharpMethodDeclarationCandidate(
-  text: string,
-  name: string,
-  nameStart: number,
-  openParen: number
-): boolean {
-  if (csharpMethodNameKeywordPattern.test(name) || !hasCSharpMethodDeclarationPrefix(text, nameStart)) {
-    return false;
-  }
-
-  const closeParen = findMatchingParenthesis(text, openParen);
-  if (closeParen === -1) {
-    return false;
-  }
-
-  const terminator = skipCSharpMethodConstraints(text, skipWhitespace(text, closeParen + 1));
-  return text[terminator] === '{' ||
-    text[terminator] === ';' ||
-    (text[terminator] === '=' && text[terminator + 1] === '>');
-}
-
-/** Checks the text before a candidate method name for declaration shape instead of call shape. */
-function hasCSharpMethodDeclarationPrefix(text: string, nameStart: number): boolean {
-  const previousTokenOffset = findPreviousNonWhitespaceOffset(text, nameStart - 1);
-  if (previousTokenOffset === undefined) {
-    return false;
-  }
-
-  const previousChar = text[previousTokenOffset];
-  if (!/[A-Za-z0-9_\]>]/.test(previousChar)) {
-    return false;
-  }
-
-  const lineStart = text.lastIndexOf('\n', nameStart - 1) + 1;
-  const prefix = text.slice(lineStart, nameStart).trim();
-  if (!prefix || prefix.includes('=') || csharpNonDeclarationPrefixKeywordPattern.test(prefix)) {
-    return false;
-  }
-
-  return true;
-}
-
-/** Finds the previous non-whitespace character offset before a parser cursor. */
-function findPreviousNonWhitespaceOffset(text: string, offset: number): number | undefined {
-  for (let index = offset; index >= 0; index -= 1) {
-    if (!/\s/.test(text[index])) {
-      return index;
-    }
-  }
-
-  return undefined;
-}
-
-/** Finds a balanced closing parenthesis for a C# parameter list candidate. */
-function findMatchingParenthesis(text: string, openParen: number): number {
-  let depth = 0;
-
-  for (let index = openParen; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === '"' || char === "'") {
-      index = skipQuotedCSharpLiteral(text, index);
-      continue;
-    }
-
-    if (char === '(') {
-      depth += 1;
-    } else if (char === ')') {
-      depth -= 1;
-      if (depth === 0) {
-        return index;
-      }
-    }
-  }
-
-  return -1;
-}
-
-/** Skips over a quoted C# literal while scanning a candidate method signature. */
-function skipQuotedCSharpLiteral(text: string, quoteOffset: number): number {
-  const quote = text[quoteOffset];
-
-  for (let index = quoteOffset + 1; index < text.length; index += 1) {
-    if (text[index] === '\\') {
-      index += 1;
-      continue;
-    }
-
-    if (text[index] === quote) {
-      return index;
-    }
-  }
-
-  return text.length - 1;
-}
-
-/** Skips simple C# generic constraints between a parameter list and declaration body. */
-function skipCSharpMethodConstraints(text: string, offset: number): number {
-  let cursor = offset;
-  if (!text.startsWith('where ', cursor)) {
-    return cursor;
-  }
-
-  while (cursor < text.length) {
-    if (text[cursor] === '{' || text[cursor] === ';' || (text[cursor] === '=' && text[cursor + 1] === '>')) {
-      return cursor;
-    }
-
-    cursor += 1;
-  }
-
-  return cursor;
-}
-
-function findCSharpTypes(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpTypeSnapshot[] {
-  const text = document.getText();
-  const namespaceMatches = [...text.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
-  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(text)?.[1];
-  const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
-  const types: CSharpTypeSnapshot[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = typePattern.exec(text))) {
-    const name = match[1];
-    const nameStart = match.index + match[0].lastIndexOf(name);
-    const start = document.positionAt(nameStart);
-    const end = document.positionAt(nameStart + name.length);
-    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
-    types.push({
-      name,
-      fullName: namespaceName ? `${namespaceName}.${name}` : name,
-      offset: nameStart,
-      range: new runtimeVscode.Range(start, end)
-    });
-  }
-
-  return types;
-}
-
-function findNearestCSharpType(types: readonly CSharpTypeSnapshot[], offset: number): CSharpTypeSnapshot | undefined {
-  let nearest: CSharpTypeSnapshot | undefined;
-
-  for (const type of types) {
-    if (type.offset > offset) {
-      break;
-    }
-
-    nearest = type;
-  }
-
-  return nearest;
-}
-
-function findMethodAtPosition(
-  runtimeVscode: typeof vscode,
-  document: vscode.TextDocument,
-  position: vscode.Position
-): CSharpMethodSnapshot | undefined {
-  return findCSharpMethods(runtimeVscode, document).find(method =>
-    method.range.start.line === position.line &&
-    method.range.start.character <= position.character &&
-    position.character <= method.range.end.character
-  );
-}
-
-function findUnityEventFields(runtimeVscode: typeof vscode, document: vscode.TextDocument): CSharpFieldSnapshot[] {
-  const text = document.getText();
-  const types = findCSharpTypes(runtimeVscode, document);
-  const fields: CSharpFieldSnapshot[] = [];
-  let match: RegExpExecArray | null;
-
-  unityEventTokenPattern.lastIndex = 0;
-  while ((match = unityEventTokenPattern.exec(text))) {
-    const nameStart = findUnityEventFieldNameStart(text, unityEventTokenPattern.lastIndex);
-    if (nameStart === undefined) {
-      continue;
-    }
-
-    const name = readIdentifierAt(text, nameStart);
-    if (!name) {
-      continue;
-    }
-
-    const start = document.positionAt(nameStart);
-    const end = document.positionAt(nameStart + name.length);
-    fields.push({
-      name,
-      typeName: findNearestCSharpType(types, nameStart)?.fullName,
-      range: new runtimeVscode.Range(start, end)
-    });
-  }
-
-  return fields;
-}
-
-function findUnityEventFieldNameStart(text: string, offset: number): number | undefined {
-  let cursor = skipWhitespace(text, offset);
-
-  if (text[cursor] === '<') {
-    cursor = skipGenericArguments(text, cursor);
-    if (cursor === -1) {
-      return undefined;
-    }
-  }
-
-  cursor = skipWhitespace(text, cursor);
-  return readIdentifierAt(text, cursor) ? cursor : undefined;
-}
-
-function skipGenericArguments(text: string, offset: number): number {
-  let depth = 0;
-
-  // Generic UnityEvent arguments can be nested, so keep a tiny balanced scanner instead of a single regex.
-  for (let index = offset; index < text.length; index += 1) {
-    if (text[index] === '<') {
-      depth += 1;
-    } else if (text[index] === '>') {
-      depth -= 1;
-      if (depth === 0) {
-        return index + 1;
-      }
-    } else if ((text[index] === ';' || text[index] === '\n') && depth > 0) {
-      return -1;
-    }
-  }
-
-  return -1;
-}
-
-function skipWhitespace(text: string, offset: number): number {
-  let cursor = offset;
-  while (cursor < text.length && /\s/.test(text[cursor])) {
-    cursor += 1;
-  }
-
-  return cursor;
-}
-
-function readIdentifierAt(text: string, offset: number): string | undefined {
-  identifierPattern.lastIndex = offset;
-  return identifierPattern.exec(text)?.[0];
-}
-
-function findUnityEventFieldAtPosition(
-  runtimeVscode: typeof vscode,
-  document: vscode.TextDocument,
-  position: vscode.Position
-): CSharpFieldSnapshot | undefined {
-  return findUnityEventFields(runtimeVscode, document).find(field =>
-    field.range.start.line === position.line &&
-    field.range.start.character <= position.character &&
-    position.character <= field.range.end.character
-  );
-}
-
 function createHoverMarkdown(
   runtimeVscode: typeof vscode,
   references: readonly UnityEventReference[]
@@ -2472,111 +2125,6 @@ function appendUniqueLocation(
 
   seenLocations.add(key);
   locations.push(location);
-}
-
-function findCSharpMethodPosition(
-  runtimeVscode: typeof vscode,
-  content: string,
-  methodName: string
-): vscode.Position | undefined {
-  const declaration = findCSharpMethodDeclarations(content, methodName)[0];
-  if (declaration) {
-    const line = countLineBreaks(content, 0, declaration.nameStart);
-    const previousLineBreak = content.lastIndexOf('\n', declaration.nameStart - 1);
-    const character = declaration.nameStart - previousLineBreak - 1;
-    return new runtimeVscode.Position(line, character);
-  }
-
-  return undefined;
-}
-
-/** Finds a YAML target method declaration inside the C# type named by m_TargetAssemblyTypeName. */
-function findCSharpTargetMethodPosition(
-  runtimeVscode: typeof vscode,
-  content: string,
-  targetTypeName: string,
-  methodName: string
-): vscode.Position | undefined {
-  const targetType = findCSharpTargetTypeBody(content, targetTypeName);
-  if (!targetType) {
-    return undefined;
-  }
-
-  const declaration = findCSharpMethodDeclarations(content, methodName).find(candidate =>
-    candidate.nameStart > targetType.bodyStart && candidate.nameStart < targetType.bodyEnd
-  );
-  if (!declaration) {
-    return undefined;
-  }
-
-  const line = countLineBreaks(content, 0, declaration.nameStart);
-  const previousLineBreak = content.lastIndexOf('\n', declaration.nameStart - 1);
-  const character = declaration.nameStart - previousLineBreak - 1;
-  return new runtimeVscode.Position(line, character);
-}
-
-/** Finds the C# type body that corresponds to a YAML target assembly type name. */
-function findCSharpTargetTypeBody(content: string, targetTypeName: string): CSharpTypeBodyDeclaration | undefined {
-  return findCSharpTypeBodyDeclarations(content).find(type =>
-    typeKey(type.fullName) === typeKey(targetTypeName) ||
-    typeKey(type.shortName) === typeKey(shortTypeName(targetTypeName))
-  );
-}
-
-/** Parses C# type declarations with body spans for target-method declaration lookup. */
-function findCSharpTypeBodyDeclarations(content: string): CSharpTypeBodyDeclaration[] {
-  const declarations: CSharpTypeBodyDeclaration[] = [];
-  const namespaceMatches = [...content.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
-  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(content)?.[1];
-  const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = typePattern.exec(content))) {
-    const shortName = match[1];
-    const bodyStart = content.indexOf('{', typePattern.lastIndex);
-    if (bodyStart === -1) {
-      continue;
-    }
-
-    const bodyEnd = findMatchingBrace(content, bodyStart);
-    if (bodyEnd === -1) {
-      continue;
-    }
-
-    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
-    declarations.push({
-      shortName,
-      fullName: namespaceName ? `${namespaceName}.${shortName}` : shortName,
-      bodyStart,
-      bodyEnd
-    });
-  }
-
-  return declarations;
-}
-
-/** Finds a balanced closing brace for a C# type body candidate. */
-function findMatchingBrace(text: string, openBrace: number): number {
-  let depth = 0;
-
-  for (let index = openBrace; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === '"' || char === "'") {
-      index = skipQuotedCSharpLiteral(text, index);
-      continue;
-    }
-
-    if (char === '{') {
-      depth += 1;
-    } else if (char === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        return index;
-      }
-    }
-  }
-
-  return -1;
 }
 
 function toReferenceLocation(
@@ -2792,116 +2340,24 @@ async function findCurrentScriptCandidateAssetFiles(
   };
 }
 
-/** Creates a status bar reporter for silent background UnityEvent scans. */
-function createUnityEventReferenceScanStatus(
+/** Watches serialized Unity assets so ready CodeLens indexes do not outlive changed YAML. */
+function watchUnitySerializedAssetFiles(
   runtimeVscode: typeof vscode,
-  logger: UnityPlusLogger
-): UnityEventReferenceScanStatusReporter {
-  const window = runtimeVscode.window as typeof runtimeVscode.window & {
-    createStatusBarItem?: (alignment?: vscode.StatusBarAlignment, priority?: number) => vscode.StatusBarItem;
-  };
-  const item = typeof window.createStatusBarItem === 'function'
-    ? window.createStatusBarItem(runtimeVscode.StatusBarAlignment?.Left, 100)
-    : undefined;
-  let startedAt = 0;
-  let hideTimer: ReturnType<typeof setTimeout> | undefined;
+  root: vscode.Uri,
+  onChanged: (uri: vscode.Uri) => void
+): vscode.Disposable {
+  const watchers = serializedAssetSearchGlobs.map(glob =>
+    runtimeVscode.workspace.createFileSystemWatcher(new runtimeVscode.RelativePattern(root, glob))
+  );
 
-  return {
-    start(phase, label = 'Unity refs') {
-      startedAt = Date.now();
-      if (hideTimer) {
-        clearTimeout(hideTimer);
-        hideTimer = undefined;
-      }
-
-      if (!item) {
-        return;
-      }
-
-      item.text = `$(sync~spin) ${label}: 0/?`;
-      item.tooltip = formatScanStatusTooltip({ label, phase, elapsedMilliseconds: 0 });
-      item.show();
-    },
-    update(status) {
-      if (!item) {
-        return;
-      }
-
-      const scannedCount = status.scannedCount ?? 0;
-      const totalCount = status.totalCount ?? status.candidateCount;
-      const label = status.label ?? 'Unity refs';
-      const progressText = status.metadataGuidCount !== undefined
-        ? `${status.metadataGuidCount} GUIDs`
-        : `${scannedCount}/${totalCount ?? '?'}`;
-      item.text = `$(sync~spin) ${label}: ${progressText}`;
-      item.tooltip = formatScanStatusTooltip({
-        ...status,
-        elapsedMilliseconds: status.elapsedMilliseconds ?? Date.now() - startedAt
-      });
-      item.show();
-    },
-    finish(result, diagnostics, status) {
-      if (item) {
-        const label = status?.label ?? 'Unity refs';
-        const icon = result === 'completed'
-          ? '$(check)'
-          : result === 'canceled'
-            ? '$(circle-slash)'
-            : '$(warning)';
-        const references = status?.referenceCount ?? diagnostics?.resolvedReferenceCount ?? 0;
-        const instances = status?.instanceCount ?? diagnostics?.serializedInstanceCount ?? 0;
-        item.text = `${icon} ${label}: ${references} refs, ${instances} inst`;
-        item.tooltip = formatScanStatusTooltip({
-          label,
-          phase: status?.phase ?? result,
-          candidateCount: status?.candidateCount ?? diagnostics?.candidateAssetCount,
-          scannedCount: status?.scannedCount,
-          totalCount: status?.totalCount,
-          referenceCount: references,
-          instanceCount: instances,
-          metadataGuidCount: status?.metadataGuidCount,
-          scriptPath: status?.scriptPath,
-          scriptGuid: status?.scriptGuid,
-          elapsedMilliseconds: status?.elapsedMilliseconds ?? diagnostics?.elapsedMilliseconds ?? Date.now() - startedAt
-        });
-        item.show();
-        hideTimer = setTimeout(() => {
-          item.hide();
-          hideTimer = undefined;
-        }, scanStatusRetainMilliseconds);
-      }
-
-      if (diagnostics) {
-        logger.info(`UnityEvent background reference scan ${result}: ${formatDiagnostics(runtimeVscode, diagnostics)}.`);
-      } else {
-        logger.info(`UnityEvent background reference scan ${result}.`);
-      }
-    },
-    dispose() {
-      if (hideTimer) {
-        clearTimeout(hideTimer);
-      }
-
-      item?.dispose();
-    }
-  };
-}
-
-/** Formats the status bar tooltip without allocating parser-side state. */
-function formatScanStatusTooltip(status: UnityEventReferenceScanStatus): string {
-  const lines = [
-    `Scope: ${status.label ?? 'Unity refs'}`,
-    `Phase: ${status.phase}`,
-    `Script: ${status.scriptPath ?? '-'}`,
-    `Script GUID: ${status.scriptGuid ?? '-'}`,
-    `Metadata GUIDs: ${status.metadataGuidCount ?? '?'}`,
-    `Candidates: ${status.candidateCount ?? '?'}`,
-    `Scanned: ${status.scannedCount ?? 0}/${status.totalCount ?? status.candidateCount ?? '?'}`,
-    `References: ${status.referenceCount ?? 0}`,
-    `Instances: ${status.instanceCount ?? 0}`,
-    `Elapsed: ${status.elapsedMilliseconds ?? 0}ms`
-  ];
-  return lines.join('\n');
+  return runtimeVscode.Disposable.from(
+    ...watchers.flatMap(watcher => [
+      watcher,
+      watcher.onDidCreate(onChanged),
+      watcher.onDidChange(onChanged),
+      watcher.onDidDelete(onChanged)
+    ])
+  );
 }
 
 async function findDefaultAssetFiles(
@@ -3064,17 +2520,6 @@ function getGameObjectName(
 
   const gameObject = objects.get(gameObjectFileId);
   return gameObject?.classId === gameObjectClassId ? gameObject.name : undefined;
-}
-
-function countLineBreaks(text: string, startOffset: number, endOffset: number): number {
-  let line = 0;
-  for (let index = startOffset; index < endOffset; index += 1) {
-    if (text[index] === '\n') {
-      line += 1;
-    }
-  }
-
-  return line;
 }
 
 function simplifyAssemblyTypeName(typeName: string): string {
