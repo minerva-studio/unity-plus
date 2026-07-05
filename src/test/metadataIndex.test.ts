@@ -157,6 +157,22 @@ describe('metadataIndex', () => {
     assert.strictEqual(fallbackCalls.length, 1);
   });
 
+  it('uses findFiles with excludes disabled before directory walking', async () => {
+    const excludes: unknown[] = [];
+    const runtime = createMetadataSearchRuntime({}, {
+      findFiles: async (pattern, exclude) => {
+        excludes.push(exclude);
+        return String((pattern as { pattern?: string }).pattern).startsWith('Assets/')
+          ? [createUri('/Project/Assets/Player.cs.meta')]
+          : [];
+      }
+    });
+    const files = await findUnityMetaFilesWithFallback(createUri('/Project'), runtime);
+
+    assert.deepStrictEqual(files.map(uri => uri.fsPath), ['/Project/Assets/Player.cs.meta']);
+    assert.deepStrictEqual(excludes, [null, null]);
+  });
+
   it('keeps the legacy Assets metadata glob and scans package metadata too', () => {
     assert.strictEqual(defaultMetaFilesGlob, 'Assets/**/*.meta');
     assert.deepStrictEqual(defaultMetaFilesGlobs, ['Assets/**/*.meta', 'Packages/**/*.meta']);
@@ -231,11 +247,13 @@ function createUri(fsPath: string): vscode.Uri {
 
 /** Creates a small VS Code runtime fake for metadata search fallback tests. */
 function createMetadataSearchRuntime(
-  directories: Record<string, Array<[string, number]>>
+  directories: Record<string, Array<[string, number]>>,
+  options: { findFiles?: (pattern: unknown, exclude?: unknown) => Promise<readonly vscode.Uri[]> } = {}
 ): typeof vscode {
   return {
     workspace: {
-      findFiles: async () => [],
+      findFiles: async (pattern: unknown, exclude?: unknown) =>
+        await options.findFiles?.(pattern, exclude) ?? [],
       fs: {
         readDirectory: async (uri: vscode.Uri) => directories[uri.fsPath] ?? []
       }

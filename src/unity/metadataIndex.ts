@@ -200,7 +200,7 @@ export async function findUnityMetaFilesWithFallback(
   onFallback?: () => void
 ): Promise<readonly vscode.Uri[]> {
   const fileGroups = await Promise.all(defaultMetaFilesGlobs.map(async glob =>
-    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob))
+    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob), null)
   ));
   const files = fileGroups.flat();
   if (files.length > 0) {
@@ -268,7 +268,8 @@ function createEmptyStatistics(root: vscode.Uri): UnityMetadataIndexStatistics {
 
 /** Writes a compact metadata rebuild diagnostic summary to the Unity Plus output. */
 function logMetadataStatistics(logger: UnityPlusLogger, statistics: UnityMetadataIndexStatistics): void {
-  logger.info(`Unity metadata index: root=${statistics.rootPath}, globs=${statistics.globs.join(', ')}, found=${statistics.foundMetaFileCount}, read=${statistics.readMetaFileCount}, parsed GUIDs=${statistics.parsedGuidCount}, malformed=${statistics.malformedMetaFileCount}, read errors=${statistics.readErrorCount}.`);
+  const discoveryMethod = statistics.usedDirectoryWalkFallback ? 'directoryWalkFallback' : 'findFiles';
+  logger.info(`Unity metadata index: root=${statistics.rootPath}, discovery=${discoveryMethod}, globs=${statistics.globs.join(', ')}, found=${statistics.foundMetaFileCount}, read=${statistics.readMetaFileCount}, parsed GUIDs=${statistics.parsedGuidCount}, malformed=${statistics.malformedMetaFileCount}, read errors=${statistics.readErrorCount}.`);
 
   if (statistics.parsedGuidCount === 0) {
     logger.warn('Unity metadata index is empty; UnityEvent CodeLens cannot resolve script GUIDs.');

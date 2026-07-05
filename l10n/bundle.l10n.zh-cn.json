@@ -35,6 +35,7 @@
   "Unity Plus: no UnityEvent references found for this symbol.": "Unity Plus: 未找到此符号的 UnityEvent 引用。",
   "Unity Plus: no Unity serialized instances found for this script.": "Unity Plus: 未找到此脚本的 Unity 序列化实例。",
   "discovered {count} serialized asset(s)": "发现 {count} 个序列化资源",
+  "asset candidates: {candidateCount} asset(s), {searchCount} text search(es)": "资源候选：{candidateCount} 个 asset，{searchCount} 次文本搜索",
   "scanned {prefabCount} prefab(s), {sceneCount} scene(s), and {assetCount} asset file(s)": "已扫描 {prefabCount} 个 prefab、{sceneCount} 个场景和 {assetCount} 个 asset 文件",
   "scanned {prefabCount} prefab(s) and {sceneCount} scene(s)": "已扫描 {prefabCount} 个 prefab 和 {sceneCount} 个场景",
   "found {count} persistent call(s)": "找到 {count} 个持久化调用",
