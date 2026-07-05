@@ -924,7 +924,9 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
 
     assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-      '0 Unity serialized instances'
+      '0 Unity serialized instances',
+      '0 UnityEvent references',
+      '0 UnityEvent targets'
     ]);
     assert.strictEqual(candidateSearches, 0);
     assert.strictEqual(output.lines.some(line => line.includes('script GUID not found in metadata index')), true);

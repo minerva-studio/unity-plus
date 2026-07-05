@@ -164,6 +164,7 @@ export async function createCodeLensesFromIndex(
     const anchorRange = await findCodeLensStatusAnchorRange(runtime, document);
     const position = anchorRange.start;
 
+    // Keep ready zero-count summaries aligned with the pending "-" status lenses.
     if (serializedInstanceLensCount === 0) {
       codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
         title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: 0 }),
@@ -172,6 +173,32 @@ export async function createCodeLensesFromIndex(
           kind: 'serializedInstance',
           scriptPath,
           serializedInstances: [],
+          position
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+
+    if (methodLensCount === 0 && fieldReferenceLensCount === 0) {
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: 0 }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'method',
+          scriptPath,
+          eventReferences: [],
+          position
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+
+    if (fieldTargetLensCount === 0) {
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: 0 }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'fieldTarget',
+          scriptPath,
+          eventReferences: [],
           position
         } satisfies EventReferenceLocationTarget]
       }));
