@@ -221,6 +221,7 @@ function createMetadataIndex(): UnityMetadataIndex {
   return {
     rebuild: async () => undefined,
     getAssetPath: () => undefined,
+    getGuid: () => undefined,
     dispose: () => undefined
   };
 }

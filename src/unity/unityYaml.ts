@@ -6,7 +6,9 @@ import {
 } from '../vendor/unity-yaml-bridge/unity-yaml-writer';
 import type {
   UnityDocument as VendoredUnityDocument,
-  UnityFile as VendoredUnityFile
+  UnityFile as VendoredUnityFile,
+  UnitySourceLocation,
+  UnityYamlSourceNode
 } from '../vendor/unity-yaml-bridge/types';
 
 export { writeUnityYaml };
@@ -15,6 +17,7 @@ export type { VendoredUnityDocument, VendoredUnityFile };
 export interface UnityYamlSourceLocation {
   line: number;
   character: number;
+  offset: number;
 }
 
 export interface UnityYamlDocument {
@@ -23,10 +26,7 @@ export interface UnityYamlDocument {
   fileId: string;
   stripped: boolean;
   properties: Record<string, unknown>;
-  body: string;
-  startLine: number;
-  bodyStartOffset: number;
-  bodyEndOffset: number;
+  source?: VendoredUnityDocument['source'];
 }
 
 export interface UnityYamlParsedAsset {
@@ -37,6 +37,15 @@ export interface UnityYamlParsedAsset {
 
 export interface UnityYamlScriptReference extends UnityYamlSourceLocation {
   guid: string;
+}
+
+export interface UnityYamlSerializedScriptDocument {
+  document: UnityYamlDocument;
+  scriptReference?: UnityYamlScriptReference;
+  editorClassIdentifier?: string;
+  editorTypeName?: string;
+  name?: string;
+  gameObjectFileId?: string;
 }
 
 export interface UnityYamlPersistentCall {
@@ -52,38 +61,12 @@ export interface UnityYamlPersistentCall {
   callState: number;
 }
 
-interface RawUnityYamlDocument {
-  classId: number;
-  fileId: string;
-  stripped: boolean;
-  body: string;
-  startLine: number;
-  bodyStartOffset: number;
-  bodyEndOffset: number;
-}
-
-interface PrefabModificationSource {
-  targetFileId?: string;
-  propertyPath?: string;
-  fallbackLocation?: UnityYamlSourceLocation;
-  propertyPathLocation?: UnityYamlSourceLocation;
-  valueLocation?: UnityYamlSourceLocation;
-  objectReferenceLocation?: UnityYamlSourceLocation;
-}
-
-interface PersistentCallSourceLocation extends UnityYamlSourceLocation {
-  value?: string;
-  targetFileId?: string;
-}
-
-const documentHeaderPattern = /^--- !u!(\d+) &(-?\d+)(?:\s+(stripped))?/gm;
 const persistentCallPropertyPathPattern = /^(.+)\.m_PersistentCalls\.m_Calls\.Array\.data\[(\d+)\]\.(m_Target|m_TargetAssemblyTypeName|m_MethodName|m_CallState)$/;
 
-/** Parses Unity YAML into the vendored AST plus source-backed document records. */
+/** Parses Unity YAML into the vendored AST plus local document records. */
 export function parseUnityYamlAsset(content: string): UnityYamlParsedAsset {
   const file = parseVendoredUnityYaml(content);
-  const rawDocuments = parseRawUnityYamlDocuments(content);
-  const documents = file.documents.map((document, index) => toUnityYamlDocument(document, rawDocuments[index]));
+  const documents = file.documents.map(toUnityYamlDocument);
   const documentsByFileId = new Map<string, UnityYamlDocument>();
 
   for (const document of documents) {
@@ -115,13 +98,42 @@ export function getUnityYamlDocumentScriptReference(document: UnityYamlDocument)
     return undefined;
   }
 
-  const location = findGuidLocationInDocument(document, 'm_Script', guid);
+  const location = sourceLocationForPath(document, ['m_Script', 'guid']) ??
+    sourceLocationForPath(document, ['m_Script']) ??
+    documentHeaderLocation(document);
 
   return {
     guid,
-    line: location?.line ?? document.startLine,
-    character: location?.character ?? 0
+    line: location.line,
+    character: location.character,
+    offset: location.offset
   };
+}
+
+/** Reads all documents that carry a serialized MonoScript reference or editor class fallback. */
+export function getUnityYamlSerializedScriptDocuments(documents: readonly UnityYamlDocument[]): UnityYamlSerializedScriptDocument[] {
+  const candidates: UnityYamlSerializedScriptDocument[] = [];
+
+  for (const document of documents) {
+    const editorClassIdentifier = getUnityYamlDocumentScalar(document, 'm_EditorClassIdentifier');
+    const scriptReference = getUnityYamlDocumentScriptReference(document);
+    const editorTypeName = parseEditorClassIdentifier(editorClassIdentifier);
+
+    if (!scriptReference && !editorTypeName) {
+      continue;
+    }
+
+    candidates.push({
+      document,
+      scriptReference,
+      editorClassIdentifier,
+      editorTypeName,
+      name: getUnityYamlDocumentScalar(document, 'm_Name'),
+      gameObjectFileId: getUnityYamlDocumentFileId(document, 'm_GameObject')
+    });
+  }
+
+  return candidates;
 }
 
 /** Reads a Unity object reference fileID from an arbitrary parsed value. */
@@ -142,10 +154,9 @@ export function getUnityYamlObjectReferenceGuid(value: unknown): string | undefi
   return value.guid;
 }
 
-/** Extracts normal UnityEvent persistent calls from a parsed document. */
+/** Extracts normal UnityEvent persistent calls from parsed AST fields. */
 export function getUnityYamlPersistentCalls(document: UnityYamlDocument): UnityYamlPersistentCall[] {
   const calls: UnityYamlPersistentCall[] = [];
-  const sourceLocations = scanPersistentCallSourceLocations(document);
 
   for (const [eventFieldName, eventValue] of Object.entries(document.properties)) {
     const eventObject = asRecord(eventValue);
@@ -158,11 +169,9 @@ export function getUnityYamlPersistentCalls(document: UnityYamlDocument): UnityY
 
     persistentCallList.forEach((callValue, index) => {
       const call = asRecord(callValue);
-      const methodLocation = sourceLocations.get(persistentCallLocationKey(eventFieldName, index, 'm_MethodName'));
-      const targetLocation = sourceLocations.get(persistentCallLocationKey(eventFieldName, index, 'm_Target'));
-      const targetTypeLocation = sourceLocations.get(persistentCallLocationKey(eventFieldName, index, 'm_TargetAssemblyTypeName'));
-      const callStateLocation = sourceLocations.get(persistentCallLocationKey(eventFieldName, index, 'm_CallState'));
-      const fallbackLocation = methodLocation ?? targetLocation ?? { line: document.startLine, character: 0 };
+      const methodLocation = sourceLocationForPath(document, [eventFieldName, 'm_PersistentCalls', 'm_Calls', index, 'm_MethodName']);
+      const targetLocation = sourceLocationForPath(document, [eventFieldName, 'm_PersistentCalls', 'm_Calls', index, 'm_Target']);
+      const fallbackLocation = methodLocation ?? targetLocation ?? documentHeaderLocation(document);
 
       calls.push({
         eventFieldName,
@@ -170,10 +179,10 @@ export function getUnityYamlPersistentCalls(document: UnityYamlDocument): UnityY
         character: fallbackLocation.character,
         methodLine: methodLocation?.line,
         methodCharacter: methodLocation?.character,
-        targetFileId: getUnityYamlObjectReferenceFileId(call?.m_Target) ?? targetLocation?.targetFileId,
-        targetTypeName: normalizeScalar(call?.m_TargetAssemblyTypeName) ?? targetTypeLocation?.value ?? '',
-        methodName: normalizeScalar(call?.m_MethodName) ?? methodLocation?.value ?? '',
-        callState: normalizeNumber(call?.m_CallState, normalizeNumber(callStateLocation?.value, 1))
+        targetFileId: getUnityYamlObjectReferenceFileId(call?.m_Target),
+        targetTypeName: normalizeScalar(call?.m_TargetAssemblyTypeName) ?? '',
+        methodName: normalizeScalar(call?.m_MethodName) ?? '',
+        callState: normalizeNumber(call?.m_CallState, 1)
       });
     });
   }
@@ -193,7 +202,6 @@ export function getUnityYamlPrefabOverridePersistentCalls(document: UnityYamlDoc
     return [];
   }
 
-  const sources = scanPrefabModificationSourceLocations(document);
   const callsByKey = new Map<string, Partial<UnityYamlPersistentCall> & {
     fallbackLine?: number;
     fallbackCharacter?: number;
@@ -208,13 +216,13 @@ export function getUnityYamlPrefabOverridePersistentCalls(document: UnityYamlDoc
       return;
     }
 
-    const source = sources[index];
     const ownerFileId = getUnityYamlObjectReferenceFileId(modification?.target);
     const eventFieldName = parsedPath[1];
     const callIndex = parsedPath[2];
     const propertyName = parsedPath[3];
     const callKey = `${ownerFileId ?? ''}#${eventFieldName}#${callIndex}`;
-    const fallback = source?.propertyPathLocation ?? source?.fallbackLocation ?? { line: document.startLine, character: 0 };
+    const propertyPathLocation = sourceLocationForPath(document, ['m_Modification', 'm_Modifications', index, 'propertyPath']);
+    const fallback = propertyPathLocation ?? documentHeaderLocation(document);
     const call = callsByKey.get(callKey) ?? {
       ownerFileId,
       eventFieldName,
@@ -232,7 +240,7 @@ export function getUnityYamlPrefabOverridePersistentCalls(document: UnityYamlDoc
     call.fallbackCharacter = call.fallbackLine === fallback.line ? fallback.character : call.fallbackCharacter;
 
     if (propertyName === 'm_MethodName') {
-      const location = source?.valueLocation ?? fallback;
+      const location = sourceLocationForPath(document, ['m_Modification', 'm_Modifications', index, 'value']) ?? fallback;
       call.methodName = normalizeScalar(modification?.value) ?? '';
       call.methodLine = location.line;
       call.methodCharacter = location.character;
@@ -252,8 +260,8 @@ export function getUnityYamlPrefabOverridePersistentCalls(document: UnityYamlDoc
   return [...callsByKey.values()].map(call => ({
     eventFieldName: call.eventFieldName ?? '<unknown>',
     ownerFileId: call.ownerFileId,
-    line: call.methodLine ?? call.line ?? call.fallbackLine ?? document.startLine,
-    character: call.methodCharacter ?? call.character ?? call.fallbackCharacter ?? 0,
+    line: call.methodLine ?? call.line ?? call.fallbackLine ?? documentHeaderLocation(document).line,
+    character: call.methodCharacter ?? call.character ?? call.fallbackCharacter ?? documentHeaderLocation(document).character,
     methodLine: call.methodLine,
     methodCharacter: call.methodCharacter,
     targetFileId: call.targetFileId,
@@ -263,263 +271,73 @@ export function getUnityYamlPrefabOverridePersistentCalls(document: UnityYamlDoc
   }));
 }
 
-/** Converts vendored and raw document records into the local adapter shape. */
-function toUnityYamlDocument(document: VendoredUnityDocument, raw: RawUnityYamlDocument | undefined): UnityYamlDocument {
+/** Converts a vendored document into the local adapter shape. */
+function toUnityYamlDocument(document: VendoredUnityDocument): UnityYamlDocument {
   return {
     classId: document.typeId,
     typeName: document.typeName,
     fileId: document.fileId,
     stripped: document.stripped,
     properties: document.properties,
-    body: raw?.body ?? '',
-    startLine: raw?.startLine ?? 0,
-    bodyStartOffset: raw?.bodyStartOffset ?? 0,
-    bodyEndOffset: raw?.bodyEndOffset ?? 0
+    source: document.source
   };
 }
 
-/** Parses Unity YAML document headers and raw bodies for source location lookup. */
-function parseRawUnityYamlDocuments(content: string): RawUnityYamlDocument[] {
-  const headers = [...content.matchAll(documentHeaderPattern)];
-  const documents: RawUnityYamlDocument[] = [];
-  let lineCursor = 0;
-  let offsetCursor = 0;
-
-  for (let index = 0; index < headers.length; index += 1) {
-    const header = headers[index];
-    const next = headers[index + 1];
-    const bodyStart = (header.index ?? 0) + header[0].length;
-    const bodyEnd = next?.index ?? content.length;
-    const startLine = lineCursor + countLineBreaks(content, offsetCursor, bodyStart);
-
-    lineCursor = startLine;
-    offsetCursor = bodyStart;
-
-    documents.push({
-      classId: Number(header[1]),
-      fileId: header[2],
-      stripped: header[3] === 'stripped',
-      body: content.slice(bodyStart, bodyEnd),
-      startLine,
-      bodyStartOffset: bodyStart,
-      bodyEndOffset: bodyEnd
-    });
-  }
-
-  return documents;
-}
-
-/** Scans a document body for source locations of normal UnityEvent call fields. */
-function scanPersistentCallSourceLocations(document: UnityYamlDocument): Map<string, PersistentCallSourceLocation> {
-  const locations = new Map<string, PersistentCallSourceLocation>();
-  const lines = document.body.split(/\r?\n/);
-  const stack: Array<{ indent: number; key: string }> = [];
-  const callIndexByField = new Map<string, number>();
-  let activeEventFieldName: string | undefined;
-  let currentEventFieldName: string | undefined;
-  let currentCallIndex = -1;
-  let pendingTarget: { eventFieldName: string; callIndex: number; indent: number; lineIndex: number } | undefined;
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    const absoluteLine = document.startLine + lineIndex;
-    const indent = getIndent(line);
-    const trimmed = line.trim();
-
-    if (trimmed.length === 0) {
-      continue;
-    }
-
-    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
-      stack.pop();
-    }
-
-    const key = parseYamlKey(trimmed);
-
-    if (!key) {
-      continue;
-    }
-
-    if (pendingTarget && key === 'fileID' && lineIndex <= pendingTarget.lineIndex + 3) {
-      const targetLocation = locations.get(persistentCallLocationKey(
-        pendingTarget.eventFieldName,
-        pendingTarget.callIndex,
-        'm_Target'
-      ));
-
-      if (targetLocation) {
-        targetLocation.targetFileId = valueAfterColon(trimmed);
-      }
-    } else if (pendingTarget && indent <= pendingTarget.indent) {
-      pendingTarget = undefined;
-    }
-
-    if (key === 'm_PersistentCalls') {
-      activeEventFieldName = stack[stack.length - 1]?.key;
-    } else if (trimmed.startsWith('- m_Target:') && activeEventFieldName) {
-      currentEventFieldName = activeEventFieldName;
-      currentCallIndex = (callIndexByField.get(activeEventFieldName) ?? -1) + 1;
-      callIndexByField.set(activeEventFieldName, currentCallIndex);
-      locations.set(persistentCallLocationKey(activeEventFieldName, currentCallIndex, 'm_Target'), {
-        line: absoluteLine,
-        character: getValueCharacter(line),
-        value: valueAfterColon(trimmed),
-        targetFileId: extractFileIdFromLine(trimmed)
-      });
-      pendingTarget = {
-        eventFieldName: activeEventFieldName,
-        callIndex: currentCallIndex,
-        indent,
-        lineIndex
-      };
-    } else if (currentEventFieldName && currentCallIndex >= 0) {
-      locations.set(persistentCallLocationKey(currentEventFieldName, currentCallIndex, key), {
-        line: absoluteLine,
-        character: getValueCharacter(line),
-        value: valueAfterColon(trimmed)
-      });
-    }
-
-    if (!trimmed.startsWith('- ')) {
-      stack.push({ indent, key });
-    }
-  }
-
-  return locations;
-}
-
-/** Scans a PrefabInstance document for source locations of m_Modifications entries. */
-function scanPrefabModificationSourceLocations(document: UnityYamlDocument): PrefabModificationSource[] {
-  const sources: PrefabModificationSource[] = [];
-  const lines = document.body.split(/\r?\n/);
-  let currentSource: PrefabModificationSource | undefined;
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    const absoluteLine = document.startLine + lineIndex;
-    const trimmed = line.trim();
-    const location = { line: absoluteLine, character: getValueCharacter(line) };
-
-    if (trimmed.startsWith('- target:')) {
-      currentSource = {
-        targetFileId: extractFileIdFromLine(trimmed),
-        fallbackLocation: location
-      };
-      sources.push(currentSource);
-      continue;
-    }
-
-    if (!currentSource) {
-      continue;
-    }
-
-    const key = parseYamlKey(trimmed);
-    if (key === 'propertyPath') {
-      currentSource.propertyPath = valueAfterColon(trimmed);
-      currentSource.propertyPathLocation = location;
-    } else if (key === 'value') {
-      currentSource.valueLocation = location;
-    } else if (key === 'objectReference') {
-      currentSource.objectReferenceLocation = location;
-    }
-  }
-
-  return sources;
-}
-
-/** Creates a stable source-location map key for a UnityEvent call field. */
-function persistentCallLocationKey(eventFieldName: string, callIndex: number, key: string): string {
-  return `${eventFieldName}#${callIndex}#${key}`;
-}
-
-/** Finds the exact GUID character position for a direct document field. */
-function findGuidLocationInDocument(
+/** Finds the source location for a document property path. */
+function sourceLocationForPath(
   document: UnityYamlDocument,
-  fieldName: string,
-  guid: string
+  path: readonly (string | number)[]
 ): UnityYamlSourceLocation | undefined {
-  const lines = document.body.split(/\r?\n/);
+  const node = sourceNodeForPath(document, path);
+  const location = node?.value ?? node?.item ?? node?.key;
+  return location ? toLocalLocation(location) : undefined;
+}
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    const trimmed = line.trim();
+/** Finds the source node for a document property path. */
+function sourceNodeForPath(
+  document: UnityYamlDocument,
+  path: readonly (string | number)[]
+): UnityYamlSourceNode | undefined {
+  let node: UnityYamlSourceNode | undefined;
+  let children = document.source?.properties;
 
-    if (!trimmed.startsWith(`${fieldName}:`)) {
+  for (const segment of path) {
+    if (typeof segment === 'number') {
+      node = node?.items?.[segment];
+      children = node?.children;
       continue;
     }
 
-    const guidIndex = line.indexOf(guid);
-    if (guidIndex === -1) {
-      continue;
-    }
-
-    return {
-      line: document.startLine + lineIndex,
-      character: guidIndex
-    };
+    node = children?.[segment];
+    children = node?.children;
   }
 
-  return undefined;
+  return node;
 }
 
-/** Counts line breaks in a content slice without allocating intermediate strings. */
-function countLineBreaks(content: string, start: number, end: number): number {
-  let count = 0;
-
-  for (let index = start; index < end; index += 1) {
-    if (content.charCodeAt(index) === 10) {
-      count += 1;
-    }
-  }
-
-  return count;
+/** Returns the document header location as the last source fallback. */
+function documentHeaderLocation(document: UnityYamlDocument): UnityYamlSourceLocation {
+  return toLocalLocation(document.source?.header ?? { line: 0, character: 0, offset: 0 });
 }
 
-/** Reads a YAML key from a line, including array-item key syntax. */
-function parseYamlKey(trimmed: string): string | undefined {
-  const normalized = trimmed.startsWith('- ') ? trimmed.slice(2) : trimmed;
-  const colonIndex = normalized.indexOf(':');
+/** Converts vendored source locations to adapter source locations. */
+function toLocalLocation(location: UnitySourceLocation): UnityYamlSourceLocation {
+  return {
+    line: location.line,
+    character: location.character,
+    offset: location.offset
+  };
+}
 
-  if (colonIndex <= 0) {
+/** Parses Unity's editor class identifier into a C# full type name. */
+function parseEditorClassIdentifier(value: string | undefined): string | undefined {
+  if (!value) {
     return undefined;
   }
 
-  return normalized.slice(0, colonIndex).trim();
-}
-
-/** Returns the number of leading spaces in a YAML line. */
-function getIndent(line: string): number {
-  const match = /^ */.exec(line);
-  return match?.[0].length ?? 0;
-}
-
-/** Returns the character offset where a YAML value begins. */
-function getValueCharacter(line: string): number {
-  const colonIndex = line.indexOf(':');
-  return colonIndex === -1 ? getIndent(line) : colonIndex + 1 + countSpacesAfter(line, colonIndex + 1);
-}
-
-/** Counts spaces after a specific character offset. */
-function countSpacesAfter(value: string, start: number): number {
-  let count = 0;
-
-  for (let index = start; index < value.length && value[index] === ' '; index += 1) {
-    count += 1;
-  }
-
-  return count;
-}
-
-/** Reads the raw value after the first YAML colon in a line. */
-function valueAfterColon(trimmed: string): string {
-  const colonIndex = trimmed.indexOf(':');
-  return colonIndex === -1 ? '' : trimmed.slice(colonIndex + 1).trim();
-}
-
-/** Extracts a fileID from a Unity YAML flow mapping line. */
-function extractFileIdFromLine(trimmed: string): string | undefined {
-  const match = /fileID:\s*(-?\d+)/.exec(trimmed);
-  return match?.[1];
+  const separatorIndex = value.indexOf('::');
+  const typeName = separatorIndex === -1 ? value : value.slice(separatorIndex + 2);
+  return typeName.trim() || undefined;
 }
 
 /** Converts scalar-like parsed values into strings. */

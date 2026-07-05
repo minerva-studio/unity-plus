@@ -44,6 +44,7 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.templates.csharpScript'].default, '');
     assert.strictEqual(properties['unityPlus.templates.scriptableObject'].default, '');
     assert.strictEqual(properties['unityPlus.eventReferences.enabled'].default, true);
+    assert.strictEqual(properties['unityPlus.eventReferences.autoScan'].default, false);
     assert.strictEqual(properties['unityPlus.metaFiles.hideInExplorer'].default, true);
     assert.strictEqual(properties['unityPlus.metaFiles.moveWithAsset'].default, true);
   });

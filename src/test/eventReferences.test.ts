@@ -31,6 +31,7 @@ describe('eventReferences', () => {
           builds += 1;
         },
         getAssetPath: () => undefined,
+        getGuid: () => undefined,
         dispose: () => undefined
       })
     });
@@ -58,6 +59,7 @@ describe('eventReferences', () => {
           builds += 1;
         },
         getAssetPath: () => undefined,
+        getGuid: () => undefined,
         dispose: () => undefined
       })
     });
@@ -206,6 +208,34 @@ describe('eventReferences', () => {
     assert.strictEqual(index.getDiagnostics().serializedInstanceScriptDedupedTextHitCount, 0);
   });
 
+  it('counts every metadata-resolved m_Script AST hit across many serialized assets', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const assetUris = Array.from({ length: 57 }, (_value, index) => createUri(`/Project/Assets/Generated/Gate${index}.prefab`));
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => assetUris,
+      findCSharpFiles: async () => [],
+      readTextFile: async (_uri, _runtimeVscode) => createSerializedScriptInstanceYaml(gateGuid),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+    const diagnostics = index.getDiagnostics();
+
+    assert.strictEqual(index.getSerializedInstanceCount(gateScriptPath), 57);
+    assert.strictEqual(diagnostics.parsedYamlAssetCount, 57);
+    assert.strictEqual(diagnostics.skippedUnityEventAssetCount, 57);
+    assert.strictEqual(diagnostics.serializedInstanceScriptTextHitCount, 57);
+    assert.strictEqual(diagnostics.serializedInstanceScriptResolvedTextHitCount, 57);
+    assert.strictEqual(diagnostics.serializedInstanceScriptDedupedTextHitCount, 0);
+  });
+
   it('counts serialized instances from raw m_Script text hits even when object enrichment is incomplete', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -236,7 +266,7 @@ describe('eventReferences', () => {
     assert.strictEqual(diagnostics.serializedInstanceScriptDedupedTextHitCount, 0);
   });
 
-  it('uses the lightweight serialized instance scanner without heavy YAML parsing for script-only assets', async () => {
+  it('uses AST serialized instance parsing without UnityEvent parsing for script-only assets', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
@@ -258,9 +288,9 @@ describe('eventReferences', () => {
     const diagnostics = index.getDiagnostics();
 
     assert.strictEqual(index.getSerializedInstanceCount(gateScriptPath), 24);
-    assert.strictEqual(diagnostics.lightweightSerializedScanAssetCount, 8);
-    assert.strictEqual(diagnostics.heavyParsedAssetCount, 0);
-    assert.strictEqual(diagnostics.skippedHeavyParserAssetCount, 8);
+    assert.strictEqual(diagnostics.parsedYamlAssetCount, 8);
+    assert.strictEqual(diagnostics.parsedUnityEventAssetCount, 0);
+    assert.strictEqual(diagnostics.skippedUnityEventAssetCount, 8);
     assert.strictEqual(diagnostics.persistentCallCount, 0);
   });
 
@@ -350,7 +380,7 @@ describe('eventReferences', () => {
     assert.strictEqual(references[0].character, 13);
   });
 
-  it('uses the heavy YAML parser only for assets with UnityEvent calls or overrides', async () => {
+  it('parses UnityEvent calls only for assets with persistent calls or overrides', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
@@ -382,9 +412,9 @@ describe('eventReferences', () => {
 
     const diagnostics = index.getDiagnostics();
 
-    assert.strictEqual(diagnostics.lightweightSerializedScanAssetCount, 3);
-    assert.strictEqual(diagnostics.heavyParsedAssetCount, 2);
-    assert.strictEqual(diagnostics.skippedHeavyParserAssetCount, 1);
+    assert.strictEqual(diagnostics.parsedYamlAssetCount, 3);
+    assert.strictEqual(diagnostics.parsedUnityEventAssetCount, 2);
+    assert.strictEqual(diagnostics.skippedUnityEventAssetCount, 1);
     assert.strictEqual(diagnostics.persistentCallCount, 2);
     assert.strictEqual(index.getReferenceCount(gateScriptPath, 'CanInteract'), 2);
   });
@@ -543,6 +573,64 @@ describe('eventReferences', () => {
 
     releaseBuild?.();
     await runtime.waitForCodeLensChange();
+  });
+
+  it('uses the default nonblocking CodeLens fast path without a full asset scan', async () => {
+    let assetScans = 0;
+    let candidateSearches = 0;
+    let assetReads = 0;
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      }
+    });
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => {
+        assetScans += 1;
+        return [createUri('/Project/Assets/ShouldNotScan.prefab')];
+      },
+      findAssetFilesContainingText: async (_root, _runtimeVscode, text) => {
+        candidateSearches += 1;
+        assert.strictEqual(text, gateGuid);
+        return [createUri('/Project/Assets/Gate.prefab')];
+      },
+      readTextFile: async uri => {
+        assetReads += 1;
+        assert.strictEqual(uri.fsPath, '/Project/Assets/Gate.prefab');
+        return createPrefabYaml(2);
+      },
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(assetScans, 0);
+    assert.strictEqual(candidateSearches, 1);
+    assert.strictEqual(assetReads, 1);
+    assert.strictEqual(lenses.length, 1);
+    assert.strictEqual(lenses[0].command?.title, '1 Unity serialized instances');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[0].command?.arguments?.[0]);
+
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(7, 37));
   });
 
   it('does not schedule a background index build for canceled CodeLens requests', async () => {
@@ -1389,6 +1477,10 @@ interface EventReferenceRuntimeOptions {
 }
 
 function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {}): EventReferenceRuntime {
+  const configuration = {
+    'eventReferences.autoScan': true,
+    ...(options.configuration ?? {})
+  };
   const commands = new Map<string, (...args: unknown[]) => unknown>();
   const codeLensProviders: vscode.CodeLensProvider[] = [];
   const hoverProviders: vscode.HoverProvider[] = [];
@@ -1427,8 +1519,8 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
     },
     workspace: {
       getConfiguration: () => ({
-        get: (key: string, defaultValue?: unknown) => Object.prototype.hasOwnProperty.call(options.configuration ?? {}, key)
-          ? options.configuration?.[key]
+        get: (key: string, defaultValue?: unknown) => Object.prototype.hasOwnProperty.call(configuration, key)
+          ? configuration[key as keyof typeof configuration]
           : defaultValue
       })
     },
@@ -1542,6 +1634,20 @@ function createPrefabYamlWithNestedTarget(callState: number): string {
     '- m_Target: {fileID: 460066068064628344}',
     ['- m_Target:', '    fileID: 460066068064628344'].join('\n')
   );
+}
+
+/** Creates one parsed MonoBehaviour script instance without UnityEvent call fields. */
+function createSerializedScriptInstanceYaml(scriptGuid: string): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!1 &1000',
+    'GameObject:',
+    '  m_Name: Counted Gate',
+    '--- !u!114 &460066068064628344',
+    'MonoBehaviour:',
+    '  m_GameObject: {fileID: 1000}',
+    `  m_Script: {fileID: 11500000, guid: ${scriptGuid}, type: 3}`
+  ].join('\n');
 }
 
 function createLooseScriptReferenceYaml(): string {
@@ -1888,6 +1994,25 @@ function createMetadataIndex(): UnityMetadataIndex {
       }
 
       return guid === tutorialGuid ? tutorialScriptPath : undefined;
+    },
+    getGuid: assetPath => {
+      if (assetPath === gateScriptPath) {
+        return gateGuid;
+      }
+
+      if (assetPath === gateControllerScriptPath) {
+        return gateControllerGuid;
+      }
+
+      if (assetPath === ironDoorScriptPath) {
+        return ironDoorGuid;
+      }
+
+      if (assetPath === interactableScriptPath) {
+        return interactableGuid;
+      }
+
+      return assetPath === tutorialScriptPath ? tutorialGuid : undefined;
     },
     dispose: () => undefined
   };

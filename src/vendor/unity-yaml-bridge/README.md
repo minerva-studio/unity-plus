@@ -28,4 +28,6 @@ License evidence:
 
 Local modifications:
 
-- None at initial import.
+- Added parser-owned source location metadata for documents, properties, array items, and flow mapping fields.
+- Added tolerant parsing for Unity object reference blocks such as `- m_Target:` followed by `fileID` fields.
+- The writer ignores source metadata because it is stored outside serialized `properties`.

@@ -181,6 +181,11 @@
           "default": true,
           "description": "%configuration.eventReferences.enabled.description%"
         },
+        "unityPlus.eventReferences.autoScan": {
+          "type": "boolean",
+          "default": false,
+          "description": "%configuration.eventReferences.autoScan.description%"
+        },
         "unityPlus.metaFiles.hideInExplorer": {
           "type": "boolean",
           "default": true,

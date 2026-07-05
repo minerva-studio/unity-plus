@@ -32,6 +32,7 @@ describe('metadataIndex', () => {
     await index.rebuild();
 
     assert.strictEqual(index.getAssetPath(firstGuid), 'Assets/Player.cs');
+    assert.strictEqual(index.getGuid('Assets/Player.cs'), firstGuid);
   });
 
   it('updates GUID mappings from meta file watcher events', async () => {
@@ -59,6 +60,7 @@ describe('metadataIndex', () => {
     await flushPromises();
 
     assert.strictEqual(index.getAssetPath(firstGuid), 'Assets/Enemy.prefab');
+    assert.strictEqual(index.getGuid('Assets/Enemy.prefab'), firstGuid);
 
     fileContents.set(metaFile.fsPath, `guid: ${secondGuid}`);
     handlers?.onChange(metaFile);
@@ -66,10 +68,12 @@ describe('metadataIndex', () => {
 
     assert.strictEqual(index.getAssetPath(firstGuid), undefined);
     assert.strictEqual(index.getAssetPath(secondGuid), 'Assets/Enemy.prefab');
+    assert.strictEqual(index.getGuid('Assets/Enemy.prefab'), secondGuid);
 
     handlers?.onDelete(metaFile);
 
     assert.strictEqual(index.getAssetPath(secondGuid), undefined);
+    assert.strictEqual(index.getGuid('Assets/Enemy.prefab'), undefined);
   });
 
   it('skips malformed meta files without breaking rebuild', async () => {
@@ -116,6 +120,7 @@ describe('metadataIndex', () => {
             rebuilds += 1;
           },
           getAssetPath: guid => guid === firstGuid ? 'Assets/Player.cs' : undefined,
+          getGuid: assetPath => assetPath === 'Assets/Player.cs' ? firstGuid : undefined,
           dispose: () => {
             disposed += 1;
           }

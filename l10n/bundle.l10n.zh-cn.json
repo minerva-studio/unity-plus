@@ -45,7 +45,7 @@
   "... {count} more": "... 还有 {count} 项",
   "{count} Unity serialized instances": "{count} 个 Unity 序列化实例",
   "{count} UnityEvent targets": "{count} UnityEvent targets",
-  "serialized parser paths: {lightCount} light scan(s), {heavyCount} heavy parse(s), {skippedHeavyCount} heavy parse(s) skipped": "serialized parser paths: {lightCount} light scan(s), {heavyCount} heavy parse(s), {skippedHeavyCount} heavy parse(s) skipped",
+  "YAML parser paths: {assetCount} asset parse(s), {unityEventCount} UnityEvent parse(s), {skippedUnityEventCount} UnityEvent parse(s) skipped": "YAML parser paths: {assetCount} asset parse(s), {unityEventCount} UnityEvent parse(s), {skippedUnityEventCount} UnityEvent parse(s) skipped",
   "found {count} UnityEvent reference(s)": "found {count} UnityEvent reference(s)",
   "resolved {count} UnityEvent target method(s)": "resolved {count} UnityEvent target method(s)",
   "owner scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved": "owner 脚本：{guidCount} 个 GUID、{editorCount} 个 editor class、{unresolvedCount} 个未解析",

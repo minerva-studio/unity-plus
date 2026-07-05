@@ -19,6 +19,8 @@ import {
   PrefabInstanceInfo,
   PropertyModification,
   FileReference,
+  UnitySourceLocation,
+  UnityYamlSourceNode,
   UNITY_TYPE_MAP,
 } from './types';
 
@@ -63,6 +65,12 @@ export function parseUnityYaml(content: string): UnityFile {
 interface RawDocument {
   header: string;  // The --- line
   body: string;    // Everything until next ---
+  headerLine: number;
+  headerOffset: number;
+  bodyStartLine: number;
+  bodyStartOffset: number;
+  bodyLines: string[];
+  bodyLineOffsets: number[];
 }
 
 /** Split a Unity YAML file into individual document blocks */
@@ -71,29 +79,65 @@ function splitDocuments(content: string): RawDocument[] {
   const lines = content.split('\n');
 
   let currentHeader = '';
+  let currentHeaderLine = 0;
+  let currentHeaderOffset = 0;
+  let currentBodyStartLine = 0;
+  let currentBodyStartOffset = 0;
   let currentBody: string[] = [];
+  let currentBodyLineOffsets: number[] = [];
   let inDocument = false;
+  let offset = 0;
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    const lineOffset = offset;
+
     if (line.startsWith('--- ')) {
       if (inDocument) {
-        docs.push({ header: currentHeader, body: currentBody.join('\n') });
+        docs.push({
+          header: currentHeader,
+          body: currentBody.join('\n'),
+          headerLine: currentHeaderLine,
+          headerOffset: currentHeaderOffset,
+          bodyStartLine: currentBodyStartLine,
+          bodyStartOffset: currentBodyStartOffset,
+          bodyLines: currentBody,
+          bodyLineOffsets: currentBodyLineOffsets,
+        });
       }
       currentHeader = line;
+      currentHeaderLine = lineIndex;
+      currentHeaderOffset = lineOffset;
       currentBody = [];
+      currentBodyLineOffsets = [];
+      currentBodyStartLine = lineIndex + 1;
+      currentBodyStartOffset = lineOffset + line.length + 1;
       inDocument = true;
     } else if (line.startsWith('%') || line.trim() === '') {
       if (inDocument) {
         currentBody.push(line);
+        currentBodyLineOffsets.push(lineOffset);
       }
       // Skip directives and blank lines before first document
     } else if (inDocument) {
       currentBody.push(line);
+      currentBodyLineOffsets.push(lineOffset);
     }
+
+    offset += line.length + 1;
   }
 
   if (inDocument) {
-    docs.push({ header: currentHeader, body: currentBody.join('\n') });
+    docs.push({
+      header: currentHeader,
+      body: currentBody.join('\n'),
+      headerLine: currentHeaderLine,
+      headerOffset: currentHeaderOffset,
+      bodyStartLine: currentBodyStartLine,
+      bodyStartOffset: currentBodyStartOffset,
+      bodyLines: currentBody,
+      bodyLineOffsets: currentBodyLineOffsets,
+    });
   }
 
   return docs;
@@ -117,24 +161,44 @@ function parseDocument(raw: RawDocument): UnityDocument {
   const { typeId, fileId, stripped } = parseHeader(raw.header);
 
   // Parse the YAML body and extract the actual type name from the first line
-  const { properties, bodyTypeName } = parseYamlBody(raw.body);
+  const { properties, bodyTypeName, typeLocation, source } = parseYamlBody(raw);
 
   // Use the actual body type name if available, fall back to the type map
   const typeName = bodyTypeName || UNITY_TYPE_MAP[typeId] || `Unknown_${typeId}`;
 
-  return { typeId, typeName, fileId, stripped, properties };
+  return {
+    typeId,
+    typeName,
+    fileId,
+    stripped,
+    properties,
+    source: {
+      header: createLocation(raw, -1, 0),
+      type: typeLocation,
+      bodyStartLine: raw.bodyStartLine,
+      bodyStartOffset: raw.bodyStartOffset,
+      properties: source,
+    },
+  };
 }
 
 /**
  * Simple YAML parser that handles Unity's subset of YAML.
  * Does NOT use a full YAML parser because Unity uses custom tags and flow syntax.
  */
-function parseYamlBody(body: string): { properties: Record<string, any>; bodyTypeName: string } {
-  const lines = body.split('\n');
+function parseYamlBody(raw: RawDocument): {
+  properties: Record<string, any>;
+  bodyTypeName: string;
+  typeLocation?: UnitySourceLocation;
+  source: Record<string, UnityYamlSourceNode>;
+} {
+  const lines = raw.bodyLines;
   const result: Record<string, any> = {};
+  const source: Record<string, UnityYamlSourceNode> = {};
   let bodyTypeName = '';
+  let typeLocation: UnitySourceLocation | undefined;
 
-  if (lines.length === 0) return { properties: result, bodyTypeName };
+  if (lines.length === 0) return { properties: result, bodyTypeName, source };
 
   // First non-empty line should be the type name (e.g., "GameObject:")
   // Extract it and skip it
@@ -145,6 +209,7 @@ function parseYamlBody(body: string): { properties: Record<string, any>; bodyTyp
       // This is the type name line (e.g., "GameObject:" or "MonoBehaviour:")
       if (trimmed.endsWith(':')) {
         bodyTypeName = trimmed.slice(0, -1);
+        typeLocation = createLocation(raw, i, getIndent(lines[i]));
       }
       startIdx = i + 1;
       break;
@@ -152,7 +217,8 @@ function parseYamlBody(body: string): { properties: Record<string, any>; bodyTyp
   }
 
   parseIndentedBlock(lines, startIdx, 2, result);
-  return { properties: result, bodyTypeName };
+  Object.assign(source, buildDocumentPropertySource(raw, startIdx));
+  return { properties: result, bodyTypeName, typeLocation, source };
 }
 
 /** Parse an indented YAML block into a key-value map */
@@ -332,7 +398,12 @@ function parseArray(
         const peekIndent2 = getIndent(peekLine2);
         const contLevel = expectedIndent + 2;
 
-        if (peekTrimmed2 !== '' && peekIndent2 > contLevel && !peekTrimmed2.startsWith('- ')) {
+        if (isUnityReferenceKey(key) && isUnityReferenceEntry(peekTrimmed2)) {
+          // Unity object references sometimes appear as a block after an array item key.
+          const nested: Record<string, any> = {};
+          i = parseUnityReferenceBlock(lines, i + 1, nested);
+          obj[key] = markFlow(nested);
+        } else if (peekTrimmed2 !== '' && peekIndent2 > contLevel && !peekTrimmed2.startsWith('- ')) {
           // Truly nested object (deeper than continuation level)
           const nested: Record<string, any> = {};
           i = parseIndentedBlock(lines, i + 1, peekIndent2, nested);
@@ -464,6 +535,45 @@ function parseArray(
   }
 
   return i;
+}
+
+/** Parse a loose Unity object reference block after an array item key */
+function parseUnityReferenceBlock(
+  lines: string[],
+  startIdx: number,
+  target: Record<string, any>
+): number {
+  let i = startIdx;
+
+  while (i < lines.length) {
+    const trimmed = lines[i].trim();
+    if (!isUnityReferenceEntry(trimmed)) {
+      break;
+    }
+
+    const colonIdx = trimmed.indexOf(':');
+    const key = trimmed.substring(0, colonIdx);
+    const value = trimmed.substring(colonIdx + 1).trim();
+    target[key] = parseInlineValue(value);
+    i++;
+  }
+
+  return i;
+}
+
+/** Check if a key usually represents a Unity object reference */
+function isUnityReferenceKey(key: string): boolean {
+  return key === 'm_Target' ||
+    key === 'target' ||
+    key === 'objectReference' ||
+    key.endsWith('Object') ||
+    key.endsWith('Prefab') ||
+    key.endsWith('Asset');
+}
+
+/** Check if a line is one field of a Unity object reference block */
+function isUnityReferenceEntry(trimmed: string): boolean {
+  return /^(fileID|guid|type):\s*/.test(trimmed);
 }
 
 /** Parse an inline value (the part after ": ") */
@@ -604,6 +714,266 @@ function smartSplit(str: string, delimiter: string): string[] {
 function getIndent(line: string): number {
   const match = line.match(/^(\s*)/);
   return match ? match[1].length : 0;
+}
+
+/** Build a generic source map for parsed document properties */
+function buildDocumentPropertySource(raw: RawDocument, startIdx: number): Record<string, UnityYamlSourceNode> {
+  const root: Record<string, UnityYamlSourceNode> = {};
+  const stack: Array<{ indent: number; children: Record<string, UnityYamlSourceNode>; node?: UnityYamlSourceNode; kind?: 'property' | 'item' }> = [
+    { indent: -1, children: root },
+  ];
+  let looseReferenceNode: UnityYamlSourceNode | undefined;
+
+  for (let i = startIdx; i < raw.bodyLines.length; i++) {
+    const line = raw.bodyLines[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const indent = getIndent(line);
+    const isArrayItem = trimmed.startsWith('- ');
+    if (looseReferenceNode && isUnityReferenceEntry(trimmed)) {
+      const colonIdx = trimmed.indexOf(':');
+      const key = trimmed.slice(0, colonIdx).trim();
+      const rawValue = trimmed.slice(colonIdx + 1).trim();
+      looseReferenceNode.children ??= {};
+      looseReferenceNode.children[key] = createSourceNode(
+        raw,
+        i,
+        line.indexOf(key),
+        getValueCharacter(line, line.indexOf(':')),
+        rawValue
+      );
+      continue;
+    }
+
+    looseReferenceNode = undefined;
+
+    while (stack.length > 1 && shouldPopSourceStack(stack[stack.length - 1], indent, isArrayItem)) {
+      stack.pop();
+    }
+
+    if (isArrayItem) {
+      const parent = stack[stack.length - 1].node;
+      if (!parent) {
+        continue;
+      }
+
+      const itemNode: UnityYamlSourceNode = {
+        item: createLocation(raw, i, indent),
+      };
+      parent.items ??= [];
+      parent.items.push(itemNode);
+
+      const itemContent = trimmed.slice(2);
+      const colonIdx = itemContent.indexOf(':');
+      if (colonIdx !== -1) {
+        itemNode.children = {};
+        const key = itemContent.slice(0, colonIdx).trim();
+        const rawValue = itemContent.slice(colonIdx + 1).trim();
+        const keyCharacter = line.indexOf(key);
+        const valueCharacter = getValueCharacter(line, line.indexOf(':'));
+        const childNode = createSourceNode(raw, i, keyCharacter, valueCharacter, rawValue);
+        itemNode.children[key] = childNode;
+        attachFlowChildren(raw, childNode, rawValue);
+        if (!rawValue && isUnityReferenceKey(key)) {
+          looseReferenceNode = childNode;
+        }
+      }
+
+      if (itemNode.children) {
+        stack.push({ indent, children: itemNode.children, node: itemNode, kind: 'item' });
+      }
+      if (!itemContent.slice(Math.max(itemContent.indexOf(':') + 1, 0)).trim() && itemNode.children) {
+        const firstChild = Object.values(itemNode.children)[0];
+        if (firstChild) {
+          firstChild.children ??= {};
+          stack.push({ indent: indent + 2, children: firstChild.children, node: firstChild, kind: 'property' });
+        }
+      }
+      continue;
+    }
+
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx === -1) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, colonIdx).trim();
+    const rawValue = trimmed.slice(colonIdx + 1).trim();
+    const keyCharacter = line.indexOf(key);
+    const valueCharacter = getValueCharacter(line, line.indexOf(':'));
+    const node = createSourceNode(raw, i, keyCharacter, valueCharacter, rawValue);
+    stack[stack.length - 1].children[key] = node;
+    attachFlowChildren(raw, node, rawValue);
+
+    if (!rawValue) {
+      node.children ??= {};
+      stack.push({ indent, children: node.children, node, kind: 'property' });
+    }
+  }
+
+  return root;
+}
+
+/** Decide when a source-map stack frame no longer owns the current line */
+function shouldPopSourceStack(
+  frame: { indent: number; kind?: 'property' | 'item' },
+  indent: number,
+  isArrayItem: boolean
+): boolean {
+  if (!isArrayItem) {
+    return frame.indent >= indent;
+  }
+
+  return frame.indent > indent || (frame.indent === indent && frame.kind === 'item');
+}
+
+/** Create a source node from key and value positions */
+function createSourceNode(
+  raw: RawDocument,
+  lineIndex: number,
+  keyCharacter: number,
+  valueCharacter: number,
+  rawValue: string
+): UnityYamlSourceNode {
+  return {
+    key: createLocation(raw, lineIndex, keyCharacter),
+    value: createLocation(raw, lineIndex, valueCharacter),
+    rawValue,
+  };
+}
+
+/** Attach source nodes for flow mapping fields when a value is written inline */
+function attachFlowChildren(raw: RawDocument, node: UnityYamlSourceNode, rawValue: string): void {
+  if (!rawValue.startsWith('{') || !node.value) {
+    return;
+  }
+
+  const innerStart = rawValue.indexOf('{') + 1;
+  const innerEnd = rawValue.lastIndexOf('}');
+  if (innerEnd <= innerStart) {
+    return;
+  }
+
+  node.children ??= {};
+  const inner = rawValue.slice(innerStart, innerEnd);
+  for (const part of smartSplitWithPositions(inner, ',')) {
+    const colonIdx = part.text.indexOf(':');
+    if (colonIdx === -1) {
+      continue;
+    }
+
+    const keyStart = part.text.search(/\S/);
+    const key = part.text.slice(0, colonIdx).trim();
+    const valueStart = colonIdx + 1 + countSpacesAfter(part.text, colonIdx + 1);
+    const keyLocation = offsetLocation(node.value, rawValue, innerStart + part.start + Math.max(keyStart, 0));
+    const valueLocation = offsetLocation(node.value, rawValue, innerStart + part.start + valueStart);
+    const childRawValue = part.text.slice(colonIdx + 1).trim();
+
+    node.children[key] = {
+      key: keyLocation,
+      value: valueLocation,
+      rawValue: childRawValue,
+    };
+  }
+}
+
+/** Create a location for a raw document line and character */
+function createLocation(raw: RawDocument, lineIndex: number, character: number): UnitySourceLocation {
+  if (lineIndex < 0) {
+    return {
+      line: raw.headerLine,
+      character,
+      offset: raw.headerOffset + character,
+    };
+  }
+
+  return {
+    line: raw.bodyStartLine + lineIndex,
+    character,
+    offset: (raw.bodyLineOffsets[lineIndex] ?? raw.bodyStartOffset) + character,
+  };
+}
+
+/** Move a source location by a relative offset inside a raw string */
+function offsetLocation(base: UnitySourceLocation, text: string, relativeOffset: number): UnitySourceLocation {
+  let line = base.line;
+  let lineStartOffset = 0;
+
+  for (let index = 0; index < relativeOffset; index++) {
+    if (text[index] === '\n') {
+      line += 1;
+      lineStartOffset = index + 1;
+    }
+  }
+
+  return {
+    line,
+    character: line === base.line
+      ? base.character + relativeOffset
+      : relativeOffset - lineStartOffset,
+    offset: base.offset + relativeOffset,
+  };
+}
+
+/** Return the first non-space value character after a colon */
+function getValueCharacter(line: string, colonIndex: number): number {
+  return colonIndex + 1 + countSpacesAfter(line, colonIndex + 1);
+}
+
+/** Count spaces starting at a character offset */
+function countSpacesAfter(value: string, start: number): number {
+  let count = 0;
+  for (let index = start; index < value.length && value[index] === ' '; index++) {
+    count += 1;
+  }
+  return count;
+}
+
+/** Split with original positions, respecting nested flow values */
+function smartSplitWithPositions(str: string, delimiter: string): Array<{ text: string; start: number }> {
+  const parts: Array<{ text: string; start: number }> = [];
+  let depth = 0;
+  let current = '';
+  let start = 0;
+  let inQuote = false;
+  let quoteChar = '';
+
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+
+    if (inQuote) {
+      current += ch;
+      if (ch === quoteChar) inQuote = false;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      inQuote = true;
+      quoteChar = ch;
+      current += ch;
+      continue;
+    }
+
+    if (ch === '{' || ch === '[') depth++;
+    if (ch === '}' || ch === ']') depth--;
+
+    if (ch === delimiter && depth === 0) {
+      parts.push({ text: current.trim(), start: start + current.search(/\S|$/) });
+      current = '';
+      start = i + 1;
+    } else {
+      current += ch;
+    }
+  }
+
+  if (current.trim()) {
+    parts.push({ text: current.trim(), start: start + current.search(/\S|$/) });
+  }
+
+  return parts;
 }
 
 /** Extract PrefabInstance info from parsed documents */

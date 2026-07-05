@@ -10,6 +10,32 @@ export interface FileReference {
   type?: number;
 }
 
+/** Source position for a parsed Unity YAML token */
+export interface UnitySourceLocation {
+  line: number;
+  character: number;
+  offset: number;
+}
+
+/** Source metadata for a parsed Unity YAML property or array item */
+export interface UnityYamlSourceNode {
+  key?: UnitySourceLocation;
+  value?: UnitySourceLocation;
+  item?: UnitySourceLocation;
+  rawValue?: string;
+  children?: Record<string, UnityYamlSourceNode>;
+  items?: UnityYamlSourceNode[];
+}
+
+/** Source metadata for a Unity YAML document */
+export interface UnityDocumentSource {
+  header: UnitySourceLocation;
+  type?: UnitySourceLocation;
+  bodyStartLine: number;
+  bodyStartOffset: number;
+  properties: Record<string, UnityYamlSourceNode>;
+}
+
 /** A single Unity YAML document (one --- block) */
 export interface UnityDocument {
   /** Unity type ID (e.g. 1=GameObject, 4=Transform, 114=MonoBehaviour) */
@@ -22,6 +48,8 @@ export interface UnityDocument {
   stripped: boolean;
   /** The parsed YAML properties as a nested key-value structure */
   properties: Record<string, any>;
+  /** Source locations for CodeLens and diagnostics; ignored by the writer */
+  source?: UnityDocumentSource;
 }
 
 /** Represents a GameObject in the hierarchy */

@@ -6,6 +6,7 @@ import { UnityPlusLogger } from './logger';
 export interface UnityMetadataIndex extends vscode.Disposable {
   rebuild(): Promise<void>;
   getAssetPath(guid: string): string | undefined;
+  getGuid(assetPath: string): string | undefined;
 }
 
 export interface LazyUnityMetadataIndex extends vscode.Disposable {
@@ -43,6 +44,7 @@ const defaultRebuildConcurrency = 32;
 
 export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): UnityMetadataIndex {
   const guidToAssetPath = new Map<string, string>();
+  const assetPathToGuid = new Map<string, string>();
   const metaPathToGuid = new Map<string, string>();
   const findMetaFiles = options.findMetaFiles ?? (() => findDefaultMetaFiles(options.root));
   const readTextFile = options.readTextFile ?? readDefaultTextFile;
@@ -55,6 +57,7 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
 
   async function rebuild(): Promise<void> {
     guidToAssetPath.clear();
+    assetPathToGuid.clear();
     metaPathToGuid.clear();
 
     const metaFiles = await findMetaFiles();
@@ -74,7 +77,9 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
       }
 
       removeMetaFile(uri);
-      guidToAssetPath.set(guid, toAssetPath(uri));
+      const assetPath = toAssetPath(uri);
+      guidToAssetPath.set(guid, assetPath);
+      assetPathToGuid.set(pathKey(assetPath), guid);
       metaPathToGuid.set(metaKey(uri), guid);
     } catch (error) {
       removeMetaFile(uri);
@@ -91,12 +96,17 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
     }
 
     metaPathToGuid.delete(key);
+    const existingAssetPath = guidToAssetPath.get(existingGuid);
     guidToAssetPath.delete(existingGuid);
+    if (existingAssetPath) {
+      assetPathToGuid.delete(pathKey(existingAssetPath));
+    }
   }
 
   return {
     rebuild,
     getAssetPath: (guid: string) => guidToAssetPath.get(guid),
+    getGuid: (assetPath: string) => assetPathToGuid.get(pathKey(assetPath)),
     dispose: () => watcher.dispose()
   };
 }
@@ -188,6 +198,10 @@ function stripMetaExtension(path: string): string {
 
 function metaKey(uri: vscode.Uri): string {
   return uri.fsPath.replace(/\\/g, '/');
+}
+
+function pathKey(assetPath: string): string {
+  return assetPath.replace(/\\/g, '/').toLowerCase();
 }
 
 async function runWithConcurrency<T>(
