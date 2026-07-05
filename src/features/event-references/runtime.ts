@@ -97,7 +97,7 @@ export interface PriorityScanResult {
 export interface PriorityScanState {
   key: string;
   status: 'pending' | 'ready' | 'failed';
-  promise?: Promise<PriorityScanResult>;
+  promise?: Promise<PriorityScanResult | undefined>;
   result?: PriorityScanResult;
 }
 

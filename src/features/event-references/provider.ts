@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 import { isCSharpFile } from './assetDiscovery';
 import { createCodeLensesFromIndex, createScanStateCodeLenses } from './codeLens';
-import { createEmptyPriorityScanResult, buildPriorityReferenceIndex } from './priorityScan';
+import { buildPriorityReferenceIndex } from './priorityScan';
 import { createHoverMarkdown, showReferenceLocations } from './referenceLocations';
 import type { EventReferenceLocationTarget, EventReferenceRuntime, PriorityScanState, UnityEventReferenceIndexController } from './runtime';
 import { isEventReferenceAutoScanEnabled } from './settings';
@@ -55,8 +55,8 @@ export function createEventReferenceProvider(
               .catch(error => {
                 if (priorityScan === state) {
                   state.status = 'failed';
-                  state.result = createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
-                  runtime.scanStatus?.finish('failed', state.result.diagnostics, {
+                  state.result = undefined;
+                  runtime.scanStatus?.finish('failed', undefined, {
                     label: 'Unity refs: current',
                     phase: 'Current script scan failed',
                     scriptPath,
@@ -67,7 +67,7 @@ export function createEventReferenceProvider(
                 }
 
                 runtime.logger.warn(`UnityEvent priority scan failed for ${scriptPath}: ${errorMessage(error)}`);
-                return createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
+                return undefined;
               });
             state.promise = promise;
             priorityScan = state;
@@ -80,11 +80,8 @@ export function createEventReferenceProvider(
             });
           }
 
-          if (priorityScan.status === 'failed' && priorityScan.result) {
-            return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
-              embedReferences: true,
-              includeZeroSummaryLenses: true
-            });
+          if (priorityScan.status === 'failed' || !priorityScan.result) {
+            return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
           }
 
           return await createScanStateCodeLenses(runtime, document, scriptPath, '-');

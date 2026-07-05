@@ -55,20 +55,63 @@ describe('csharpLanguageService', () => {
       'commands.executeCommand:vscode.executeDocumentSymbolProvider:/Project/Assets/Gate.cs'
     ]);
   });
+
+  it('falls back to source symbols when the C# server returns no document symbols', async () => {
+    const calls: string[] = [];
+    const runtime = createFakeVscodeRuntime(calls, [], [
+      'namespace Amlos.Control.Interact',
+      '{',
+      '  public sealed class Interactable : MonoBehaviour',
+      '  {',
+      '    public UnityEvent<ResultArg<bool>> OnCheckEnable = new();',
+      '    public void Interact() {}',
+      '  }',
+      '}'
+    ].join('\n'));
+    const service = createVscodeCSharpLanguageService(runtime);
+    const uri = createUri('/Project/Assets/Interactable.cs');
+
+    const types = await service.findTypes(uri);
+    const methods = await service.findMethods(uri);
+    const fields = await service.findUnityEventFields(uri);
+    const targets = await service.findTargetMethodPosition(uri, 'Amlos.Control.Interact.Interactable', 'Interact');
+
+    assert.deepStrictEqual(types.map(type => type.fullName), ['Amlos.Control.Interact.Interactable']);
+    assert.deepStrictEqual(methods.map(method => method.name), ['Interact']);
+    assert.deepStrictEqual(fields.map(field => field.name), ['OnCheckEnable']);
+    assert.deepStrictEqual(targets, [{ line: 5, character: 16 }]);
+  });
+
+  it('throws when neither C# server symbols nor source text are available', async () => {
+    const calls: string[] = [];
+    const runtime = createFakeVscodeRuntime(calls, undefined, '', true);
+    const service = createVscodeCSharpLanguageService(runtime);
+
+    await assert.rejects(
+      async () => await service.findTypes(createUri('/Project/Assets/Missing.cs')),
+      /C# symbols and source text are unavailable/
+    );
+  });
 });
 
 /** Creates the smallest VS Code runtime surface needed by the C# language service. */
 function createFakeVscodeRuntime(
   calls: string[],
-  symbols: vscode.DocumentSymbol[]
+  symbols: vscode.DocumentSymbol[] | undefined,
+  sourceText = '',
+  throwOpenTextDocument = false
 ): typeof vscode {
   return {
     workspace: {
       openTextDocument: async (uri: vscode.Uri) => {
+        if (throwOpenTextDocument) {
+          throw new Error('document unavailable');
+        }
+
         calls.push(`workspace.openTextDocument:${uri.fsPath}`);
         return {
           uri,
-          getText: () => ''
+          getText: () => sourceText
         } as vscode.TextDocument;
       }
     },
@@ -77,6 +120,10 @@ function createFakeVscodeRuntime(
         const [uri] = args as [vscode.Uri];
         calls.push(`commands.executeCommand:${command}:${uri.fsPath}`);
         assert.strictEqual(calls.at(-2), `workspace.openTextDocument:${uri.fsPath}`);
+        if (symbols === undefined) {
+          throw new Error('symbols unavailable');
+        }
+
         return symbols;
       }
     },

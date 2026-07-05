@@ -58,9 +58,14 @@ async function findCodeLensStatusAnchorRange(
     return toVscodeRange(runtime.runtimeVscode, primaryType);
   }
 
-  const types = await safeFindTypes(runtime, document);
-  return types[0] ? toVscodeRange(runtime.runtimeVscode, types[0].range) :
-    new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
+  try {
+    const types = await safeFindTypes(runtime, document);
+    return types[0] ? toVscodeRange(runtime.runtimeVscode, types[0].range) :
+      new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
+  } catch {
+    // Placeholder lenses must remain visible even when no class-level anchor can be resolved.
+    return new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
+  }
 }
 
 /** Converts a reference index into CodeLens entries for one C# document. */
@@ -245,7 +250,7 @@ async function safeFindMethods(
     return await runtime.csharpLanguageService?.findMethods(document.uri) ?? [];
   } catch (error) {
     runtime.logger.warn(`UnityEvent CodeLens could not read C# methods in ${document.uri.fsPath}: ${String(error)}`);
-    return [];
+    throw error;
   }
 }
 
@@ -258,7 +263,7 @@ async function safeFindUnityEventFields(
     return await runtime.csharpLanguageService?.findUnityEventFields(document.uri) ?? [];
   } catch (error) {
     runtime.logger.warn(`UnityEvent CodeLens could not read UnityEvent fields in ${document.uri.fsPath}: ${String(error)}`);
-    return [];
+    throw error;
   }
 }
 
@@ -271,7 +276,7 @@ async function safeFindTypes(
     return await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
   } catch (error) {
     runtime.logger.warn(`UnityEvent CodeLens could not read C# types in ${document.uri.fsPath}: ${String(error)}`);
-    return [];
+    throw error;
   }
 }
 

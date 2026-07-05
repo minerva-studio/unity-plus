@@ -75,6 +75,8 @@ interface SourceTypeCandidate {
   namespace?: string;
   nameStart: number;
   nameEnd: number;
+  bodyStart?: number;
+  bodyEnd?: number;
 }
 
 interface NamespaceRange {
@@ -97,18 +99,30 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
     },
     async findMethods(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
+      if (!symbols?.length) {
+        return await findSourceMethodsOrThrow(runtimeVscode, uri);
+      }
+
       const methods: CSharpMethodSymbolSnapshot[] = [];
       collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
       return methods;
     },
     async findTypes(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
+      if (!symbols?.length) {
+        return await findSourceTypesOrThrow(runtimeVscode, uri);
+      }
+
       const types: CSharpTypeSymbolSnapshot[] = [];
       collectCSharpTypeSymbols(runtimeVscode, symbols, [], types);
       return types;
     },
     async findUnityEventFields(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
+      if (!symbols?.length) {
+        return await findSourceUnityEventFieldsOrThrow(runtimeVscode, uri);
+      }
+
       const fields: CSharpFieldSymbolSnapshot[] = [];
       collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
       return fields;
@@ -121,6 +135,10 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
     },
     async findTargetMethodPosition(uri, targetTypeName, methodName) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
+      if (!symbols?.length) {
+        return await findSourceTargetMethodPositionsOrThrow(runtimeVscode, uri, targetTypeName, methodName);
+      }
+
       const positions: CSharpPosition[] = [];
       collectTargetMethodSymbolPositions(runtimeVscode, symbols, targetTypeName, methodName, positions);
       return positions;
@@ -161,7 +179,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 async function getDocumentSymbols(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
-): Promise<Array<vscode.DocumentSymbol | vscode.SymbolInformation>> {
+): Promise<Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined> {
   try {
     const document = await runtimeVscode.workspace.openTextDocument(uri);
     return await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
@@ -169,7 +187,7 @@ async function getDocumentSymbols(
       document.uri
     ) ?? [];
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -371,13 +389,180 @@ function csharpSymbolKey(value: string): string {
   return value.toLowerCase();
 }
 
+/** Parses source types when document symbols are unavailable but the text can still be read. */
+async function findSourceTypesOrThrow(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpTypeSymbolSnapshot[]> {
+  const source = await readSourceTextOrThrow(runtimeVscode, uri);
+  const masked = maskCommentsAndStrings(source);
+  const lineStarts = buildLineStarts(source);
+  return findSourceTopLevelTypes(masked).map(type => ({
+    name: type.name,
+    fullName: type.namespace ? `${type.namespace}.${type.name}` : type.name,
+    range: sourceRangeAt(lineStarts, type.nameStart, type.nameEnd)
+  }));
+}
+
+/** Parses source methods only after the C# server cannot provide document symbols. */
+async function findSourceMethodsOrThrow(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpMethodSymbolSnapshot[]> {
+  const source = await readSourceTextOrThrow(runtimeVscode, uri);
+  const masked = maskCommentsAndStrings(source);
+  const lineStarts = buildLineStarts(source);
+  const methods: CSharpMethodSymbolSnapshot[] = [];
+
+  for (const type of findSourceTopLevelTypes(masked)) {
+    if (type.bodyStart === undefined || type.bodyEnd === undefined) {
+      continue;
+    }
+
+    for (const member of findSourceMethodMembers(masked, type.bodyStart, type.bodyEnd)) {
+      methods.push({
+        name: member.name,
+        typeName: type.namespace ? `${type.namespace}.${type.name}` : type.name,
+        range: sourceRangeAt(lineStarts, member.nameStart, member.nameEnd)
+      });
+    }
+  }
+
+  return methods;
+}
+
+/** Parses UnityEvent fields from source when symbol metadata is not available. */
+async function findSourceUnityEventFieldsOrThrow(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpFieldSymbolSnapshot[]> {
+  const source = await readSourceTextOrThrow(runtimeVscode, uri);
+  const masked = maskCommentsAndStrings(source);
+  const lineStarts = buildLineStarts(source);
+  const fields: CSharpFieldSymbolSnapshot[] = [];
+
+  for (const type of findSourceTopLevelTypes(masked)) {
+    if (type.bodyStart === undefined || type.bodyEnd === undefined) {
+      continue;
+    }
+
+    for (const member of findSourceUnityEventFieldMembers(masked, type.bodyStart, type.bodyEnd)) {
+      fields.push({
+        name: member.name,
+        typeName: type.namespace ? `${type.namespace}.${type.name}` : type.name,
+        range: sourceRangeAt(lineStarts, member.nameStart, member.nameEnd)
+      });
+    }
+  }
+
+  return fields;
+}
+
+/** Parses target method declarations from source after server symbols fail. */
+async function findSourceTargetMethodPositionsOrThrow(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  targetTypeName: string,
+  methodName: string
+): Promise<CSharpPosition[]> {
+  const source = await readSourceTextOrThrow(runtimeVscode, uri);
+  const masked = maskCommentsAndStrings(source);
+  const lineStarts = buildLineStarts(source);
+  const positions: CSharpPosition[] = [];
+
+  for (const type of findSourceTopLevelTypes(masked)) {
+    const fullName = type.namespace ? `${type.namespace}.${type.name}` : type.name;
+    if (type.bodyStart === undefined || type.bodyEnd === undefined || !matchesCSharpTypeName(fullName, targetTypeName)) {
+      continue;
+    }
+
+    for (const member of findSourceMethodMembers(masked, type.bodyStart, type.bodyEnd)) {
+      if (member.name === methodName) {
+        positions.push(positionAt(lineStarts, member.nameStart));
+      }
+    }
+  }
+
+  return positions;
+}
+
+/** Reads source text or throws so callers can distinguish unavailable symbols from a real empty result. */
+async function readSourceTextOrThrow(runtimeVscode: typeof vscode, uri: vscode.Uri): Promise<string> {
+  try {
+    return (await runtimeVscode.workspace.openTextDocument(uri)).getText();
+  } catch (error) {
+    throw new Error(`C# symbols and source text are unavailable for ${uri.fsPath}: ${String(error)}`);
+  }
+}
+
+interface SourceMemberCandidate {
+  name: string;
+  nameStart: number;
+  nameEnd: number;
+}
+
+/** Finds method declarations at direct type-member depth in masked C# source. */
+function findSourceMethodMembers(masked: string, bodyStart: number, bodyEnd: number): SourceMemberCandidate[] {
+  const body = masked.slice(bodyStart, bodyEnd);
+  const methodPattern = /\b(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial)\s+)*(?:[A-Za-z_][A-Za-z0-9_.<>,?\[\]]*\s+)+(@?[A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+  const members: SourceMemberCandidate[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = methodPattern.exec(body))) {
+    const absoluteIndex = bodyStart + match.index;
+    if (getBraceDepthAt(masked, absoluteIndex) !== getBraceDepthAt(masked, bodyStart)) {
+      continue;
+    }
+
+    const name = normalizeSourceIdentifier(match[1]);
+    const nameStart = bodyStart + match.index + match[0].lastIndexOf(match[1]);
+    members.push({ name, nameStart, nameEnd: nameStart + match[1].length });
+  }
+
+  return members;
+}
+
+/** Finds UnityEvent field declarations at direct type-member depth in masked C# source. */
+function findSourceUnityEventFieldMembers(masked: string, bodyStart: number, bodyEnd: number): SourceMemberCandidate[] {
+  const body = masked.slice(bodyStart, bodyEnd);
+  const fieldPattern = /\b(?:(?:public|private|protected|internal|static|readonly|new|sealed|volatile)\s+)*((?:UnityEngine\.Events\.)?UnityEvent(?:\s*<[^;\n]+>)?)\s+(@?[A-Za-z_][A-Za-z0-9_]*)\b/g;
+  const members: SourceMemberCandidate[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = fieldPattern.exec(body))) {
+    const absoluteIndex = bodyStart + match.index;
+    if (getBraceDepthAt(masked, absoluteIndex) !== getBraceDepthAt(masked, bodyStart)) {
+      continue;
+    }
+
+    const name = normalizeSourceIdentifier(match[2]);
+    const nameStart = bodyStart + match.index + match[0].lastIndexOf(match[2]);
+    members.push({ name, nameStart, nameEnd: nameStart + match[2].length });
+  }
+
+  return members;
+}
+
+/** Creates a neutral C# range from source offsets. */
+function sourceRangeAt(lineStarts: readonly number[], start: number, end: number): CSharpRange {
+  return {
+    start: positionAt(lineStarts, start),
+    end: positionAt(lineStarts, end)
+  };
+}
+
+/** Normalizes escaped C# identifiers to their symbol names. */
+function normalizeSourceIdentifier(identifier: string): string {
+  return identifier.startsWith('@') ? identifier.slice(1) : identifier;
+}
+
 async function getPrimaryTopLevelTypeFromSymbols(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
 ): Promise<CSharpTopLevelTypeSnapshot | 'fallback' | undefined> {
   const symbols = await getDocumentSymbols(runtimeVscode, uri);
 
-  if (symbols.length === 0) {
+  if (!symbols?.length) {
     return 'fallback';
   }
 
@@ -539,11 +724,32 @@ function findSourceTopLevelTypes(masked: string): SourceTypeCandidate[] {
       kind,
       namespace: activeNamespace?.name,
       nameStart,
-      nameEnd
+      nameEnd,
+      ...findSourceTypeBody(masked, nameEnd)
     });
   }
 
   return candidates;
+}
+
+/** Locates the body span for block-bodied type declarations. */
+function findSourceTypeBody(masked: string, searchStart: number): Pick<SourceTypeCandidate, 'bodyStart' | 'bodyEnd'> {
+  const openBraceIndex = masked.indexOf('{', searchStart);
+  const semicolonIndex = masked.indexOf(';', searchStart);
+
+  if (openBraceIndex === -1 || (semicolonIndex !== -1 && semicolonIndex < openBraceIndex)) {
+    return {};
+  }
+
+  const closeBraceIndex = findMatchingBrace(masked, openBraceIndex);
+  if (closeBraceIndex === undefined) {
+    return {};
+  }
+
+  return {
+    bodyStart: openBraceIndex + 1,
+    bodyEnd: closeBraceIndex
+  };
 }
 
 function findNamespaceRanges(masked: string): NamespaceRange[] {

@@ -968,7 +968,7 @@ describe('eventReferences', () => {
     );
   });
 
-  it('keeps CodeLens placeholders when C# symbols are unavailable', async () => {
+  it('shows confirmed zero CodeLens when C# server symbols fall back to source text', async () => {
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
@@ -1000,6 +1000,42 @@ describe('eventReferences', () => {
       '0 Unity serialized instances',
       '0 UnityEvent references',
       '0 UnityEvent targets'
+    ]);
+  });
+
+  it('keeps CodeLens placeholders when C# symbols and source text are unavailable', async () => {
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      },
+      throwDocumentSymbols: true,
+      throwOpenTextDocument: true
+    });
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const document = createTextDocument('/Project/Assets/Unknown.cs', 'public class Unknown {}');
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      readTextFile: async () => ''
+    });
+
+    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
+      '- Unity serialized instances',
+      '- UnityEvent references',
+      '- UnityEvent targets'
+    ]);
+    await runtime.waitForCodeLensChange();
+
+    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
+      '- Unity serialized instances',
+      '- UnityEvent references',
+      '- UnityEvent targets'
     ]);
   });
 
@@ -2290,6 +2326,7 @@ interface EventReferenceRuntimeOptions {
   findFiles?: (pattern: unknown, exclude?: unknown) => Promise<readonly vscode.Uri[]>;
   findTextInFiles?: () => Thenable<void>;
   throwDocumentSymbols?: boolean;
+  throwOpenTextDocument?: boolean;
 }
 
 function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {}): EventReferenceRuntime {
@@ -2348,8 +2385,13 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       }
     },
     workspace: {
-      openTextDocument: async (uri: vscode.Uri) =>
-        textDocuments.get(uri.fsPath) ?? createTextDocument(uri.fsPath, ''),
+      openTextDocument: async (uri: vscode.Uri) => {
+        if (options.throwOpenTextDocument) {
+          throw new Error('document unavailable');
+        }
+
+        return textDocuments.get(uri.fsPath) ?? createTextDocument(uri.fsPath, '');
+      },
       findFiles: async (pattern: unknown, exclude?: unknown) =>
         await options.findFiles?.(pattern, exclude) ?? [],
       findTextInFiles: options.findTextInFiles,

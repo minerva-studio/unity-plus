@@ -234,21 +234,6 @@ function createPriorityMetadataIndex(
   };
 }
 
-/** Creates an empty priority result so failed or GUID-less scans still render zero-count feedback. */
-export function createEmptyPriorityScanResult(
-  runtime: EventReferenceRuntime,
-  scriptPath: string,
-  reason: string
-): PriorityScanResult {
-  const diagnostics = createEmptyDiagnostics();
-  runtime.logger.debug(`UnityEvent priority scan for ${scriptPath} produced no index: ${reason}.`);
-  return {
-    index: createReferenceIndex([], [], diagnostics),
-    diagnostics,
-    reason
-  };
-}
-
 /** Resolves editor-class identifiers only against the current C# file for fast priority scans. */
 function createCurrentDocumentTypeResolver(
   currentTypes: readonly CSharpTypeSymbolSnapshot[],
