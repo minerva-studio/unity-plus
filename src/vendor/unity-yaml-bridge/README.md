@@ -30,4 +30,6 @@ Local modifications:
 
 - Added parser-owned source location metadata for documents, properties, array items, and flow mapping fields.
 - Added tolerant parsing for Unity object reference blocks such as `- m_Target:` followed by `fileID` fields.
+- Reworked the parser runtime to use offset/span line indexing instead of whole-file `split`, copied document bodies, and second-pass source map scans.
+- Added parser profiles; `eventReferences` materializes only CodeLens-relevant Unity YAML fields by default.
 - The writer ignores source metadata because it is stored outside serialized `properties`.

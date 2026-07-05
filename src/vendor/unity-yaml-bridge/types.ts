@@ -27,6 +27,20 @@ export interface UnityYamlSourceNode {
   items?: UnityYamlSourceNode[];
 }
 
+/** Parser materialization profile */
+export type UnityYamlParseProfile = 'full' | 'eventReferences';
+
+/** Optional source path segments requested by parser callers */
+export type UnityYamlSourcePath = readonly (string | number)[];
+
+/** Options for parsing Unity YAML files */
+export interface UnityYamlParseOptions {
+  /** Controls how much YAML is materialized into the AST */
+  profile?: UnityYamlParseProfile;
+  /** Extra source paths that should retain locations when supported */
+  sourcePaths?: readonly UnityYamlSourcePath[];
+}
+
 /** Source metadata for a Unity YAML document */
 export interface UnityDocumentSource {
   header: UnitySourceLocation;

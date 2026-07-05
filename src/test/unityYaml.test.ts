@@ -1,4 +1,6 @@
 import * as assert from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   getUnityYamlDocumentFileId,
   getUnityYamlDocumentScalar,
@@ -65,6 +67,49 @@ describe('unityYaml adapter', () => {
     assert.strictEqual(getUnityYamlPersistentCalls(behaviour!)[0].methodName, 'OpenGate');
     assert.strictEqual(getUnityYamlPrefabOverridePersistentCalls(prefabInstance!)[0].methodName, 'CloseGate');
   });
+
+  it('projects event reference fields without materializing unrelated large fields', () => {
+    const full = parseUnityYamlAsset(createUnityYamlFixture());
+    const projected = parseUnityYamlAsset(createUnityYamlFixture(), { profile: 'eventReferences' });
+    const fullBehaviour = full.documentsByFileId.get('-9223372036854775808');
+    const projectedBehaviour = projected.documentsByFileId.get('-9223372036854775808');
+
+    assert.ok(fullBehaviour?.properties.unrelatedLargeField);
+    assert.strictEqual(projectedBehaviour?.properties.unrelatedLargeField, undefined);
+    assert.strictEqual(getUnityYamlDocumentScriptReference(projectedBehaviour!)?.guid, gateScriptGuid);
+    assert.strictEqual(getUnityYamlPersistentCalls(projectedBehaviour!)[0].methodName, 'OpenGate');
+    assert.strictEqual(getUnityYamlDocumentScalar(projectedBehaviour!, 'm_EditorClassIdentifier'), 'Gameplay::Amlos.Gameplay.Gate');
+
+    const explicitlyRequested = parseUnityYamlAsset(createUnityYamlFixture(), {
+      profile: 'eventReferences',
+      sourcePaths: [['unrelatedLargeField']]
+    }).documentsByFileId.get('-9223372036854775808');
+    assert.ok(explicitlyRequested?.properties.unrelatedLargeField);
+  });
+
+  it('parses 20k script-only documents in eventReferences profile without full source trees', function () {
+    this.timeout(5000);
+
+    const asset = parseUnityYamlAsset(createManyScriptOnlyDocuments(20_000), { profile: 'eventReferences' });
+    const first = asset.documents[0];
+    const last = asset.documents[asset.documents.length - 1];
+
+    assert.strictEqual(asset.documents.length, 20_000);
+    assert.strictEqual(getUnityYamlDocumentScriptReference(first)?.guid, gateScriptGuid);
+    assert.strictEqual(getUnityYamlDocumentScriptReference(last)?.guid, gateScriptGuid);
+    assert.strictEqual(first.properties.unrelatedLargeField, undefined);
+    assert.deepStrictEqual(Object.keys(first.source?.properties ?? {}).sort(), ['m_Script'].sort());
+  });
+
+  it('keeps parser runtime away from legacy split and second-pass source map helpers', () => {
+    const parserSource = readFileSync(join(__dirname, '../../src/vendor/unity-yaml-bridge/unity-yaml-parser.ts'), 'utf8');
+
+    assert.strictEqual(parserSource.includes("content.split('\\n')"), false);
+    assert.strictEqual(parserSource.includes('bodyLines'), false);
+    assert.strictEqual(parserSource.includes('bodyLineOffsets'), false);
+    assert.strictEqual(parserSource.includes('buildDocumentPropertySource'), false);
+    assert.strictEqual(parserSource.includes('smartSplitWithPositions'), false);
+  });
 });
 
 const gateScriptGuid = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -104,6 +149,8 @@ MonoBehaviour:
   m_Name:
   m_EditorClassIdentifier: Gameplay::Amlos.Gameplay.Gate
   nestedReference: {target: {fileID: 200, guid: ${basePrefabGuid}, type: 3}, enabled: 1}
+  unrelatedLargeField:
+    nestedValue: this should not be materialized by the event reference projection
   OnBookPagePasted:
     m_PersistentCalls:
       m_Calls:
@@ -141,4 +188,21 @@ PrefabInstance:
     m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: ${basePrefabGuid}, type: 3}
 `;
+}
+
+/** Creates many script-only documents for parser projection regression coverage. */
+function createManyScriptOnlyDocuments(count: number): string {
+  const documents: string[] = ['%YAML 1.1', '%TAG !u! tag:unity3d.com,2011:'];
+
+  for (let index = 0; index < count; index++) {
+    documents.push([
+      `--- !u!114 &${index + 1}`,
+      'MonoBehaviour:',
+      '  unrelatedLargeField:',
+      '    nestedValue: skipped',
+      `  m_Script: {fileID: 11500000, guid: ${gateScriptGuid}, type: 3}`
+    ].join('\n'));
+  }
+
+  return documents.join('\n');
 }

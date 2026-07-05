@@ -7,12 +7,13 @@ import {
 import type {
   UnityDocument as VendoredUnityDocument,
   UnityFile as VendoredUnityFile,
+  UnityYamlParseOptions,
   UnitySourceLocation,
   UnityYamlSourceNode
 } from '../vendor/unity-yaml-bridge/types';
 
 export { writeUnityYaml };
-export type { VendoredUnityDocument, VendoredUnityFile };
+export type { VendoredUnityDocument, VendoredUnityFile, UnityYamlParseOptions };
 
 export interface UnityYamlSourceLocation {
   line: number;
@@ -64,8 +65,8 @@ export interface UnityYamlPersistentCall {
 const persistentCallPropertyPathPattern = /^(.+)\.m_PersistentCalls\.m_Calls\.Array\.data\[(\d+)\]\.(m_Target|m_TargetAssemblyTypeName|m_MethodName|m_CallState)$/;
 
 /** Parses Unity YAML into the vendored AST plus local document records. */
-export function parseUnityYamlAsset(content: string): UnityYamlParsedAsset {
-  const file = parseVendoredUnityYaml(content);
+export function parseUnityYamlAsset(content: string, options?: UnityYamlParseOptions): UnityYamlParsedAsset {
+  const file = parseVendoredUnityYaml(content, options);
   const documents = file.documents.map(toUnityYamlDocument);
   const documentsByFileId = new Map<string, UnityYamlDocument>();
 

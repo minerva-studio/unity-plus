@@ -457,7 +457,7 @@ async function parseUnityEventReferencesCore(
   diagnostics: UnityEventReferenceDiagnostics;
 }> {
   const diagnostics = createEmptyDiagnostics();
-  const documents = parseUnityYamlAsset(content).documents;
+  const documents = parseUnityYamlAsset(content, { profile: 'eventReferences' }).documents;
   const objects = new Map<string, SerializedObjectRecord>();
   const callsByDocument = new Map<string, PersistentCallSnapshot[]>();
   const serializedInstances = await collectSerializedInstancesFromDocuments(
@@ -919,7 +919,7 @@ async function createFastSerializedInstanceCodeLenses(
 
     const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
     const assetPath = toProjectPath(runtime.metadataIndex.root, uri);
-    const parsed = parseUnityYamlAsset(content);
+    const parsed = parseUnityYamlAsset(content, { profile: 'eventReferences' });
     const locations = await collectSerializedInstancesFromDocuments(
       parsed.documents,
       assetPath,
