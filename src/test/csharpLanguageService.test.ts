@@ -15,7 +15,8 @@ describe('csharpLanguageService', () => {
     assert.deepStrictEqual(types.map(type => type.fullName), ['Gate']);
     assert.deepStrictEqual(calls, [
       'workspace.openTextDocument:/Project/Assets/Gate.cs',
-      'commands.executeCommand:vscode.executeDocumentSymbolProvider:/Project/Assets/Gate.cs'
+      'commands.executeCommand:vscode.executeDocumentSymbolProvider:/Project/Assets/Gate.cs',
+      'workspace.openTextDocument:/Project/Assets/Gate.cs'
     ]);
   });
 
@@ -82,6 +83,37 @@ describe('csharpLanguageService', () => {
     assert.deepStrictEqual(targets, [{ line: 5, character: 16 }]);
   });
 
+  it('refines broad C# server SymbolInformation ranges to exact source name ranges', async () => {
+    const source = [
+      'namespace Amlos.Control.Interact',
+      '{',
+      '  public sealed class Interactable : MonoBehaviour',
+      '  {',
+      '    public UnityEvent<ResultArg<bool>> OnCheckEnable = new();',
+      '    public void Interact() {}',
+      '  }',
+      '}'
+    ].join('\n');
+    const calls: string[] = [];
+    const runtime = createFakeVscodeRuntime(calls, [
+      createSymbolInformation('Interactable', 4, 'Amlos.Control.Interact', 2, 2, 2, 54),
+      createSymbolInformation('OnCheckEnable', 7, 'Amlos.Control.Interact.Interactable', 4, 4, 4, 62),
+      createSymbolInformation('Interact()', 5, 'Amlos.Control.Interact.Interactable', 5, 4, 5, 29)
+    ], source);
+    const service = createVscodeCSharpLanguageService(runtime);
+    const uri = createUri('/Project/Assets/Interactable.cs');
+
+    const types = await service.findTypes(uri);
+    const methods = await service.findMethods(uri);
+    const fields = await service.findUnityEventFields(uri);
+    const targets = await service.findTargetMethodPosition(uri, 'Amlos.Control.Interact.Interactable', 'Interact');
+
+    assert.deepStrictEqual(types[0].range, sourceNameRange(source, 2, 'Interactable'));
+    assert.deepStrictEqual(fields[0].range, sourceNameRange(source, 4, 'OnCheckEnable'));
+    assert.deepStrictEqual(methods[0].range, sourceNameRange(source, 5, 'Interact'));
+    assert.deepStrictEqual(targets, [{ line: 5, character: 16 }]);
+  });
+
   it('throws when neither C# server symbols nor source text are available', async () => {
     const calls: string[] = [];
     const runtime = createFakeVscodeRuntime(calls, undefined, '', true);
@@ -97,7 +129,7 @@ describe('csharpLanguageService', () => {
 /** Creates the smallest VS Code runtime surface needed by the C# language service. */
 function createFakeVscodeRuntime(
   calls: string[],
-  symbols: vscode.DocumentSymbol[] | undefined,
+  symbols: Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined,
   sourceText = '',
   throwOpenTextDocument = false
 ): typeof vscode {
@@ -166,11 +198,44 @@ function createDocumentSymbol(
   } as vscode.DocumentSymbol;
 }
 
+/** Creates a fake SymbolInformation whose location range may be wider than the symbol name. */
+function createSymbolInformation(
+  name: string,
+  kind: number,
+  containerName: string,
+  startLine: number,
+  startCharacter: number,
+  endLine: number,
+  endCharacter: number
+): vscode.SymbolInformation {
+  return {
+    name,
+    kind,
+    containerName,
+    location: {
+      uri: createUri('/Project/Assets/Interactable.cs'),
+      range: new FakeRange(
+        new FakePosition(startLine, startCharacter) as unknown as vscode.Position,
+        new FakePosition(endLine, endCharacter) as unknown as vscode.Position
+      ) as unknown as vscode.Range
+    }
+  } as vscode.SymbolInformation;
+}
+
 function createUri(fsPath: string): vscode.Uri {
   return {
     fsPath,
     path: fsPath
   } as vscode.Uri;
+}
+
+/** Creates the expected symbol name range from a source line and symbol text. */
+function sourceNameRange(source: string, line: number, name: string): { start: { line: number; character: number }; end: { line: number; character: number } } {
+  const character = source.split('\n')[line].indexOf(name);
+  return {
+    start: { line, character },
+    end: { line, character: character + name.length }
+  };
 }
 
 class FakePosition {

@@ -239,4 +239,37 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
 
     assert.ok(Array.isArray(refs), 'findReferences should return an array');
   });
+
+  test('returns exact source name positions for types, UnityEvent fields, and methods', async () => {
+    const lines = [
+      'using UnityEngine.Events;',
+      'namespace Amlos.Control.Interact',
+      '{',
+      '    public sealed class Interactable : MonoBehaviour',
+      '    {',
+      '        public UnityEvent<ResultArg<bool>> OnCheckEnable = new();',
+      '        [DisplayIf(nameof(overrideDefaultHighlight))] public UnityEvent OnHighlighting = new();',
+      '        public void Interact() {}',
+      '    }',
+      '}'
+    ];
+    const filePath = join(tempDir, 'Interactable.cs');
+    writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    const uri = vscode.Uri.file(filePath);
+
+    const types = await service.findTypes(uri);
+    const fields = await service.findUnityEventFields(uri);
+    const methods = await service.findMethods(uri);
+    const targets = await service.findTargetMethodPosition(uri, 'Amlos.Control.Interact.Interactable', 'Interact');
+
+    assert.strictEqual(types[0].range.start.line, 3);
+    assert.strictEqual(types[0].range.start.character, lines[3].indexOf('Interactable'));
+    assert.strictEqual(fields.find(field => field.name === 'OnCheckEnable')?.range.start.character, lines[5].indexOf('OnCheckEnable'));
+    assert.strictEqual(fields.find(field => field.name === 'OnHighlighting')?.range.start.character, lines[6].indexOf('OnHighlighting'));
+    assert.strictEqual(methods.find(method => method.name === 'Interact')?.range.start.character, lines[7].indexOf('Interact'));
+    assert.deepStrictEqual(targets[0], {
+      line: 7,
+      character: lines[7].indexOf('Interact')
+    });
+  });
 });

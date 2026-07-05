@@ -105,7 +105,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const methods: CSharpMethodSymbolSnapshot[] = [];
       collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
-      return methods;
+      return await refineMethodRangesFromSource(runtimeVscode, uri, methods);
     },
     async findTypes(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
@@ -115,7 +115,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const types: CSharpTypeSymbolSnapshot[] = [];
       collectCSharpTypeSymbols(runtimeVscode, symbols, [], types);
-      return types;
+      return await refineTypeRangesFromSource(runtimeVscode, uri, types);
     },
     async findUnityEventFields(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
@@ -125,7 +125,11 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const fields: CSharpFieldSymbolSnapshot[] = [];
       collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
-      return fields;
+      if (fields.length === 0) {
+        return await findSourceUnityEventFieldsOrThrow(runtimeVscode, uri);
+      }
+
+      return await refineFieldRangesFromSource(runtimeVscode, uri, fields);
     },
     async findMethodAtPosition(uri, position) {
       return (await this.findMethods(uri)).find(method => containsCSharpPosition(method.range, position));
@@ -141,6 +145,11 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const positions: CSharpPosition[] = [];
       collectTargetMethodSymbolPositions(runtimeVscode, symbols, targetTypeName, methodName, positions);
+      const sourcePositions = await tryFindSourceTargetMethodPositions(runtimeVscode, uri, targetTypeName, methodName);
+      if (sourcePositions?.length) {
+        return sourcePositions;
+      }
+
       return positions;
     },
     async findReferences(uri, position) {
@@ -484,6 +493,116 @@ async function findSourceTargetMethodPositionsOrThrow(
   }
 
   return positions;
+}
+
+/** Refines server type ranges to exact source name ranges when source text is available. */
+async function refineTypeRangesFromSource(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  types: readonly CSharpTypeSymbolSnapshot[]
+): Promise<CSharpTypeSymbolSnapshot[]> {
+  const sourceTypes = await tryFindSourceTypes(runtimeVscode, uri);
+  if (!sourceTypes?.length) {
+    return [...types];
+  }
+
+  return types.map(type => {
+    const sourceType = sourceTypes.find(candidate =>
+      matchesCSharpTypeName(candidate.fullName, type.fullName) ||
+      matchesCSharpTypeName(candidate.name, type.name)
+    );
+    return sourceType ? { ...type, range: sourceType.range } : type;
+  });
+}
+
+/** Refines server method ranges to exact source name ranges when source text is available. */
+async function refineMethodRangesFromSource(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  methods: readonly CSharpMethodSymbolSnapshot[]
+): Promise<CSharpMethodSymbolSnapshot[]> {
+  const sourceMethods = await tryFindSourceMethods(runtimeVscode, uri);
+  if (!sourceMethods?.length) {
+    return [...methods];
+  }
+
+  return methods.map(method => {
+    const sourceMethod = sourceMethods.find(candidate =>
+      candidate.name === method.name &&
+      (!method.typeName || !candidate.typeName || matchesCSharpTypeName(candidate.typeName, method.typeName))
+    );
+    return sourceMethod ? { ...method, range: sourceMethod.range } : method;
+  });
+}
+
+/** Refines server field ranges to exact source name ranges when source text is available. */
+async function refineFieldRangesFromSource(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  fields: readonly CSharpFieldSymbolSnapshot[]
+): Promise<CSharpFieldSymbolSnapshot[]> {
+  const sourceFields = await tryFindSourceUnityEventFields(runtimeVscode, uri);
+  if (!sourceFields?.length) {
+    return [...fields];
+  }
+
+  return fields.map(field => {
+    const sourceField = sourceFields.find(candidate =>
+      candidate.name === field.name &&
+      (!field.typeName || !candidate.typeName || matchesCSharpTypeName(candidate.typeName, field.typeName))
+    );
+    return sourceField ? { ...field, range: sourceField.range } : field;
+  });
+}
+
+/** Reads source types when available without turning unavailable source into a failure. */
+async function tryFindSourceTypes(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpTypeSymbolSnapshot[] | undefined> {
+  try {
+    return await findSourceTypesOrThrow(runtimeVscode, uri);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Reads source methods when available without turning unavailable source into a failure. */
+async function tryFindSourceMethods(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpMethodSymbolSnapshot[] | undefined> {
+  try {
+    return await findSourceMethodsOrThrow(runtimeVscode, uri);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Reads source UnityEvent fields when available without turning unavailable source into a failure. */
+async function tryFindSourceUnityEventFields(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpFieldSymbolSnapshot[] | undefined> {
+  try {
+    return await findSourceUnityEventFieldsOrThrow(runtimeVscode, uri);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Reads source target positions when available without turning unavailable source into a failure. */
+async function tryFindSourceTargetMethodPositions(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  targetTypeName: string,
+  methodName: string
+): Promise<CSharpPosition[] | undefined> {
+  try {
+    return await findSourceTargetMethodPositionsOrThrow(runtimeVscode, uri, targetTypeName, methodName);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Reads source text or throws so callers can distinguish unavailable symbols from a real empty result. */
