@@ -18,77 +18,87 @@ export function createEventReferenceProvider(
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
     async provideCodeLenses(document, token) {
-      if (!isEnabled() || !isCSharpFile(document.uri) || isCancellationRequested(token)) {
+      if (!isEnabled() || !isCSharpFile(document.uri)) {
         return [];
       }
 
-      const index = controller.getReadyIndex();
-      if (!index) {
-        const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
+      const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
 
-        if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
-          controller.scheduleBuild();
+      try {
+        const index = controller.getReadyIndex();
+        if (!index) {
+          if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
+            controller.scheduleBuild();
+            return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
+          }
+
+          if (isCancellationRequested(token)) {
+            return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
+          }
+
+          const priorityKey = `${runtime.getCacheVersion()}:${scriptPath}`;
+          if (!priorityScan || priorityScan.key !== priorityKey) {
+            const state: PriorityScanState = {
+              key: priorityKey,
+              status: 'pending'
+            };
+            const promise = buildPriorityReferenceIndex(runtime, document, token)
+              .then(result => {
+                if (priorityScan === state) {
+                  state.status = 'ready';
+                  state.result = result;
+                  controller.notifyCodeLensesChanged();
+                }
+
+                return result;
+              })
+              .catch(error => {
+                if (priorityScan === state) {
+                  state.status = 'failed';
+                  state.result = createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
+                  runtime.scanStatus?.finish('failed', state.result.diagnostics, {
+                    label: 'Unity refs: current',
+                    phase: 'Current script scan failed',
+                    scriptPath,
+                    referenceCount: 0,
+                    instanceCount: 0
+                  });
+                  controller.notifyCodeLensesChanged();
+                }
+
+                runtime.logger.warn(`UnityEvent priority scan failed for ${scriptPath}: ${errorMessage(error)}`);
+                return createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
+              });
+            state.promise = promise;
+            priorityScan = state;
+          }
+
+          if (priorityScan.status === 'ready' && priorityScan.result) {
+            return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
+              embedReferences: true,
+              includeZeroSummaryLenses: true
+            });
+          }
+
+          if (priorityScan.status === 'failed' && priorityScan.result) {
+            return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
+              embedReferences: true,
+              includeZeroSummaryLenses: true
+            });
+          }
+
           return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
         }
 
-        const priorityKey = `${runtime.getCacheVersion()}:${scriptPath}`;
-        if (!priorityScan || priorityScan.key !== priorityKey) {
-          const state: PriorityScanState = {
-            key: priorityKey,
-            status: 'pending'
-          };
-          const promise = buildPriorityReferenceIndex(runtime, document, token)
-            .then(result => {
-              if (priorityScan === state) {
-                state.status = 'ready';
-                state.result = result;
-                controller.notifyCodeLensesChanged();
-              }
-
-              return result;
-            })
-            .catch(error => {
-              if (priorityScan === state) {
-                state.status = 'failed';
-                state.result = createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
-                runtime.scanStatus?.finish('failed', state.result.diagnostics, {
-                  label: 'Unity refs: current',
-                  phase: 'Current script scan failed',
-                  scriptPath,
-                  referenceCount: 0,
-                  instanceCount: 0
-                });
-                controller.notifyCodeLensesChanged();
-              }
-
-              runtime.logger.warn(`UnityEvent priority scan failed for ${scriptPath}: ${errorMessage(error)}`);
-              return createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
-            });
-          state.promise = promise;
-          priorityScan = state;
-        }
-
-        if (priorityScan.status === 'ready' && priorityScan.result) {
-          return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
-            embedReferences: true,
-            includeZeroSummaryLenses: true
-          });
-        }
-
-        if (priorityScan.status === 'failed' && priorityScan.result) {
-          return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
-            embedReferences: true,
-            includeZeroSummaryLenses: true
-          });
-        }
-
+        return await createCodeLensesFromIndex(runtime, document, index, {
+          embedReferences: false,
+          includeZeroSummaryLenses: true
+        });
+      } catch (error) {
+        // CodeLens must stay visible even when indexing or symbol providers fail.
+        runtime.logger.warn(`UnityEvent CodeLens fallback for ${scriptPath}: ${errorMessage(error)}`);
         return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
       }
-
-      return await createCodeLensesFromIndex(runtime, document, index, {
-        embedReferences: false,
-        includeZeroSummaryLenses: true
-      });
     },
     async provideHover(document, position, token) {
       if (!isEnabled() || !isCSharpFile(document.uri) || isCancellationRequested(token)) {

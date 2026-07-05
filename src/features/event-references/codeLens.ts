@@ -1,5 +1,5 @@
 import type * as vscode from 'vscode';
-import type { CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
+import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
 import type { UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
 import { typeKey } from './referenceIndex';
 import type { CodeLensRenderOptions, EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
@@ -53,7 +53,7 @@ async function findCodeLensStatusAnchorRange(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument
 ): Promise<vscode.Range> {
-  const types = await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
+  const types = await safeFindTypes(runtime, document);
   return types[0] ? toVscodeRange(runtime.runtimeVscode, types[0].range) :
     new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
 }
@@ -70,9 +70,9 @@ export async function createCodeLensesFromIndex(
     return [];
   }
 
-  const methods = await csharpLanguageService.findMethods(document.uri);
-  const fields = await csharpLanguageService.findUnityEventFields(document.uri);
-  const types = await csharpLanguageService.findTypes(document.uri);
+  const methods = await safeFindMethods(runtime, document);
+  const fields = await safeFindUnityEventFields(runtime, document);
+  const types = await safeFindTypes(runtime, document);
   const codeLenses: vscode.CodeLens[] = [];
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
   const serializedInstanceAnchor = findSerializedInstanceAnchorType(types, scriptPath);
@@ -229,6 +229,45 @@ function toVscodeRange(runtimeVscode: typeof vscode, range: { start: { line: num
     new runtimeVscode.Position(range.start.line, range.start.character),
     new runtimeVscode.Position(range.end.line, range.end.character)
   );
+}
+
+/** Reads method symbols without allowing language-server failures to hide all CodeLens entries. */
+async function safeFindMethods(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument
+): Promise<CSharpMethodSymbolSnapshot[]> {
+  try {
+    return await runtime.csharpLanguageService?.findMethods(document.uri) ?? [];
+  } catch (error) {
+    runtime.logger.warn(`UnityEvent CodeLens could not read C# methods in ${document.uri.fsPath}: ${String(error)}`);
+    return [];
+  }
+}
+
+/** Reads UnityEvent field symbols without allowing language-server failures to hide summaries. */
+async function safeFindUnityEventFields(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument
+): Promise<CSharpFieldSymbolSnapshot[]> {
+  try {
+    return await runtime.csharpLanguageService?.findUnityEventFields(document.uri) ?? [];
+  } catch (error) {
+    runtime.logger.warn(`UnityEvent CodeLens could not read UnityEvent fields in ${document.uri.fsPath}: ${String(error)}`);
+    return [];
+  }
+}
+
+/** Reads type symbols without allowing anchor lookup failures to hide placeholder CodeLens entries. */
+async function safeFindTypes(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument
+): Promise<CSharpTypeSymbolSnapshot[]> {
+  try {
+    return await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
+  } catch (error) {
+    runtime.logger.warn(`UnityEvent CodeLens could not read C# types in ${document.uri.fsPath}: ${String(error)}`);
+    return [];
+  }
 }
 
 /** Filters type-only fallback instances while keeping path hits on the selected anchor type. */

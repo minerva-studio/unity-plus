@@ -8,6 +8,7 @@ import {
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 import { createLazyUnityMetadataIndex, UnityMetadataIndex } from '../unity/metadataIndex';
 import type { CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../unity/csharpLanguageService';
+import { findSourceTypes } from '../features/event-references/typeIndex';
 
 const gateGuid = '11111111111111111111111111111111';
 const gateScriptPath = 'Assets/Gate.cs';
@@ -932,6 +933,72 @@ describe('eventReferences', () => {
     assert.strictEqual(output.lines.some(line => line.includes('script GUID not found in metadata index')), true);
   });
 
+  it('keeps pending CodeLens placeholders when the CodeLens request is already canceled', async () => {
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      }
+    });
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const token = new FakeCancellationToken();
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      readTextFile: async () => ''
+    });
+
+    token.cancel();
+
+    assert.deepStrictEqual(
+      (await runtime.provideCodeLenses(
+        createTextDocument('/Project/Assets/Gate.cs', 'public class Gate {}'),
+        token as unknown as vscode.CancellationToken
+      )).map(lens => lens.command?.title),
+      ['- Unity serialized instances', '- UnityEvent references', '- UnityEvent targets']
+    );
+  });
+
+  it('keeps CodeLens placeholders when C# symbols are unavailable', async () => {
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      },
+      throwDocumentSymbols: true
+    });
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const document = createTextDocument('/Project/Assets/Unknown.cs', 'public class Unknown {}');
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      readTextFile: async () => ''
+    });
+
+    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
+      '- Unity serialized instances',
+      '- UnityEvent references',
+      '- UnityEvent targets'
+    ]);
+    await runtime.waitForCodeLensChange();
+
+    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
+      '0 Unity serialized instances',
+      '0 UnityEvent references',
+      '0 UnityEvent targets'
+    ]);
+  });
+
   it('reuses one in-flight priority scan for repeated CodeLens requests on the same script', async () => {
     let candidateSearches = 0;
     let releaseSearch: (() => void) | undefined;
@@ -1089,7 +1156,7 @@ describe('eventReferences', () => {
     assert.strictEqual(ironDoorLenses.filter(lens => lens.command?.title === '2 UnityEvent references').length, 2);
   });
 
-  it('does not schedule a background index build for canceled CodeLens requests', async () => {
+  it('shows placeholders without scheduling a background build for canceled CodeLens requests', async () => {
     let assetScans = 0;
     const runtime = createEventReferenceRuntime();
     const cancellationToken = new FakeCancellationToken();
@@ -1116,7 +1183,11 @@ describe('eventReferences', () => {
       cancellationToken as unknown as vscode.CancellationToken
     );
 
-    assert.deepStrictEqual(lenses, []);
+    assert.deepStrictEqual(lenses.map(lens => lens.command?.title), [
+      '- Unity serialized instances',
+      '- UnityEvent references',
+      '- UnityEvent targets'
+    ]);
     await waitForTimers();
     assert.strictEqual(assetScans, 0);
   });
@@ -1957,6 +2028,60 @@ describe('eventReferences', () => {
     assert.strictEqual(csharpFileScans, 1);
   });
 
+  it('parses source C# types for UnityEvent target resolution without language-server symbols', async () => {
+    const runtime = createEventReferenceRuntime();
+    let csharpFileScans = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      findCSharpFiles: async () => {
+        csharpFileScans += 1;
+        return [createUri('/Project/Assets/Scripts/Gate.cs')];
+      },
+      readTextFile: async uri => uri.fsPath.endsWith('.cs')
+        ? [
+          'namespace Amlos.Fixtures;',
+          'public sealed partial class Gate',
+          '{',
+          '  public bool CanInteract() => true;',
+          '}'
+        ].join('\n')
+        : createPrefabYaml(2),
+      csharpLanguageService: createFakeCSharpSymbolLanguageService({})
+    }, createMetadataIndex());
+
+    assert.strictEqual(index.getReferenceCount('Assets/Scripts/Gate.cs', 'CanInteract', 'Amlos.Fixtures.Gate'), 1);
+    assert.strictEqual(index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Amlos.Fixtures.Gate').length, 1);
+    assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
+    assert.strictEqual(csharpFileScans, 1);
+  });
+
+  it('extracts source type names from real Unity C# declaration shapes', () => {
+    assert.deepStrictEqual(findSourceTypes([
+      'namespace Amlos.Control.Interact',
+      '{',
+      '  public sealed class Interactable : MonoBehaviour {}',
+      '}',
+      'namespace Amlos.Fixtures;',
+      'public abstract partial class Cannon : Fixture {}',
+      'public readonly record struct CannonState(int Value);',
+      'class Outside {}'
+    ].join('\n')).map(type => type.fullName), [
+      'Amlos.Control.Interact.Interactable',
+      'Amlos.Fixtures.Cannon',
+      'Amlos.Fixtures.CannonState',
+      'Amlos.Fixtures.Outside'
+    ]);
+  });
+
   it('does not scan for CodeLens when UnityEvent references are disabled', async () => {
     let scans = 0;
     const runtime = createEventReferenceRuntime();
@@ -2152,6 +2277,7 @@ interface EventReferenceRuntimeOptions {
   configuration?: Record<string, unknown>;
   findFiles?: (pattern: unknown, exclude?: unknown) => Promise<readonly vscode.Uri[]>;
   findTextInFiles?: () => Thenable<void>;
+  throwDocumentSymbols?: boolean;
 }
 
 function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {}): EventReferenceRuntime {
