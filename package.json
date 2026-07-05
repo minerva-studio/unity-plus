@@ -186,6 +186,13 @@
           "default": false,
           "description": "%configuration.eventReferences.autoScan.description%"
         },
+        "unityPlus.eventReferences.backgroundScanConcurrency": {
+          "type": "number",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "%configuration.eventReferences.backgroundScanConcurrency.description%"
+        },
         "unityPlus.metaFiles.hideInExplorer": {
           "type": "boolean",
           "default": true,

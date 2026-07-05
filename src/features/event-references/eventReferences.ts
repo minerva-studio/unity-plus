@@ -59,6 +59,8 @@ export interface UnitySerializedAssetReferenceIndex {
 
 export interface UnityEventReferenceDiagnostics {
   discoveredAssetCount: number;
+  candidateAssetCount: number;
+  textCandidateSearchCount: number;
   prefabCount: number;
   sceneCount: number;
   assetCount: number;
@@ -112,6 +114,7 @@ interface EventReferenceRuntime {
   getCacheVersion: () => number;
   resolveCSharpType?: CSharpTypeResolver;
   buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
+  scanStatus?: UnityEventReferenceScanStatusReporter;
 }
 
 export type CSharpTypeResolver = (
@@ -174,6 +177,7 @@ interface EventReferenceLocationTarget {
   symbolName?: string;
   typeName?: string;
   serializedInstances?: readonly UnitySerializedInstanceLocation[];
+  eventReferences?: readonly UnityEventReference[];
   position: vscode.Position;
 }
 
@@ -193,6 +197,28 @@ export interface UnityEventReferenceBuildContext {
   mode: UnityEventReferenceBuildMode;
   cancellationToken?: vscode.CancellationToken;
   progress?: vscode.Progress<{ message?: string; increment?: number }>;
+  scanStatus?: UnityEventReferenceScanStatusReporter;
+}
+
+interface UnityEventReferenceScanStatusReporter {
+  /** Shows the background scan status item with the first visible phase. */
+  start(phase: string): void;
+  /** Updates the status item with bounded scan progress. */
+  update(status: UnityEventReferenceScanStatus): void;
+  /** Hides the status item and records the final scan result. */
+  finish(result: 'completed' | 'failed' | 'canceled', diagnostics?: UnityEventReferenceDiagnostics): void;
+  /** Releases the status item when the extension feature is disposed. */
+  dispose(): void;
+}
+
+interface UnityEventReferenceScanStatus {
+  phase: string;
+  candidateCount?: number;
+  scannedCount?: number;
+  totalCount?: number;
+  referenceCount?: number;
+  instanceCount?: number;
+  elapsedMilliseconds?: number;
 }
 
 interface RunWithConcurrencyOptions {
@@ -206,11 +232,11 @@ const monoBehaviourClassId = 114;
 const assetGlobs = ['Assets/**/*', 'Packages/**/*'];
 const csharpGlobs = ['Assets/**/*.cs', 'Packages/**/*.cs'];
 const defaultAssetScanConcurrency = 4;
-const backgroundAssetScanConcurrency = 1;
 const scanYieldEvery = 4;
 const backgroundScanYieldEvery = 1;
 const backgroundBuildDebounceMilliseconds = 150;
 const progressReportInterval = 10;
+const eventReferenceCandidateTexts = ['m_Script:', 'm_PersistentCalls', '.m_PersistentCalls.'];
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
 const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
@@ -230,6 +256,7 @@ export function registerEventReferenceFeature(
   let indexController: UnityEventReferenceIndexController | undefined;
 
   if (options.metadataIndex) {
+    const scanStatus = createUnityEventReferenceScanStatus(runtimeVscode, logger);
     const featureRuntime: EventReferenceRuntime = {
       runtimeVscode,
       logger,
@@ -240,12 +267,14 @@ export function registerEventReferenceFeature(
       readTextFile: options.readTextFile ?? readDefaultTextFile,
       getCacheVersion: options.getCacheVersion ?? (() => 0),
       resolveCSharpType: options.resolveCSharpType,
-      buildCSharpTypeIndex: options.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex
+      buildCSharpTypeIndex: options.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex,
+      scanStatus
     };
     indexController = createEventReferenceIndexController(featureRuntime);
     const provider = createEventReferenceProvider(featureRuntime, indexController, isEnabled);
 
     disposables.push(
+      scanStatus,
       runtimeVscode.languages.registerCodeLensProvider({ language: 'csharp' }, provider),
       runtimeVscode.languages.registerHoverProvider({ language: 'csharp' }, provider),
       runtimeVscode.commands.registerCommand('unityPlus.showUnityEventReferenceLocations', async (target: EventReferenceLocationTarget) => {
@@ -322,15 +351,27 @@ export async function buildUnityEventReferenceIndex(
 
   throwIfCancellationRequested(context.cancellationToken);
   context.progress?.report({ message: runtime.runtimeVscode.l10n.t('Finding Unity serialized assets') });
+  context.scanStatus?.update({ phase: 'Finding Unity serialized asset candidates' });
 
   const metadataIndex = metadata ?? await runtime.metadataIndex.getOrBuild();
-  const discoveredAssetFiles = await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode);
-  const assetFiles = await filterAssetFilesForConfiguredSceneScope(runtime, discoveredAssetFiles);
+  const discovery = await findUnityEventCandidateAssetFiles(runtime, context);
+  const assetFiles = await filterAssetFilesForConfiguredSceneScope(runtime, discovery.files);
   const resolveCSharpType = await createBuildScopedTypeResolver(runtime, context);
   let lastReportedCount = 0;
 
-  diagnostics.discoveredAssetCount = discoveredAssetFiles.length;
-  diagnostics.skippedAssetCount += discoveredAssetFiles.length - assetFiles.length;
+  diagnostics.discoveredAssetCount = discovery.files.length;
+  diagnostics.candidateAssetCount = discovery.usedTextSearch ? discovery.files.length : 0;
+  diagnostics.textCandidateSearchCount = discovery.textSearchCount;
+  diagnostics.skippedAssetCount += discovery.files.length - assetFiles.length;
+  context.scanStatus?.update({
+    phase: 'Scanning Unity serialized assets',
+    candidateCount: assetFiles.length,
+    scannedCount: 0,
+    totalCount: assetFiles.length,
+    referenceCount: 0,
+    instanceCount: 0,
+    elapsedMilliseconds: Date.now() - startedAt
+  });
 
   await runWithConcurrency(assetFiles, async assetUri => {
     throwIfCancellationRequested(context.cancellationToken);
@@ -361,10 +402,20 @@ export async function buildUnityEventReferenceIndex(
 
       runtime.logger.warn(`Could not scan UnityEvent references in ${assetUri.fsPath}: ${errorMessage(error)}`);
     }
-  }, context.mode === 'background' ? backgroundAssetScanConcurrency : defaultAssetScanConcurrency, {
+  }, context.mode === 'background' ? getBackgroundScanConcurrency(runtime.runtimeVscode) : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
     yieldEvery: context.mode === 'background' ? backgroundScanYieldEvery : scanYieldEvery,
     onProgress: (completedCount, totalCount) => {
+      context.scanStatus?.update({
+        phase: 'Scanning Unity serialized assets',
+        candidateCount: assetFiles.length,
+        scannedCount: completedCount,
+        totalCount,
+        referenceCount: references.length,
+        instanceCount: serializedInstances.length,
+        elapsedMilliseconds: Date.now() - startedAt
+      });
+
       if (context.mode !== 'interactive') {
         return;
       }
@@ -599,28 +650,35 @@ function createEventReferenceIndexController(runtime: EventReferenceRuntime): Un
 
     const buildVersion = cachedVersion;
     const previousIndex = index;
+    const scanStatus = context.mode === 'background' ? runtime.scanStatus : undefined;
+    const buildContext = scanStatus ? { ...context, scanStatus } : context;
     status = 'building';
-    buildPromise = buildUnityEventReferenceIndex(runtime, undefined, context)
+    scanStatus?.start('Preparing UnityEvent reference scan');
+    buildPromise = buildUnityEventReferenceIndex(runtime, undefined, buildContext)
       .then(builtIndex => {
         if (buildVersion !== runtime.getCacheVersion()) {
           status = 'idle';
+          scanStatus?.finish('canceled');
           return undefined;
         }
 
         index = builtIndex;
         status = 'ready';
+        scanStatus?.finish('completed', builtIndex.getDiagnostics());
         codeLensEvents.fire();
         return builtIndex;
       })
       .catch(error => {
         if (isCancellationError(error)) {
           status = previousIndex ? 'ready' : 'idle';
+          scanStatus?.finish('canceled');
           runtime.logger.info('UnityEvent reference index build canceled.');
           codeLensEvents.fire();
           return undefined;
         }
 
         status = 'failed';
+        scanStatus?.finish('failed');
         runtime.logger.warn(`Could not build UnityEvent reference index: ${errorMessage(error)}`);
         codeLensEvents.fire();
         return undefined;
@@ -669,6 +727,8 @@ function createEventReferenceProvider(
   controller: UnityEventReferenceIndexController,
   isEnabled: () => boolean
 ): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
+  let priorityScan: { key: string; promise: Promise<vscode.CodeLens[]> } | undefined;
+
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
     async provideCodeLenses(document, token) {
@@ -683,100 +743,22 @@ function createEventReferenceProvider(
           return [];
         }
 
-        return await createFastSerializedInstanceCodeLenses(runtime, document, token);
-      }
-
-      const methods = findCSharpMethods(runtime.runtimeVscode, document);
-      const fields = findUnityEventFields(runtime.runtimeVscode, document);
-      const types = findCSharpTypes(runtime.runtimeVscode, document);
-      const codeLenses: vscode.CodeLens[] = [];
-      const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-      const serializedInstanceAnchor = findSerializedInstanceAnchorType(types, scriptPath);
-      let serializedInstanceLensCount = 0;
-      let methodLensCount = 0;
-      let fieldReferenceLensCount = 0;
-      let fieldTargetLensCount = 0;
-
-      for (const type of types) {
-        const serializedInstances = filterSerializedInstancesForTypeLens(
-          index.getSerializedInstances(scriptPath, type.fullName),
-          type.fullName,
-          type === serializedInstanceAnchor
-        );
-
-        if (serializedInstances.length > 0) {
-          serializedInstanceLensCount += 1;
-          codeLenses.push(new runtime.runtimeVscode.CodeLens(type.range, {
-            title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
-              count: serializedInstances.length
-            }),
-            command: 'unityPlus.showUnityEventReferenceLocations',
-            arguments: [{
-              kind: 'serializedInstance',
-              scriptPath,
-              typeName: type.fullName,
-              ...(type === serializedInstanceAnchor ? {} : { serializedInstances }),
-              position: type.range.start
-            } satisfies EventReferenceLocationTarget]
-          }));
-        }
-      }
-
-      for (const method of methods) {
-        const count = index.getReferenceCount(scriptPath, method.name, method.typeName);
-        if (count > 0) {
-          methodLensCount += 1;
-          codeLenses.push(new runtime.runtimeVscode.CodeLens(method.range, {
-            title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count }),
-            command: 'unityPlus.showUnityEventReferenceLocations',
-            arguments: [{
-              kind: 'method',
-              scriptPath,
-              symbolName: method.name,
-              typeName: method.typeName,
-              position: method.range.start
-            } satisfies EventReferenceLocationTarget]
-          }));
-        }
-      }
-
-      for (const field of fields) {
-        const count = index.getFieldReferenceCount(scriptPath, field.name, field.typeName);
-        if (count > 0) {
-          fieldReferenceLensCount += 1;
-          codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-            title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count }),
-            command: 'unityPlus.showUnityEventReferenceLocations',
-            arguments: [{
-              kind: 'field',
-              scriptPath,
-              symbolName: field.name,
-              typeName: field.typeName,
-              position: field.range.start
-            } satisfies EventReferenceLocationTarget]
-          }));
+        const priorityKey = `${runtime.getCacheVersion()}:${toProjectPath(runtime.metadataIndex.root, document.uri)}`;
+        if (priorityScan?.key === priorityKey) {
+          return await priorityScan.promise;
         }
 
-        const targetCount = index.getFieldTargetCount(scriptPath, field.name, field.typeName);
-        if (targetCount > 0) {
-          fieldTargetLensCount += 1;
-          codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-            title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: targetCount }),
-            command: 'unityPlus.showUnityEventReferenceLocations',
-            arguments: [{
-              kind: 'fieldTarget',
-              scriptPath,
-              symbolName: field.name,
-              typeName: field.typeName,
-              position: field.range.start
-            } satisfies EventReferenceLocationTarget]
-          }));
-        }
+        const promise = createPriorityCodeLenses(runtime, document, token)
+          .finally(() => {
+            if (priorityScan?.promise === promise) {
+              priorityScan = undefined;
+            }
+          });
+        priorityScan = { key: priorityKey, promise };
+        return await promise;
       }
 
-      runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
-
-      return codeLenses;
+      return createCodeLensesFromIndex(runtime, document, index, { embedReferences: false });
     },
     async provideHover(document, position, token) {
       if (!isEnabled() || !isCSharpFile(document.uri) || isCancellationRequested(token)) {
@@ -825,6 +807,33 @@ function createEventReferenceProvider(
           toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
           target.position,
           serializedReferences.map(reference => toSerializedInstanceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
+        );
+        return;
+      }
+
+      if (!index && target.kind !== 'serializedInstance' && target.eventReferences) {
+        const eventReferences = target.eventReferences;
+        if (target.kind === 'fieldTarget') {
+          const locations = await createTargetMethodLocations(runtime, eventReferences);
+          if (locations.length === 0) {
+            runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+            return;
+          }
+
+          await runtime.runtimeVscode.commands.executeCommand(
+            'editor.action.showReferences',
+            toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
+            target.position,
+            locations
+          );
+          return;
+        }
+
+        await runtime.runtimeVscode.commands.executeCommand(
+          'editor.action.showReferences',
+          toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
+          target.position,
+          eventReferences.map(reference => toReferenceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
         );
         return;
       }
@@ -886,15 +895,13 @@ function createEventReferenceProvider(
   };
 }
 
-/** Creates serialized-instance CodeLens entries by parsing only GUID text-search candidates. */
-async function createFastSerializedInstanceCodeLenses(
+/** Creates current-file CodeLens entries by parsing only assets that contain the current script GUID. */
+async function createPriorityCodeLenses(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument,
   token: vscode.CancellationToken
 ): Promise<vscode.CodeLens[]> {
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-  const types = findCSharpTypes(runtime.runtimeVscode, document);
-  const anchor = findSerializedInstanceAnchorType(types, scriptPath);
   const metadata = await runtime.metadataIndex.getOrBuild();
   const scriptGuid = metadata.getGuid(scriptPath);
 
@@ -905,7 +912,13 @@ async function createFastSerializedInstanceCodeLenses(
   const findCandidates = runtime.findAssetFilesContainingText ?? findDefaultAssetFilesContainingText;
   const candidateUris = await findCandidates(runtime.metadataIndex.root, runtime.runtimeVscode, scriptGuid);
   const diagnostics = createEmptyDiagnostics();
+  const references: UnityEventReference[] = [];
   const serializedInstances: UnitySerializedInstanceLocation[] = [];
+  const resolveCSharpType = createCurrentDocumentTypeResolver(runtime, document, scriptPath, token);
+
+  diagnostics.discoveredAssetCount = candidateUris.length;
+  diagnostics.candidateAssetCount = candidateUris.length;
+  diagnostics.textCandidateSearchCount = 1;
 
   for (const uri of candidateUris) {
     if (isCancellationRequested(token)) {
@@ -919,52 +932,182 @@ async function createFastSerializedInstanceCodeLenses(
 
     const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
     const assetPath = toProjectPath(runtime.metadataIndex.root, uri);
-    const parsed = parseUnityYamlAsset(content, { profile: 'eventReferences' });
-    const locations = await collectSerializedInstancesFromDocuments(
-      parsed.documents,
-      assetPath,
-      assetKind,
-      metadata,
-      async () => undefined,
-      diagnostics,
-      scriptGuid
+    const parsed = await parseUnityEventReferencesWithDiagnostics(content, assetPath, assetKind, metadata, resolveCSharpType);
+    const locations = parsed.serializedInstances.filter(location =>
+      location.scriptPath
+        ? pathReferenceKey(location.scriptPath) === pathReferenceKey(scriptPath)
+        : location.scriptTypeName !== undefined && isCurrentDocumentType(document, location.scriptTypeName)
+    );
+    const currentReferences = parsed.references.filter(reference =>
+      isCurrentScriptReference(scriptPath, document, reference)
     );
 
+    mergeDiagnostics(diagnostics, parsed.diagnostics);
+    references.push(...currentReferences);
     serializedInstances.push(...locations);
     await yieldToEventLoop();
   }
 
-  const codeLenses: vscode.CodeLens[] = [];
-  for (const type of types) {
-    const locations = filterSerializedInstancesForTypeLens(
-      mergeUniqueReferences(
-        serializedInstances.filter(location => pathReferenceKey(location.scriptPath ?? '') === pathReferenceKey(scriptPath)),
-        serializedInstances.filter(location => !location.scriptPath && location.scriptTypeName !== undefined && typeKey(location.scriptTypeName) === typeKey(type.fullName))
-      ),
-      type.fullName,
-      type === anchor
-    );
+  diagnostics.resolvedReferenceCount = references.length;
+  diagnostics.serializedInstanceCount = serializedInstances.length;
+  const index = createReferenceIndex(references, serializedInstances, diagnostics);
+  runtime.logger.debug(`UnityEvent priority scan for ${scriptPath}: ${candidateUris.length} candidate asset(s), ${references.length} reference(s), ${serializedInstances.length} instance(s).`);
+  return createCodeLensesFromIndex(runtime, document, index, { embedReferences: true });
+}
 
-    if (locations.length === 0) {
-      continue;
+/** Resolves editor-class identifiers against the current C# file before falling back to the configured resolver. */
+function createCurrentDocumentTypeResolver(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument,
+  scriptPath: string,
+  token: vscode.CancellationToken
+): (fullTypeName: string) => Promise<string | undefined> {
+  const currentTypes = findCSharpTypes(runtime.runtimeVscode, document);
+
+  return async fullTypeName => {
+    throwIfCancellationRequested(token);
+
+    if (currentTypes.some(type => typeKey(type.fullName) === typeKey(fullTypeName))) {
+      return scriptPath;
     }
 
-    codeLenses.push(new runtime.runtimeVscode.CodeLens(type.range, {
-      title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
-        count: locations.length
-      }),
-      command: 'unityPlus.showUnityEventReferenceLocations',
-      arguments: [{
-        kind: 'serializedInstance',
-        scriptPath,
-        typeName: type.fullName,
-        serializedInstances: locations,
-        position: type.range.start
-      } satisfies EventReferenceLocationTarget]
-    }));
+    return await runtime.resolveCSharpType?.(fullTypeName, runtime, {
+      mode: 'background',
+      cancellationToken: token
+    });
+  };
+}
+
+/** Checks whether a Unity YAML reference belongs to the current script by path or current C# type name. */
+function isCurrentScriptReference(
+  scriptPath: string,
+  document: vscode.TextDocument,
+  reference: UnityEventReference
+): boolean {
+  return pathReferenceKey(reference.scriptPath ?? '') === pathReferenceKey(scriptPath) ||
+    pathReferenceKey(reference.eventScriptPath ?? '') === pathReferenceKey(scriptPath) ||
+    (!!reference.scriptTypeName && isCurrentDocumentType(document, reference.scriptTypeName)) ||
+    (!!reference.eventOwnerTypeName && isCurrentDocumentType(document, reference.eventOwnerTypeName));
+}
+
+/** Checks whether a full type name resolves to any type declared in the current C# document. */
+function isCurrentDocumentType(document: vscode.TextDocument, typeName: string): boolean {
+  const text = document.getText();
+  const namespaceMatches = [...text.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
+  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(text)?.[1];
+  const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = typePattern.exec(text))) {
+    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
+    const fullName = namespaceName ? `${namespaceName}.${match[1]}` : match[1];
+    if (typeKey(fullName) === typeKey(typeName)) {
+      return true;
+    }
   }
 
-  runtime.logger.debug(`Unity serialized instance fast scan for ${scriptPath}: ${candidateUris.length} candidate asset(s), ${serializedInstances.length} instance(s).`);
+  return false;
+}
+
+/** Converts a reference index into CodeLens entries for one C# document. */
+function createCodeLensesFromIndex(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument,
+  index: UnitySerializedAssetReferenceIndex,
+  options: { embedReferences: boolean }
+): vscode.CodeLens[] {
+  const methods = findCSharpMethods(runtime.runtimeVscode, document);
+  const fields = findUnityEventFields(runtime.runtimeVscode, document);
+  const types = findCSharpTypes(runtime.runtimeVscode, document);
+  const codeLenses: vscode.CodeLens[] = [];
+  const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
+  const serializedInstanceAnchor = findSerializedInstanceAnchorType(types, scriptPath);
+  let serializedInstanceLensCount = 0;
+  let methodLensCount = 0;
+  let fieldReferenceLensCount = 0;
+  let fieldTargetLensCount = 0;
+
+  for (const type of types) {
+    const serializedInstances = filterSerializedInstancesForTypeLens(
+      index.getSerializedInstances(scriptPath, type.fullName),
+      type.fullName,
+      type === serializedInstanceAnchor
+    );
+
+    if (serializedInstances.length > 0) {
+      serializedInstanceLensCount += 1;
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(type.range, {
+        title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
+          count: serializedInstances.length
+        }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'serializedInstance',
+          scriptPath,
+          typeName: type.fullName,
+          ...(options.embedReferences || type !== serializedInstanceAnchor ? { serializedInstances } : {}),
+          position: type.range.start
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+  }
+
+  for (const method of methods) {
+    const references = index.getReferences(scriptPath, method.name, method.typeName);
+    if (references.length > 0) {
+      methodLensCount += 1;
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(method.range, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'method',
+          scriptPath,
+          symbolName: method.name,
+          typeName: method.typeName,
+          ...(options.embedReferences ? { eventReferences: references } : {}),
+          position: method.range.start
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+  }
+
+  for (const field of fields) {
+    const fieldReferences = index.getFieldReferences(scriptPath, field.name, field.typeName);
+    if (fieldReferences.length > 0) {
+      fieldReferenceLensCount += 1;
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: fieldReferences.length }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'field',
+          scriptPath,
+          symbolName: field.name,
+          typeName: field.typeName,
+          ...(options.embedReferences ? { eventReferences: fieldReferences } : {}),
+          position: field.range.start
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+
+    const fieldTargets = index.getFieldTargets(scriptPath, field.name, field.typeName);
+    if (fieldTargets.length > 0) {
+      fieldTargetLensCount += 1;
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'fieldTarget',
+          scriptPath,
+          symbolName: field.name,
+          typeName: field.typeName,
+          ...(options.embedReferences ? { eventReferences: fieldTargets } : {}),
+          position: field.range.start
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+  }
+
+  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
   return codeLenses;
 }
 
@@ -1368,6 +1511,8 @@ function filterByType<T>(
 function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
   return {
     discoveredAssetCount: 0,
+    candidateAssetCount: 0,
+    textCandidateSearchCount: 0,
     prefabCount: 0,
     sceneCount: 0,
     assetCount: 0,
@@ -1410,6 +1555,8 @@ function incrementAssetCount(diagnostics: UnityEventReferenceDiagnostics, assetK
 
 function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityEventReferenceDiagnostics): void {
   target.discoveredAssetCount += source.discoveredAssetCount;
+  target.candidateAssetCount += source.candidateAssetCount;
+  target.textCandidateSearchCount += source.textCandidateSearchCount;
   target.prefabCount += source.prefabCount;
   target.sceneCount += source.sceneCount;
   target.assetCount += source.assetCount;
@@ -1446,6 +1593,10 @@ function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEvent
   const skippedAssets = diagnostics.skippedAssetCount + diagnostics.canceledAssetCount;
   return [
     runtimeVscode.l10n.t('discovered {count} serialized asset(s)', { count: diagnostics.discoveredAssetCount }),
+    runtimeVscode.l10n.t('text candidates: {candidateCount} asset(s) from {searchCount} search(es)', {
+      candidateCount: diagnostics.candidateAssetCount,
+      searchCount: diagnostics.textCandidateSearchCount
+    }),
     runtimeVscode.l10n.t('scanned {prefabCount} prefab(s), {sceneCount} scene(s), and {assetCount} asset file(s)', {
       prefabCount: diagnostics.prefabCount,
       sceneCount: diagnostics.sceneCount,
@@ -1884,6 +2035,142 @@ function isEventReferenceAutoScanEnabled(runtimeVscode: typeof vscode): boolean 
     .get<boolean>('eventReferences.autoScan', false) === true;
 }
 
+/** Reads the bounded background scan concurrency setting. */
+function getBackgroundScanConcurrency(runtimeVscode: typeof vscode): number {
+  const configured = runtimeVscode.workspace
+    .getConfiguration('unityPlus')
+    .get<number>('eventReferences.backgroundScanConcurrency', defaultAssetScanConcurrency);
+  const numericValue = Number.isFinite(configured) ? Math.floor(configured) : defaultAssetScanConcurrency;
+  return Math.min(16, Math.max(1, numericValue));
+}
+
+/** Finds serialized asset candidates with text search, falling back to a full file listing when unavailable. */
+async function findUnityEventCandidateAssetFiles(
+  runtime: EventReferenceRuntime,
+  context: UnityEventReferenceBuildContext
+): Promise<{ files: readonly vscode.Uri[]; usedTextSearch: boolean; textSearchCount: number }> {
+  const textFinder = runtime.findAssetFilesContainingText;
+  const canUseTextFinder = !!textFinder &&
+    (textFinder !== findDefaultAssetFilesContainingText || hasWorkspaceFindTextInFiles(runtime.runtimeVscode));
+
+  if (!canUseTextFinder) {
+    return {
+      files: await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode),
+      usedTextSearch: false,
+      textSearchCount: 0
+    };
+  }
+
+  try {
+    const candidates = new Map<string, vscode.Uri>();
+    for (const text of eventReferenceCandidateTexts) {
+      throwIfCancellationRequested(context.cancellationToken);
+      context.scanStatus?.update({ phase: `Searching Unity asset candidates: ${text}` });
+
+      for (const uri of await textFinder(runtime.metadataIndex.root, runtime.runtimeVscode, text)) {
+        if (!supportedAssetExtensions.has(extname(uri.fsPath).toLowerCase())) {
+          continue;
+        }
+
+        candidates.set(uri.fsPath.replace(/\\/g, '/'), uri);
+      }
+    }
+
+    return {
+      files: [...candidates.values()],
+      usedTextSearch: true,
+      textSearchCount: eventReferenceCandidateTexts.length
+    };
+  } catch (error) {
+    if (isCancellationError(error)) {
+      throw error;
+    }
+
+    runtime.logger.warn(`UnityEvent candidate text search failed; falling back to full asset scan: ${errorMessage(error)}`);
+    return {
+      files: await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode),
+      usedTextSearch: false,
+      textSearchCount: 0
+    };
+  }
+}
+
+/** Checks whether the current VS Code runtime can perform workspace text searches. */
+function hasWorkspaceFindTextInFiles(runtimeVscode: typeof vscode): boolean {
+  const workspace = runtimeVscode.workspace as typeof runtimeVscode.workspace & {
+    findTextInFiles?: unknown;
+  };
+  return typeof workspace.findTextInFiles === 'function';
+}
+
+/** Creates a status bar reporter for silent background UnityEvent scans. */
+function createUnityEventReferenceScanStatus(
+  runtimeVscode: typeof vscode,
+  logger: UnityPlusLogger
+): UnityEventReferenceScanStatusReporter {
+  const window = runtimeVscode.window as typeof runtimeVscode.window & {
+    createStatusBarItem?: (alignment?: vscode.StatusBarAlignment, priority?: number) => vscode.StatusBarItem;
+  };
+  const item = typeof window.createStatusBarItem === 'function'
+    ? window.createStatusBarItem(runtimeVscode.StatusBarAlignment?.Left, 100)
+    : undefined;
+  let startedAt = 0;
+
+  return {
+    start(phase) {
+      startedAt = Date.now();
+      if (!item) {
+        return;
+      }
+
+      item.text = '$(sync~spin) Unity refs: 0/?';
+      item.tooltip = formatScanStatusTooltip({ phase, elapsedMilliseconds: 0 });
+      item.show();
+    },
+    update(status) {
+      if (!item) {
+        return;
+      }
+
+      const scannedCount = status.scannedCount ?? 0;
+      const totalCount = status.totalCount ?? status.candidateCount;
+      item.text = `$(sync~spin) Unity refs: ${scannedCount}/${totalCount ?? '?'}`;
+      item.tooltip = formatScanStatusTooltip({
+        ...status,
+        elapsedMilliseconds: status.elapsedMilliseconds ?? Date.now() - startedAt
+      });
+      item.show();
+    },
+    finish(result, diagnostics) {
+      if (item) {
+        item.hide();
+      }
+
+      if (diagnostics) {
+        logger.info(`UnityEvent background reference scan ${result}: ${formatDiagnostics(runtimeVscode, diagnostics)}.`);
+      } else {
+        logger.info(`UnityEvent background reference scan ${result}.`);
+      }
+    },
+    dispose() {
+      item?.dispose();
+    }
+  };
+}
+
+/** Formats the status bar tooltip without allocating parser-side state. */
+function formatScanStatusTooltip(status: UnityEventReferenceScanStatus): string {
+  const lines = [
+    `Phase: ${status.phase}`,
+    `Candidates: ${status.candidateCount ?? '?'}`,
+    `Scanned: ${status.scannedCount ?? 0}/${status.totalCount ?? status.candidateCount ?? '?'}`,
+    `References: ${status.referenceCount ?? 0}`,
+    `Instances: ${status.instanceCount ?? 0}`,
+    `Elapsed: ${status.elapsedMilliseconds ?? 0}ms`
+  ];
+  return lines.join('\n');
+}
+
 async function findDefaultAssetFiles(
   root: vscode.Uri,
   runtimeVscode: typeof vscode
@@ -1972,7 +2259,7 @@ async function buildDefaultCSharpTypeIndex(
 
       // Source scan is a fallback resolver; unreadable files simply cannot contribute candidates.
     }
-  }, context.mode === 'background' ? backgroundAssetScanConcurrency : defaultAssetScanConcurrency, {
+  }, context.mode === 'background' ? getBackgroundScanConcurrency(runtime.runtimeVscode) : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
     yieldEvery: context.mode === 'background' ? backgroundScanYieldEvery : scanYieldEvery,
     onProgress: (completedCount, totalCount) => {

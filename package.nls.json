@@ -22,6 +22,7 @@
   "configuration.templates.scriptableObject.description": "Template text for Unity Plus ScriptableObject creation. Supports ${className} and ${namespaceBlock}.",
   "configuration.eventReferences.enabled.description": "Show Unity serialized event references in C# files.",
   "configuration.eventReferences.autoScan.description": "Automatically build the full UnityEvent reference index when CodeLens is requested. Keep disabled to avoid full-project scans while editing C# files.",
+  "configuration.eventReferences.backgroundScanConcurrency.description": "Maximum number of Unity serialized asset files to parse concurrently during background UnityEvent reference scans.",
   "configuration.metaFiles.hideInExplorer.description": "Hide Unity .meta files in the VS Code Explorer while keeping Unity Plus meta file actions available.",
   "configuration.metaFiles.moveWithAsset.description": "Move Unity .meta files with their asset files when assets are renamed or moved.",
   "configuration.scan.includeScenesOutsideBuildSettings.description": "Scan scenes outside Unity Build Settings when looking for event references.",

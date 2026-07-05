@@ -575,7 +575,70 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
   });
 
-  it('uses the default nonblocking CodeLens fast path without a full asset scan', async () => {
+  it('shows and hides status bar progress for background index builds', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async () => createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual(await runtime.provideCodeLenses(createTextDocument('/Project/Assets/Gate.cs', 'public bool CanInteract() => true;')), []);
+    await runtime.waitForCodeLensChange();
+
+    assert.strictEqual(runtime.statusBarItems.length, 1);
+    assert.strictEqual(runtime.statusBarItems[0].showCount > 0, true);
+    assert.strictEqual(runtime.statusBarItems[0].hideCount, 1);
+    assert.strictEqual(runtime.statusBarItems[0].text.startsWith('$(sync~spin) Unity refs:'), true);
+    assert.strictEqual(runtime.statusBarItems[0].tooltip?.includes('References:'), true);
+  });
+
+  it('uses text candidate filtering for full scans before reading asset files', async () => {
+    const readPaths: string[] = [];
+    const searchedTexts: string[] = [];
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [
+        createUri('/Project/Assets/Unrelated.prefab'),
+        createUri('/Project/Assets/Gate.prefab')
+      ],
+      findAssetFilesContainingText: async (_root, _runtimeVscode, text) => {
+        searchedTexts.push(text);
+        return text === 'm_Script:' ? [createUri('/Project/Assets/Gate.prefab')] : [];
+      },
+      findCSharpFiles: async () => [],
+      readTextFile: async uri => {
+        readPaths.push(uri.fsPath);
+        return createPrefabYaml(2);
+      },
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    }, createMetadataIndex());
+
+    assert.deepStrictEqual(searchedTexts, ['m_Script:', 'm_PersistentCalls', '.m_PersistentCalls.']);
+    assert.deepStrictEqual(readPaths, ['/Project/Assets/Gate.prefab']);
+    assert.strictEqual(index.getDiagnostics().candidateAssetCount, 1);
+    assert.strictEqual(index.getDiagnostics().textCandidateSearchCount, 3);
+  });
+
+  it('uses the current-file priority CodeLens path without a full asset scan', async () => {
     let assetScans = 0;
     let candidateSearches = 0;
     let assetReads = 0;
@@ -589,6 +652,7 @@ describe('eventReferences', () => {
       'public class Gate',
       '{',
       '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract() => true;',
       '}'
     ].join('\n'));
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -623,14 +687,129 @@ describe('eventReferences', () => {
     assert.strictEqual(assetScans, 0);
     assert.strictEqual(candidateSearches, 1);
     assert.strictEqual(assetReads, 1);
-    assert.strictEqual(lenses.length, 1);
+    assert.strictEqual(lenses.length, 4);
     assert.strictEqual(lenses[0].command?.title, '1 Unity serialized instances');
+    assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses[2].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses[3].command?.title, '1 UnityEvent targets');
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[0].command?.arguments?.[0]);
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[1].command?.arguments?.[0]);
 
-    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands.length, 2);
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(7, 37));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(13, 22));
+  });
+
+  it('reuses one in-flight priority scan for repeated CodeLens requests on the same script', async () => {
+    let candidateSearches = 0;
+    let releaseSearch: (() => void) | undefined;
+    const searchStarted = new Promise<void>(resolve => {
+      releaseSearch = resolve;
+    });
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      }
+    });
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract() => true;',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [],
+      findAssetFilesContainingText: async () => {
+        candidateSearches += 1;
+        await searchStarted;
+        return [createUri('/Project/Assets/Gate.prefab')];
+      },
+      readTextFile: async () => createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    const first = runtime.provideCodeLenses(csharpDocument);
+    const second = runtime.provideCodeLenses(csharpDocument);
+    await waitForTimers();
+
+    assert.strictEqual(candidateSearches, 1);
+    releaseSearch?.();
+    const [firstLenses, secondLenses] = await Promise.all([first, second]);
+
+    assert.strictEqual(firstLenses.length, 4);
+    assert.strictEqual(secondLenses.length, 4);
+  });
+
+  it('does not reuse priority scan results after switching to another script', async () => {
+    const searchedTexts: string[] = [];
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      }
+    });
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [],
+      findAssetFilesContainingText: async (_root, _runtimeVscode, text) => {
+        searchedTexts.push(text);
+        return text === gateGuid
+          ? [createUri('/Project/Assets/Gate.prefab')]
+          : [createUri('/Project/Assets/GateController.prefab')];
+      },
+      readTextFile: async uri => uri.fsPath.endsWith('Gate.prefab')
+        ? createPrefabYaml(2)
+        : createGateControllerYaml(2),
+      resolveCSharpType: async fullTypeName => {
+        if (fullTypeName === 'Amlos.Fixtures.IronDoor') {
+          return ironDoorScriptPath;
+        }
+
+        return createTypeResolver()(fullTypeName);
+      }
+    });
+
+    const gateLenses = await runtime.provideCodeLenses(createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract() => true;',
+      '}'
+    ].join('\n')));
+    const ironDoorLenses = await runtime.provideCodeLenses(createTextDocument('/Project/Assets/IronDoor.cs', [
+      'public class IronDoor',
+      '{',
+      '  public void Open() {}',
+      '  public void Close() {}',
+      '}'
+    ].join('\n')));
+
+    assert.deepStrictEqual(searchedTexts, [gateGuid, ironDoorGuid]);
+    assert.strictEqual(gateLenses.some(lens => lens.command?.title === '1 Unity serialized instances'), true);
+    assert.strictEqual(ironDoorLenses.some(lens => lens.command?.title === '2 Unity serialized instances'), true);
+    assert.strictEqual(ironDoorLenses.filter(lens => lens.command?.title === '2 UnityEvent references').length, 2);
   });
 
   it('does not schedule a background index build for canceled CodeLens requests', async () => {
@@ -1461,6 +1640,7 @@ describe('eventReferences', () => {
 interface EventReferenceRuntime {
   runtime: typeof vscode;
   infoMessages: string[];
+  statusBarItems: FakeStatusBarItem[];
   progressReports: Array<{ message?: string; increment?: number }>;
   progressOptions: vscode.ProgressOptions[];
   progressTokens: FakeCancellationToken[];
@@ -1485,6 +1665,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
   const codeLensProviders: vscode.CodeLensProvider[] = [];
   const hoverProviders: vscode.HoverProvider[] = [];
   const infoMessages: string[] = [];
+  const statusBarItems: FakeStatusBarItem[] = [];
   const progressReports: Array<{ message?: string; increment?: number }> = [];
   const progressOptions: vscode.ProgressOptions[] = [];
   const progressTokens: FakeCancellationToken[] = [];
@@ -1530,6 +1711,11 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
         return undefined;
       },
       showWarningMessage: () => undefined,
+      createStatusBarItem: () => {
+        const item = new FakeStatusBarItem();
+        statusBarItems.push(item);
+        return item as unknown as vscode.StatusBarItem;
+      },
       withProgress: async <R>(
         progressOptionsValue: vscode.ProgressOptions,
         task: (
@@ -1555,6 +1741,9 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
     CodeLens: FakeCodeLens,
     EventEmitter: FakeEventEmitter,
     Location: FakeLocation,
+    StatusBarAlignment: {
+      Left: 1
+    },
     ProgressLocation: {
       Notification: 15
     },
@@ -1571,6 +1760,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
   return {
     runtime,
     infoMessages,
+    statusBarItems,
     progressReports,
     progressOptions,
     progressTokens,
@@ -2105,6 +2295,30 @@ class FakeCodeLens {
     public readonly range: vscode.Range,
     public readonly command?: vscode.Command
   ) {}
+}
+
+/** Records status bar calls made by background scan reporting tests. */
+class FakeStatusBarItem {
+  text = '';
+  tooltip: string | undefined;
+  showCount = 0;
+  hideCount = 0;
+  disposeCount = 0;
+
+  /** Records a visible status bar update. */
+  show(): void {
+    this.showCount += 1;
+  }
+
+  /** Records that the status bar item was hidden. */
+  hide(): void {
+    this.hideCount += 1;
+  }
+
+  /** Records that the feature disposed the status bar item. */
+  dispose(): void {
+    this.disposeCount += 1;
+  }
 }
 
 class FakeCancellationToken {
