@@ -1,5 +1,5 @@
 import type * as vscode from 'vscode';
-import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
+import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpRange, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
 import type { UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
 import { typeKey } from './referenceIndex';
 import type { CodeLensRenderOptions, EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
@@ -53,6 +53,11 @@ async function findCodeLensStatusAnchorRange(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument
 ): Promise<vscode.Range> {
+  const primaryType = await safeGetPrimaryTopLevelTypeRange(runtime, document);
+  if (primaryType) {
+    return toVscodeRange(runtime.runtimeVscode, primaryType);
+  }
+
   const types = await safeFindTypes(runtime, document);
   return types[0] ? toVscodeRange(runtime.runtimeVscode, types[0].range) :
     new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
@@ -267,6 +272,20 @@ async function safeFindTypes(
   } catch (error) {
     runtime.logger.warn(`UnityEvent CodeLens could not read C# types in ${document.uri.fsPath}: ${String(error)}`);
     return [];
+  }
+}
+
+/** Reads the primary top-level type range for class-level placeholder CodeLens anchors. */
+async function safeGetPrimaryTopLevelTypeRange(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument
+): Promise<CSharpRange | undefined> {
+  try {
+    const type = await runtime.csharpLanguageService?.getPrimaryTopLevelType(document.uri);
+    return type?.nameRange;
+  } catch (error) {
+    runtime.logger.warn(`UnityEvent CodeLens could not read the primary C# type in ${document.uri.fsPath}: ${String(error)}`);
+    return undefined;
   }
 }
 

@@ -62,7 +62,7 @@ export interface CSharpTypeIndex {
 }
 
 export type CSharpTypeIndexBuilder = (
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'logger' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
   context?: UnityEventReferenceBuildContext
 ) => Promise<CSharpTypeIndex>;
 

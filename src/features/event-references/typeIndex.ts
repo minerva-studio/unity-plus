@@ -16,9 +16,9 @@ interface NamespaceRange {
   depth: number;
 }
 
-/** Builds a fallback C# type-name index from source text first, then C# language-server symbols. */
+/** Builds a C# type-name index from language-server symbols, then source text as a fallback. */
 export async function buildDefaultCSharpTypeIndex(
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'logger' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
   context: UnityEventReferenceBuildContext = { mode: 'background' }
 ): Promise<CSharpTypeIndex> {
   throwIfCancellationRequested(context.cancellationToken);
@@ -26,29 +26,39 @@ export async function buildDefaultCSharpTypeIndex(
   const files = await runtime.findCSharpFiles(runtime.metadataIndex.root, runtime.runtimeVscode);
   const matches: Array<{ fullName: string; shortName: string; path: string }> = [];
   let lastReportedCount = 0;
+  let serverTypeCount = 0;
+  let sourceFallbackTypeCount = 0;
 
   await runWithConcurrency(files, async file => {
     throwIfCancellationRequested(context.cancellationToken);
 
     try {
       const path = toProjectPath(runtime.metadataIndex.root, file);
+      const types = await runtime.csharpLanguageService?.findTypes(file) ?? [];
+      throwIfCancellationRequested(context.cancellationToken);
+
+      if (types.length > 0) {
+        serverTypeCount += types.length;
+        matches.push(...types.map(type => ({ fullName: type.fullName, shortName: type.name, path })));
+        return;
+      }
+
       const sourceTypes = await findSourceTypesForIndex(runtime, file);
       throwIfCancellationRequested(context.cancellationToken);
 
       if (sourceTypes.length > 0) {
+        sourceFallbackTypeCount += sourceTypes.length;
         matches.push(...sourceTypes.map(type => ({ fullName: type.fullName, shortName: type.name, path })));
-        return;
       }
-
-      const types = await runtime.csharpLanguageService?.findTypes(file) ?? [];
-      throwIfCancellationRequested(context.cancellationToken);
-      matches.push(...types.map(type => ({ fullName: type.fullName, shortName: type.name, path })));
     } catch {
       if (isCancellationRequested(context.cancellationToken)) {
         throw new UnityEventReferenceScanCanceledError();
       }
 
-      // Language-server symbol failures simply cannot contribute fallback type candidates.
+      // When symbol lookup throws, source parsing is the last safe way to keep scan resolution useful.
+      await addSourceFallbackTypes(runtime, file, matches, count => {
+        sourceFallbackTypeCount += count;
+      });
     }
   }, context.mode === 'background' ? getBackgroundScanConcurrency(runtime.runtimeVscode) : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
@@ -70,7 +80,43 @@ export async function buildDefaultCSharpTypeIndex(
     }
   });
 
+  logCSharpTypeIndexSummary(runtime, files.length, serverTypeCount, sourceFallbackTypeCount, countResolvableTypeMatches(matches));
   return createCSharpTypeIndex(matches);
+}
+
+/** Adds source-parsed type declarations for one C# file after language-server lookup fails. */
+async function addSourceFallbackTypes(
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'readTextFile'>,
+  file: Parameters<EventReferenceRuntime['readTextFile']>[0],
+  matches: Array<{ fullName: string; shortName: string; path: string }>,
+  addCount: (count: number) => void
+): Promise<void> {
+  const path = toProjectPath(runtime.metadataIndex.root, file);
+  const sourceTypes = await findSourceTypesForIndex(runtime, file);
+
+  if (sourceTypes.length === 0) {
+    return;
+  }
+
+  addCount(sourceTypes.length);
+  matches.push(...sourceTypes.map(type => ({ fullName: type.fullName, shortName: type.name, path })));
+}
+
+/** Logs enough C# index detail to diagnose language-server and source fallback failures. */
+function logCSharpTypeIndexSummary(
+  runtime: Pick<EventReferenceRuntime, 'logger'>,
+  fileCount: number,
+  serverTypeCount: number,
+  sourceFallbackTypeCount: number,
+  resolvableTypeCount: number
+): void {
+  runtime.logger.debug(`UnityEvent C# type index: ${fileCount} C# file(s), ${serverTypeCount} C# server type(s), ${sourceFallbackTypeCount} source fallback type(s), ${resolvableTypeCount} resolvable type key(s).`);
+
+  if (fileCount === 0) {
+    runtime.logger.warn('UnityEvent C# type index found 0 C# files; target type resolution will be empty.');
+  } else if (resolvableTypeCount === 0) {
+    runtime.logger.warn('UnityEvent C# type index found 0 resolvable types; check C# document symbols and source fallback parsing.');
+  }
 }
 
 /** Extracts top-level C# types from source text so project scans do not depend on editor symbols. */
@@ -135,6 +181,18 @@ function createCSharpTypeIndex(matches: readonly { fullName: string; shortName: 
       return fullNameToPath.get(typeLookupKey(fullTypeName)) ?? shortNameToPath.get(typeLookupKey(shortTypeName(fullTypeName)));
     }
   };
+}
+
+/** Counts unique type lookup keys that still resolve to one unambiguous script path. */
+function countResolvableTypeMatches(matches: readonly { fullName: string; shortName: string; path: string }[]): number {
+  const keysToPath = new Map<string, string | undefined>();
+
+  for (const match of matches) {
+    setUniquePath(keysToPath, match.fullName, match.path);
+    setUniquePath(keysToPath, match.shortName, match.path);
+  }
+
+  return [...keysToPath.values()].filter(path => path !== undefined).length;
 }
 
 /** Stores a path only while a type-name key remains unambiguous. */

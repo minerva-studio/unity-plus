@@ -917,18 +917,22 @@ describe('eventReferences', () => {
     });
 
     const document = createTextDocument('/Project/Assets/Unknown.cs', 'public class Unknown {}');
-    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
+    const pendingLenses = await runtime.provideCodeLenses(document);
+    assert.deepStrictEqual(pendingLenses.map(lens => lens.command?.title), [
       '- Unity serialized instances',
       '- UnityEvent references',
       '- UnityEvent targets'
     ]);
+    assert.strictEqual(pendingLenses.every(lens => lens.range.start.line === 0 && lens.range.start.character === 13), true);
     await runtime.waitForCodeLensChange();
 
-    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
+    const readyLenses = await runtime.provideCodeLenses(document);
+    assert.deepStrictEqual(readyLenses.map(lens => lens.command?.title), [
       '0 Unity serialized instances',
       '0 UnityEvent references',
       '0 UnityEvent targets'
     ]);
+    assert.strictEqual(readyLenses.every(lens => lens.range.start.line === 0 && lens.range.start.character === 13), true);
     assert.strictEqual(candidateSearches, 0);
     assert.strictEqual(output.lines.some(line => line.includes('script GUID not found in metadata index')), true);
   });
@@ -2031,6 +2035,11 @@ describe('eventReferences', () => {
   it('parses source C# types for UnityEvent target resolution without language-server symbols', async () => {
     const runtime = createEventReferenceRuntime();
     let csharpFileScans = 0;
+    const output = createMemoryOutput();
+    const logger = createLogger({
+      output,
+      getLevel: () => 'debug'
+    });
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
       logger: createTestLogger(),
@@ -2038,7 +2047,7 @@ describe('eventReferences', () => {
     });
     const index = await buildUnityEventReferenceIndex({
       runtimeVscode: runtime.runtime,
-      logger: createTestLogger(),
+      logger,
       metadataIndex: lazyIndex,
       getCacheVersion: () => 0,
       findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
@@ -2062,6 +2071,9 @@ describe('eventReferences', () => {
     assert.strictEqual(index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Amlos.Fixtures.Gate').length, 1);
     assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
     assert.strictEqual(csharpFileScans, 1);
+    assert.strictEqual(output.lines.some(line =>
+      line.includes('1 C# file(s), 0 C# server type(s), 1 source fallback type(s), 2 resolvable type key(s).')
+    ), true);
   });
 
   it('extracts source type names from real Unity C# declaration shapes', () => {
@@ -2332,6 +2344,8 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       }
     },
     workspace: {
+      openTextDocument: async (uri: vscode.Uri) =>
+        textDocuments.get(uri.fsPath) ?? createTextDocument(uri.fsPath, ''),
       findFiles: async (pattern: unknown, exclude?: unknown) =>
         await options.findFiles?.(pattern, exclude) ?? [],
       findTextInFiles: options.findTextInFiles,

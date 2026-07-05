@@ -87,13 +87,13 @@ interface NamespaceRange {
 export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode): CSharpSymbolLanguageService {
   return {
     async getPrimaryTopLevelType(uri) {
-      const sourceType = await getPrimaryTopLevelTypeFromSource(runtimeVscode, uri);
-      if (sourceType !== 'fallback') {
-        return sourceType;
+      const providerType = await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
+      if (providerType !== 'fallback') {
+        return providerType;
       }
 
-      const providerType = await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
-      return providerType === 'fallback' ? undefined : providerType;
+      const sourceType = await getPrimaryTopLevelTypeFromSource(runtimeVscode, uri);
+      return sourceType === 'fallback' ? undefined : sourceType;
     },
     async findMethods(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
@@ -155,15 +155,16 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
   };
 }
 
-/** Reads C# symbols from the active language server without parsing source text. */
+/** Reads C# symbols from the active language server after loading the document in VS Code. */
 async function getDocumentSymbols(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
 ): Promise<Array<vscode.DocumentSymbol | vscode.SymbolInformation>> {
   try {
+    const document = await runtimeVscode.workspace.openTextDocument(uri);
     return await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
       'vscode.executeDocumentSymbolProvider',
-      uri
+      document.uri
     ) ?? [];
   } catch {
     return [];
@@ -377,18 +378,9 @@ async function getPrimaryTopLevelTypeFromSymbols(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
 ): Promise<CSharpTopLevelTypeSnapshot | 'fallback' | undefined> {
-  let symbols: Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined;
+  const symbols = await getDocumentSymbols(runtimeVscode, uri);
 
-  try {
-    symbols = await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
-      'vscode.executeDocumentSymbolProvider',
-      uri
-    );
-  } catch {
-    return 'fallback';
-  }
-
-  if (!symbols || symbols.length === 0) {
+  if (symbols.length === 0) {
     return 'fallback';
   }
 
