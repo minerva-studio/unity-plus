@@ -1,9 +1,8 @@
 import { createRequire } from 'node:module';
-import { extname } from 'node:path';
 import type * as vscode from 'vscode';
 import { UnityPlusLogger } from '../../unity/logger';
 import { parseUnityMetaGuid, type LazyUnityMetadataIndex, type UnityMetadataIndex } from '../../unity/metadataIndex';
-import { searchUnityFilesContainingText, type UnityTextSearchBackend, type UnityTextSearchFileResult } from '../../unity/textSearch';
+import type { UnityTextSearchFileResult } from '../../unity/textSearch';
 import {
   getUnityYamlDocumentFileId,
   getUnityYamlDocumentScalar,
@@ -15,6 +14,15 @@ import {
 } from '../../unity/unityYaml';
 import type { UnityYamlDocument, UnityYamlPersistentCall, UnityYamlSerializedScriptDocument } from '../../unity/unityYaml';
 import {
+  eventReferenceCandidateTexts,
+  findDefaultAssetFiles,
+  findDefaultAssetFilesContainingText,
+  findDefaultCSharpFiles,
+  getAssetKind,
+  isCSharpFile,
+  watchUnitySerializedAssetFiles
+} from './assetDiscovery';
+import {
   findCSharpMethods,
   findCSharpTargetMethodPosition,
   findCSharpTypes,
@@ -23,85 +31,36 @@ import {
   findUnityEventFields,
   type CSharpTypeSnapshot
 } from './csharpSource';
-import { createUnityEventReferenceScanStatus, type UnityEventReferenceScanStatusReporter } from './scanStatus';
+import {
+  countUnfinishedAssets,
+  createEmptyDiagnostics,
+  formatDiagnostics,
+  incrementAssetCount,
+  mergeDiagnostics
+} from './diagnostics';
+import {
+  type UnityEventCandidateSearchBackend,
+  type UnityEventReference,
+  type UnityEventReferenceBuildContext,
+  type UnityEventReferenceDiagnostics,
+  type UnityEventReferenceScanStatusReporter,
+  type UnitySerializedAssetKind,
+  type UnitySerializedAssetReferenceIndex,
+  type UnitySerializedInstanceLocation
+} from './model';
+import { createReferenceIndex, pathReferenceKey, typeKey } from './referenceIndex';
+import { createUnityEventReferenceScanStatus } from './scanStatus';
+import { isUnityBuiltInTargetTypeName, simplifyAssemblyTypeName } from './targetTypes';
 
-export type UnitySerializedAssetKind = 'prefab' | 'scene' | 'asset';
-
-export interface UnityEventReference {
-  assetPath: string;
-  assetKind: UnitySerializedAssetKind;
-  line: number;
-  character: number;
-  eventFieldName: string;
-  eventScriptPath?: string;
-  eventOwnerTypeName?: string;
-  gameObjectName?: string;
-  targetFileId?: string;
-  targetTypeName: string;
-  methodName: string;
-  scriptPath?: string;
-  scriptTypeName?: string;
-}
-
-export interface UnitySerializedInstanceLocation {
-  assetPath: string;
-  assetKind: UnitySerializedAssetKind;
-  line: number;
-  character: number;
-  fileId: string;
-  scriptPath?: string;
-  scriptTypeName?: string;
-  name?: string;
-  gameObjectName?: string;
-}
-
-export interface UnitySerializedAssetReferenceIndex {
-  getReferences(scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[];
-  getReferenceCount(scriptPath: string, methodName: string, typeName?: string): number;
-  getFieldReferences(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];
-  getFieldReferenceCount(scriptPath: string, fieldName: string, typeName?: string): number;
-  getFieldTargets(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];
-  getFieldTargetCount(scriptPath: string, fieldName: string, typeName?: string): number;
-  getSerializedInstances(scriptPath: string, typeName?: string): readonly UnitySerializedInstanceLocation[];
-  getSerializedInstanceCount(scriptPath: string, typeName?: string): number;
-  getAllReferences(): readonly UnityEventReference[];
-  getDiagnostics(): UnityEventReferenceDiagnostics;
-}
-
-export interface UnityEventReferenceDiagnostics {
-  discoveredAssetCount: number;
-  candidateAssetCount: number;
-  candidateSearchBackend: UnityEventCandidateSearchBackend;
-  textCandidateSearchCount: number;
-  assetReadCount: number;
-  prefabCount: number;
-  sceneCount: number;
-  assetCount: number;
-  skippedAssetCount: number;
-  canceledAssetCount: number;
-  parsedYamlAssetCount: number;
-  parsedUnityEventAssetCount: number;
-  skippedUnityEventAssetCount: number;
-  persistentCallCount: number;
-  serializedInstanceCount: number;
-  resolvedReferenceCount: number;
-  resolvedByTargetTypeNameCount: number;
-  resolvedOwnerScriptGuidCount: number;
-  resolvedOwnerEditorClassIdentifierCount: number;
-  unresolvedOwnerScriptCount: number;
-  resolvedSerializedInstanceScriptGuidCount: number;
-  resolvedSerializedInstanceEditorClassIdentifierCount: number;
-  unresolvedSerializedInstanceScriptCount: number;
-  serializedInstanceScriptTextHitCount: number;
-  serializedInstanceScriptResolvedTextHitCount: number;
-  serializedInstanceScriptUnresolvedTextHitCount: number;
-  serializedInstanceScriptDedupedTextHitCount: number;
-  skippedDisabledCallCount: number;
-  skippedMissingTargetTypeNameCount: number;
-  skippedUnresolvedTargetTypeNameCount: number;
-  skippedMissingMethodNameCount: number;
-  elapsedMilliseconds: number;
-}
+export type {
+  UnityEventReference,
+  UnityEventReferenceBuildContext,
+  UnityEventReferenceBuildMode,
+  UnityEventReferenceDiagnostics,
+  UnitySerializedAssetKind,
+  UnitySerializedAssetReferenceIndex,
+  UnitySerializedInstanceLocation
+} from './model';
 
 export interface EventReferenceFeatureOptions {
   metadataIndex?: LazyUnityMetadataIndex;
@@ -131,8 +90,6 @@ interface EventReferenceRuntime {
   buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
   scanStatus?: UnityEventReferenceScanStatusReporter;
 }
-
-type UnityEventCandidateSearchBackend = UnityTextSearchBackend | 'injectedTextSearch' | 'none';
 
 type UnityAssetTextSearch = (
   root: vscode.Uri,
@@ -197,15 +154,6 @@ interface UnityEventReferenceIndexController {
   notifyCodeLensesChanged(): void;
 }
 
-export type UnityEventReferenceBuildMode = 'background' | 'interactive';
-
-export interface UnityEventReferenceBuildContext {
-  mode: UnityEventReferenceBuildMode;
-  cancellationToken?: vscode.CancellationToken;
-  progress?: vscode.Progress<{ message?: string; increment?: number }>;
-  scanStatus?: UnityEventReferenceScanStatusReporter;
-}
-
 interface PriorityScanState {
   key: string;
   status: 'pending' | 'ready' | 'failed';
@@ -233,17 +181,12 @@ interface RunWithConcurrencyOptions {
 
 const gameObjectClassId = 1;
 const monoBehaviourClassId = 114;
-const assetGlobs = ['Assets/**/*', 'Packages/**/*'];
-const csharpGlobs = ['Assets/**/*.cs', 'Packages/**/*.cs'];
 const defaultAssetScanConcurrency = 4;
 const scanYieldEvery = 4;
 const backgroundScanYieldEvery = 1;
 const backgroundBuildDebounceMilliseconds = 150;
 const progressReportInterval = 10;
-const eventReferenceCandidateTexts = ['m_Script', 'm_PersistentCalls', '.m_PersistentCalls.'];
-const serializedAssetSearchGlobs = ['Assets/**/*.{prefab,unity,asset}', 'Packages/**/*.{prefab,unity,asset}'];
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
-const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
 
 export function registerEventReferenceFeature(
@@ -1660,344 +1603,6 @@ function trackOwnerScriptIdentity(
   }
 }
 
-function createReferenceIndex(
-  references: readonly UnityEventReference[],
-  serializedInstances: readonly UnitySerializedInstanceLocation[] = [],
-  diagnostics: UnityEventReferenceDiagnostics = createEmptyDiagnostics()
-): UnitySerializedAssetReferenceIndex {
-  const referencesByKey = new Map<string, UnityEventReference[]>();
-  const referencesByTypeKey = new Map<string, UnityEventReference[]>();
-  const referencesByFieldKey = new Map<string, UnityEventReference[]>();
-  const referencesByFieldTypeKey = new Map<string, UnityEventReference[]>();
-  const targetReferencesByFieldKey = new Map<string, UnityEventReference[]>();
-  const targetReferencesByFieldTypeKey = new Map<string, UnityEventReference[]>();
-  const targetReferenceKeysByFieldKey = new Map<string, Set<string>>();
-  const targetReferenceKeysByFieldTypeKey = new Map<string, Set<string>>();
-  const serializedInstancesByScriptPath = new Map<string, UnitySerializedInstanceLocation[]>();
-  const serializedInstancesByScriptTypeName = new Map<string, UnitySerializedInstanceLocation[]>();
-
-  for (const reference of references) {
-    if (reference.scriptPath) {
-      const key = referenceKey(reference.scriptPath, reference.methodName);
-      appendMapValue(referencesByKey, key, reference);
-    }
-
-    if (reference.scriptTypeName && !reference.scriptPath) {
-      appendMapValue(referencesByTypeKey, typeReferenceKey(reference.scriptTypeName, reference.methodName), reference);
-    }
-
-    if (reference.eventScriptPath) {
-      const fieldKey = referenceKey(reference.eventScriptPath, reference.eventFieldName);
-      appendMapValue(referencesByFieldKey, fieldKey, reference);
-
-      if (isProjectUnityEventTargetReference(reference)) {
-        addTargetFieldReference(targetReferencesByFieldKey, targetReferenceKeysByFieldKey, fieldKey, reference);
-      }
-    }
-
-    if (reference.eventOwnerTypeName) {
-      const fieldTypeKey = fieldTypeReferenceKey(reference.eventOwnerTypeName, reference.eventFieldName);
-      appendMapValue(referencesByFieldTypeKey, fieldTypeKey, reference);
-
-      if (isProjectUnityEventTargetReference(reference)) {
-        addTargetFieldReference(targetReferencesByFieldTypeKey, targetReferenceKeysByFieldTypeKey, fieldTypeKey, reference);
-      }
-    }
-  }
-
-  for (const location of serializedInstances) {
-    if (location.scriptPath) {
-      appendMapValue(serializedInstancesByScriptPath, pathReferenceKey(location.scriptPath), location);
-    }
-
-    if (location.scriptTypeName) {
-      appendMapValue(serializedInstancesByScriptTypeName, typeKey(location.scriptTypeName), location);
-    }
-  }
-
-  const getReferences = (scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[] =>
-    mergeUniqueReferences(
-      referencesByKey.get(referenceKey(scriptPath, methodName)),
-      typeName ? referencesByTypeKey.get(typeReferenceKey(typeName, methodName)) : undefined
-    );
-  const getFieldReferences = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
-    mergeUniqueReferences(
-      filterByType(referencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
-      typeName ? referencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
-    );
-  const getFieldTargets = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
-    mergeUniqueReferences(
-      filterByType(targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
-      typeName ? targetReferencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
-    );
-  const getSerializedInstances = (scriptPath: string, typeName?: string): readonly UnitySerializedInstanceLocation[] =>
-    mergeUniqueReferences(
-      scriptPath ? serializedInstancesByScriptPath.get(pathReferenceKey(scriptPath)) : undefined,
-      typeName ? serializedInstancesByScriptTypeName.get(typeKey(typeName)) : undefined
-    );
-
-  return {
-    getReferences(scriptPath, methodName, typeName) {
-      return getReferences(scriptPath, methodName, typeName);
-    },
-    getReferenceCount(scriptPath, methodName, typeName) {
-      return getReferences(scriptPath, methodName, typeName).length;
-    },
-    getFieldReferences(scriptPath, fieldName, typeName) {
-      return getFieldReferences(scriptPath, fieldName, typeName);
-    },
-    getFieldReferenceCount(scriptPath, fieldName, typeName) {
-      return getFieldReferences(scriptPath, fieldName, typeName).length;
-    },
-    getFieldTargets(scriptPath, fieldName, typeName) {
-      return getFieldTargets(scriptPath, fieldName, typeName);
-    },
-    getFieldTargetCount(scriptPath, fieldName, typeName) {
-      return getFieldTargets(scriptPath, fieldName, typeName).length;
-    },
-    getSerializedInstances(scriptPath, typeName) {
-      return getSerializedInstances(scriptPath, typeName);
-    },
-    getSerializedInstanceCount(scriptPath, typeName) {
-      return getSerializedInstances(scriptPath, typeName).length;
-    },
-    getAllReferences() {
-      return references;
-    },
-    getDiagnostics() {
-      return diagnostics;
-    }
-  };
-}
-
-function appendMapValue<T>(map: Map<string, T[]>, key: string, value: T): void {
-  const bucket = map.get(key) ?? [];
-  bucket.push(value);
-  map.set(key, bucket);
-}
-
-function addTargetFieldReference(
-  referencesByFieldKey: Map<string, UnityEventReference[]>,
-  seenReferencesByFieldKey: Map<string, Set<string>>,
-  fieldKey: string,
-  reference: UnityEventReference
-): void {
-  const targetKey = unityEventTargetIdentityKey(reference);
-  if (!targetKey) {
-    return;
-  }
-
-  const seenTargets = seenReferencesByFieldKey.get(fieldKey) ?? new Set<string>();
-  if (seenTargets.has(targetKey)) {
-    return;
-  }
-
-  appendMapValue(referencesByFieldKey, fieldKey, reference);
-  seenTargets.add(targetKey);
-  seenReferencesByFieldKey.set(fieldKey, seenTargets);
-}
-
-/** Checks whether a YAML persistent call names a project C# target method. */
-function isProjectUnityEventTargetReference(reference: UnityEventReference): boolean {
-  const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
-  return !!targetTypeName &&
-    !!reference.methodName &&
-    !isUnityBuiltInTargetTypeName(targetTypeName);
-}
-
-/** Creates a method-level target identity from YAML type and method names. */
-function unityEventTargetIdentityKey(reference: UnityEventReference): string | undefined {
-  if (!isProjectUnityEventTargetReference(reference)) {
-    return undefined;
-  }
-
-  const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
-  return `${typeKey(targetTypeName ?? '')}#${reference.methodName}`;
-}
-
-function mergeUniqueReferences<T>(first: readonly T[] | undefined, second: readonly T[] | undefined): readonly T[] {
-  if (!first?.length) {
-    return second ?? [];
-  }
-
-  if (!second?.length) {
-    return first;
-  }
-
-  const merged: T[] = [];
-  const seen = new Set<T>();
-
-  for (const value of [...first, ...second]) {
-    if (seen.has(value)) {
-      continue;
-    }
-
-    seen.add(value);
-    merged.push(value);
-  }
-
-  return merged;
-}
-
-function filterByType<T>(
-  references: readonly T[] | undefined,
-  typeName: string | undefined,
-  getTypeName: (reference: T) => string | undefined
-): readonly T[] | undefined {
-  if (!references || !typeName) {
-    return references;
-  }
-
-  const requestedTypeKey = typeKey(typeName);
-  return references.filter(reference => {
-    const referenceTypeName = getTypeName(reference);
-    return !referenceTypeName || typeKey(referenceTypeName) === requestedTypeKey;
-  });
-}
-
-function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
-  return {
-    discoveredAssetCount: 0,
-    candidateAssetCount: 0,
-    candidateSearchBackend: 'none',
-    textCandidateSearchCount: 0,
-    assetReadCount: 0,
-    prefabCount: 0,
-    sceneCount: 0,
-    assetCount: 0,
-    skippedAssetCount: 0,
-    canceledAssetCount: 0,
-    parsedYamlAssetCount: 0,
-    parsedUnityEventAssetCount: 0,
-    skippedUnityEventAssetCount: 0,
-    persistentCallCount: 0,
-    serializedInstanceCount: 0,
-    resolvedReferenceCount: 0,
-    resolvedByTargetTypeNameCount: 0,
-    resolvedOwnerScriptGuidCount: 0,
-    resolvedOwnerEditorClassIdentifierCount: 0,
-    unresolvedOwnerScriptCount: 0,
-    resolvedSerializedInstanceScriptGuidCount: 0,
-    resolvedSerializedInstanceEditorClassIdentifierCount: 0,
-    unresolvedSerializedInstanceScriptCount: 0,
-    serializedInstanceScriptTextHitCount: 0,
-    serializedInstanceScriptResolvedTextHitCount: 0,
-    serializedInstanceScriptUnresolvedTextHitCount: 0,
-    serializedInstanceScriptDedupedTextHitCount: 0,
-    skippedDisabledCallCount: 0,
-    skippedMissingTargetTypeNameCount: 0,
-    skippedUnresolvedTargetTypeNameCount: 0,
-    skippedMissingMethodNameCount: 0,
-    elapsedMilliseconds: 0
-  };
-}
-
-function incrementAssetCount(diagnostics: UnityEventReferenceDiagnostics, assetKind: UnitySerializedAssetKind): void {
-  if (assetKind === 'prefab') {
-    diagnostics.prefabCount += 1;
-  } else if (assetKind === 'scene') {
-    diagnostics.sceneCount += 1;
-  } else {
-    diagnostics.assetCount += 1;
-  }
-}
-
-function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityEventReferenceDiagnostics): void {
-  target.discoveredAssetCount += source.discoveredAssetCount;
-  target.candidateAssetCount += source.candidateAssetCount;
-  target.candidateSearchBackend = source.candidateSearchBackend !== 'none'
-    ? source.candidateSearchBackend
-    : target.candidateSearchBackend;
-  target.textCandidateSearchCount += source.textCandidateSearchCount;
-  target.assetReadCount += source.assetReadCount;
-  target.prefabCount += source.prefabCount;
-  target.sceneCount += source.sceneCount;
-  target.assetCount += source.assetCount;
-  target.skippedAssetCount += source.skippedAssetCount;
-  target.canceledAssetCount += source.canceledAssetCount;
-  target.parsedYamlAssetCount += source.parsedYamlAssetCount;
-  target.parsedUnityEventAssetCount += source.parsedUnityEventAssetCount;
-  target.skippedUnityEventAssetCount += source.skippedUnityEventAssetCount;
-  target.persistentCallCount += source.persistentCallCount;
-  target.serializedInstanceCount += source.serializedInstanceCount;
-  target.resolvedReferenceCount += source.resolvedReferenceCount;
-  target.resolvedByTargetTypeNameCount += source.resolvedByTargetTypeNameCount;
-  target.resolvedOwnerScriptGuidCount += source.resolvedOwnerScriptGuidCount;
-  target.resolvedOwnerEditorClassIdentifierCount += source.resolvedOwnerEditorClassIdentifierCount;
-  target.unresolvedOwnerScriptCount += source.unresolvedOwnerScriptCount;
-  target.resolvedSerializedInstanceScriptGuidCount += source.resolvedSerializedInstanceScriptGuidCount;
-  target.resolvedSerializedInstanceEditorClassIdentifierCount += source.resolvedSerializedInstanceEditorClassIdentifierCount;
-  target.unresolvedSerializedInstanceScriptCount += source.unresolvedSerializedInstanceScriptCount;
-  target.serializedInstanceScriptTextHitCount += source.serializedInstanceScriptTextHitCount;
-  target.serializedInstanceScriptResolvedTextHitCount += source.serializedInstanceScriptResolvedTextHitCount;
-  target.serializedInstanceScriptUnresolvedTextHitCount += source.serializedInstanceScriptUnresolvedTextHitCount;
-  target.serializedInstanceScriptDedupedTextHitCount += source.serializedInstanceScriptDedupedTextHitCount;
-  target.skippedDisabledCallCount += source.skippedDisabledCallCount;
-  target.skippedMissingTargetTypeNameCount += source.skippedMissingTargetTypeNameCount;
-  target.skippedUnresolvedTargetTypeNameCount += source.skippedUnresolvedTargetTypeNameCount;
-  target.skippedMissingMethodNameCount += source.skippedMissingMethodNameCount;
-}
-
-function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEventReferenceDiagnostics): string {
-  const skipped = diagnostics.skippedDisabledCallCount +
-    diagnostics.skippedMissingTargetTypeNameCount +
-    diagnostics.skippedUnresolvedTargetTypeNameCount +
-    diagnostics.skippedMissingMethodNameCount;
-  const skippedAssets = diagnostics.skippedAssetCount + diagnostics.canceledAssetCount;
-  return [
-    runtimeVscode.l10n.t('discovered {count} serialized asset(s)', { count: diagnostics.discoveredAssetCount }),
-    runtimeVscode.l10n.t('asset candidates: {candidateCount} asset(s), {searchCount} text search(es), backend {backend}, read {readCount}', {
-      candidateCount: diagnostics.candidateAssetCount,
-      searchCount: diagnostics.textCandidateSearchCount,
-      backend: diagnostics.candidateSearchBackend,
-      readCount: diagnostics.assetReadCount
-    }),
-    runtimeVscode.l10n.t('scanned {prefabCount} prefab(s), {sceneCount} scene(s), and {assetCount} asset file(s)', {
-      prefabCount: diagnostics.prefabCount,
-      sceneCount: diagnostics.sceneCount,
-      assetCount: diagnostics.assetCount
-    }),
-    runtimeVscode.l10n.t('found {count} persistent call(s)', { count: diagnostics.persistentCallCount }),
-    runtimeVscode.l10n.t('found {count} serialized instance(s)', {
-      count: diagnostics.serializedInstanceCount
-    }),
-    runtimeVscode.l10n.t('YAML parser paths: {assetCount} asset parse(s), {unityEventCount} UnityEvent parse(s), {skippedUnityEventCount} UnityEvent parse(s) skipped', {
-      assetCount: diagnostics.parsedYamlAssetCount,
-      unityEventCount: diagnostics.parsedUnityEventAssetCount,
-      skippedUnityEventCount: diagnostics.skippedUnityEventAssetCount
-    }),
-    runtimeVscode.l10n.t('found {count} UnityEvent reference(s)', {
-      count: diagnostics.resolvedReferenceCount
-    }),
-    runtimeVscode.l10n.t('resolved {count} UnityEvent target method(s)', {
-      count: diagnostics.resolvedByTargetTypeNameCount
-    }),
-    runtimeVscode.l10n.t('owner scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved', {
-      guidCount: diagnostics.resolvedOwnerScriptGuidCount,
-      editorCount: diagnostics.resolvedOwnerEditorClassIdentifierCount,
-      unresolvedCount: diagnostics.unresolvedOwnerScriptCount
-    }),
-    runtimeVscode.l10n.t('serialized instance scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved', {
-      guidCount: diagnostics.resolvedSerializedInstanceScriptGuidCount,
-      editorCount: diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount,
-      unresolvedCount: diagnostics.unresolvedSerializedInstanceScriptCount
-    }),
-    runtimeVscode.l10n.t('serialized instance text hits: {hitCount} found, {resolvedCount} metadata-resolved, {unresolvedCount} unresolved, {dedupedCount} deduped', {
-      hitCount: diagnostics.serializedInstanceScriptTextHitCount,
-      resolvedCount: diagnostics.serializedInstanceScriptResolvedTextHitCount,
-      unresolvedCount: diagnostics.serializedInstanceScriptUnresolvedTextHitCount,
-      dedupedCount: diagnostics.serializedInstanceScriptDedupedTextHitCount
-    }),
-    runtimeVscode.l10n.t('skipped {callCount} call(s) and {assetCount} asset(s)', {
-      callCount: skipped,
-      assetCount: skippedAssets
-    }),
-    runtimeVscode.l10n.t('finished in {elapsedMilliseconds}ms', {
-      elapsedMilliseconds: diagnostics.elapsedMilliseconds
-    })
-  ].join(', ');
-}
-
 function createMissingWorkspaceMessage(runtimeVscode: typeof vscode): string {
   const roots = runtimeVscode.workspace.workspaceFolders
     ?.map(folder => folder.uri.fsPath)
@@ -2340,63 +1945,6 @@ async function findCurrentScriptCandidateAssetFiles(
   };
 }
 
-/** Watches serialized Unity assets so ready CodeLens indexes do not outlive changed YAML. */
-function watchUnitySerializedAssetFiles(
-  runtimeVscode: typeof vscode,
-  root: vscode.Uri,
-  onChanged: (uri: vscode.Uri) => void
-): vscode.Disposable {
-  const watchers = serializedAssetSearchGlobs.map(glob =>
-    runtimeVscode.workspace.createFileSystemWatcher(new runtimeVscode.RelativePattern(root, glob))
-  );
-
-  return runtimeVscode.Disposable.from(
-    ...watchers.flatMap(watcher => [
-      watcher,
-      watcher.onDidCreate(onChanged),
-      watcher.onDidChange(onChanged),
-      watcher.onDidDelete(onChanged)
-    ])
-  );
-}
-
-async function findDefaultAssetFiles(
-  root: vscode.Uri,
-  runtimeVscode: typeof vscode
-): Promise<readonly vscode.Uri[]> {
-  const fileGroups = await Promise.all(assetGlobs.map(async glob =>
-    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob), null)
-  ));
-  const files = fileGroups.flat();
-  return files.filter(uri => supportedAssetExtensions.has(extname(uri.fsPath).toLowerCase()));
-}
-
-/** Searches serialized Unity assets for fixed text with ripgrep and stable fallbacks. */
-async function findDefaultAssetFilesContainingText(
-  root: vscode.Uri,
-  runtimeVscode: typeof vscode,
-  texts: readonly string[],
-  cancellationToken?: vscode.CancellationToken
-): Promise<UnityTextSearchFileResult> {
-  return await searchUnityFilesContainingText({
-    root,
-    runtimeVscode,
-    texts,
-    includeGlobs: serializedAssetSearchGlobs,
-    cancellationToken
-  });
-}
-
-async function findDefaultCSharpFiles(
-  root: vscode.Uri,
-  runtimeVscode: typeof vscode
-): Promise<readonly vscode.Uri[]> {
-  const fileGroups = await Promise.all(csharpGlobs.map(async glob =>
-    await runtimeVscode.workspace.findFiles(new runtimeVscode.RelativePattern(root, glob))
-  ));
-  return fileGroups.flat();
-}
-
 async function readDefaultTextFile(uri: vscode.Uri, runtimeVscode: typeof vscode): Promise<string> {
   const bytes = await runtimeVscode.workspace.fs.readFile(uri);
   return new TextDecoder('utf-8').decode(bytes);
@@ -2522,18 +2070,6 @@ function getGameObjectName(
   return gameObject?.classId === gameObjectClassId ? gameObject.name : undefined;
 }
 
-function simplifyAssemblyTypeName(typeName: string): string {
-  return typeName.split(',')[0]?.trim() ?? typeName;
-}
-
-function isUnityBuiltInTargetTypeName(typeName: string): boolean {
-  const normalized = simplifyAssemblyTypeName(typeName);
-  return normalized === 'UnityEngine' ||
-    normalized.startsWith('UnityEngine.') ||
-    normalized === 'UnityEditor' ||
-    normalized.startsWith('UnityEditor.');
-}
-
 function parseEditorClassIdentifier(value: string | undefined): string | undefined {
   if (!value) {
     return undefined;
@@ -2554,26 +2090,6 @@ function shortTypeName(fullTypeName: string): string {
   return fullTypeName.split('.').at(-1) ?? fullTypeName;
 }
 
-function referenceKey(scriptPath: string, methodName: string): string {
-  return `${pathReferenceKey(scriptPath)}#${methodName}`;
-}
-
-function typeReferenceKey(typeName: string, methodName: string): string {
-  return `${typeKey(typeName)}#${methodName}`;
-}
-
-function fieldTypeReferenceKey(typeName: string, fieldName: string): string {
-  return `${typeKey(typeName)}#${fieldName}`;
-}
-
-function pathReferenceKey(scriptPath: string): string {
-  return toNormalizedPath(scriptPath).toLowerCase();
-}
-
-function typeKey(typeName: string): string {
-  return typeName.toLowerCase();
-}
-
 function toProjectPath(root: vscode.Uri, uri: vscode.Uri): string {
   const rootPath = toNormalizedPath(root.fsPath);
   const path = toNormalizedPath(uri.fsPath);
@@ -2589,34 +2105,8 @@ function toNormalizedPath(path: string): string {
   return path.replace(/\\/g, '/');
 }
 
-function getAssetKind(uri: vscode.Uri): UnitySerializedAssetKind | undefined {
-  const extension = extname(uri.fsPath).toLowerCase();
-  if (extension === '.prefab') {
-    return 'prefab';
-  }
-
-  if (extension === '.unity') {
-    return 'scene';
-  }
-
-  if (extension === '.asset') {
-    return 'asset';
-  }
-
-  return undefined;
-}
-
-function isCSharpFile(uri: vscode.Uri): boolean {
-  return extname(uri.fsPath).toLowerCase() === '.cs';
-}
-
 function escapeMarkdown(value: string): string {
   return value.replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1');
-}
-
-function countUnfinishedAssets(totalCount: number, diagnostics: UnityEventReferenceDiagnostics): number {
-  const finishedCount = diagnostics.prefabCount + diagnostics.sceneCount + diagnostics.assetCount + diagnostics.skippedAssetCount;
-  return Math.max(0, totalCount - finishedCount);
 }
 
 function isCancellationRequested(token: vscode.CancellationToken | undefined): boolean {

@@ -1,31 +1,6 @@
 import type * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
-import type { UnityEventReferenceDiagnostics } from './eventReferences';
-
-export interface UnityEventReferenceScanStatusReporter {
-  /** Shows the background scan status item with the first visible phase. */
-  start(phase: string, label?: string): void;
-  /** Updates the status item with bounded scan progress. */
-  update(status: UnityEventReferenceScanStatus): void;
-  /** Hides the status item and records the final scan result. */
-  finish(result: 'completed' | 'failed' | 'canceled', diagnostics?: UnityEventReferenceDiagnostics, status?: UnityEventReferenceScanStatus): void;
-  /** Releases the status item when the extension feature is disposed. */
-  dispose(): void;
-}
-
-interface UnityEventReferenceScanStatus {
-  phase: string;
-  label?: string;
-  scriptPath?: string;
-  scriptGuid?: string;
-  metadataGuidCount?: number;
-  candidateCount?: number;
-  scannedCount?: number;
-  totalCount?: number;
-  referenceCount?: number;
-  instanceCount?: number;
-  elapsedMilliseconds?: number;
-}
+import type { UnityEventReferenceDiagnostics, UnityEventReferenceScanStatus, UnityEventReferenceScanStatusReporter } from './model';
 
 const scanStatusRetainMilliseconds = 8000;
 
