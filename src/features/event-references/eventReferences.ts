@@ -3,6 +3,15 @@ import { extname } from 'node:path';
 import type * as vscode from 'vscode';
 import { UnityPlusLogger } from '../../unity/logger';
 import type { LazyUnityMetadataIndex, UnityMetadataIndex } from '../../unity/metadataIndex';
+import {
+  getUnityYamlDocumentFileId,
+  getUnityYamlDocumentScalar,
+  getUnityYamlDocumentScriptReference,
+  getUnityYamlPersistentCalls,
+  getUnityYamlPrefabOverridePersistentCalls,
+  parseUnityYamlAsset
+} from '../../unity/unityYaml';
+import type { UnityYamlDocument, UnityYamlPersistentCall } from '../../unity/unityYaml';
 
 export type UnitySerializedAssetKind = 'prefab' | 'scene' | 'asset';
 
@@ -117,17 +126,6 @@ export type CSharpTypeIndexBuilder = (
   context?: UnityEventReferenceBuildContext
 ) => Promise<CSharpTypeIndex>;
 
-interface SerializedDocument {
-  classId: number;
-  fileId: string;
-  body: string;
-  startLine: number;
-  bodyStartOffset: number;
-  bodyEndOffset: number;
-  assetPath: string;
-  assetKind: UnitySerializedAssetKind;
-}
-
 interface SerializedObjectRecord {
   classId: number;
   fileId: string;
@@ -146,18 +144,7 @@ interface SerializedObjectScriptIdentity {
   source?: 'guid' | 'editorClassIdentifier';
 }
 
-interface PersistentCallSnapshot {
-  eventFieldName: string;
-  ownerFileId?: string;
-  line: number;
-  character: number;
-  methodLine?: number;
-  methodCharacter?: number;
-  targetFileId?: string;
-  targetTypeName: string;
-  methodName: string;
-  callState: number;
-}
+type PersistentCallSnapshot = UnityYamlPersistentCall;
 
 interface CSharpMethodSnapshot {
   name: string;
@@ -212,7 +199,6 @@ interface RunWithConcurrencyOptions {
 
 const gameObjectClassId = 1;
 const monoBehaviourClassId = 114;
-const prefabInstanceClassId = 1001;
 const assetGlobs = ['Assets/**/*', 'Packages/**/*'];
 const csharpGlobs = ['Assets/**/*.cs', 'Packages/**/*.cs'];
 const defaultAssetScanConcurrency = 4;
@@ -224,14 +210,12 @@ const serializedLineScanYieldEvery = 2000;
 const progressReportInterval = 10;
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
 const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
-const documentHeaderPattern = /^--- !u!(\d+) &(-?\d+)/gm;
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
 const fileIdPattern = /fileID:\s*(-?\d+)/;
 const guidPattern = /guid:\s*([a-fA-F0-9]{32})/;
 const methodPattern = /\b(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial|\s)+[\w<>,[\].?]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 const unityEventTokenPattern = /(?:UnityEngine\.Events\.)?UnityEvent\b/g;
 const identifierPattern = /[A-Za-z_][A-Za-z0-9_]*/y;
-const persistentCallPropertyPathPattern = /^(.+)\.m_PersistentCalls\.m_Calls\.Array\.data\[(\d+)\]\.(m_[A-Za-z0-9_]+)$/;
 
 export function registerEventReferenceFeature(
   logger: UnityPlusLogger,
@@ -490,7 +474,7 @@ async function parseUnityEventReferencesCore(
 
   diagnostics.heavyParsedAssetCount += 1;
 
-  const documents = parseSerializedDocuments(content, assetPath, assetKind);
+  const documents = parseUnityYamlAsset(content).documents;
   const objects = new Map<string, SerializedObjectRecord>();
   const callsByDocument = new Map<string, PersistentCallSnapshot[]>();
 
@@ -498,13 +482,13 @@ async function parseUnityEventReferencesCore(
     const object = parseSerializedObject(document);
     objects.set(document.fileId, object);
 
-    const calls = parsePersistentCalls(document.body, document.startLine);
+    const calls = getUnityYamlPersistentCalls(document);
     if (calls.length > 0) {
       callsByDocument.set(document.fileId, calls);
       diagnostics.persistentCallCount += calls.length;
     }
 
-    const overrideCalls = parsePrefabOverridePersistentCalls(document);
+    const overrideCalls = getUnityYamlPrefabOverridePersistentCalls(document);
     for (const call of overrideCalls) {
       const calls = callsByDocument.get(call.ownerFileId ?? document.fileId) ?? [];
       calls.push(call);
@@ -874,54 +858,17 @@ function createEventReferenceProvider(
   };
 }
 
-function parseSerializedDocuments(
-  content: string,
-  assetPath: string,
-  assetKind: UnitySerializedAssetKind
-): SerializedDocument[] {
-  const headers = [...content.matchAll(documentHeaderPattern)];
-  const documents: SerializedDocument[] = [];
-  let lineCursor = 0;
-  let offsetCursor = 0;
-
-  for (let index = 0; index < headers.length; index += 1) {
-    const header = headers[index];
-    const next = headers[index + 1];
-    const bodyStart = header.index + header[0].length;
-    const bodyEnd = next?.index ?? content.length;
-
-    // Advance from the previous body start so line tracking stays linear for large Unity YAML files.
-    const startLine = lineCursor + countLineBreaks(content, offsetCursor, bodyStart);
-
-    lineCursor = startLine;
-    offsetCursor = bodyStart;
-
-    documents.push({
-      classId: Number(header[1]),
-      fileId: header[2],
-      body: content.slice(bodyStart, bodyEnd),
-      startLine,
-      bodyStartOffset: bodyStart,
-      bodyEndOffset: bodyEnd,
-      assetPath,
-      assetKind
-    });
-  }
-
-  return documents;
-}
-
-function parseSerializedObject(document: SerializedDocument): SerializedObjectRecord {
+function parseSerializedObject(document: UnityYamlDocument): SerializedObjectRecord {
   const scriptReference = document.classId === monoBehaviourClassId
-    ? findGuidValueWithPosition(document.body, 'm_Script', document.startLine)
+    ? getUnityYamlDocumentScriptReference(document)
     : undefined;
-  const editorClassIdentifier = findScalarValue(document.body, 'm_EditorClassIdentifier');
+  const editorClassIdentifier = getUnityYamlDocumentScalar(document, 'm_EditorClassIdentifier');
 
   return {
     classId: document.classId,
     fileId: document.fileId,
-    name: findScalarValue(document.body, 'm_Name'),
-    gameObjectFileId: findFileIdValue(document.body, 'm_GameObject'),
+    name: getUnityYamlDocumentScalar(document, 'm_Name'),
+    gameObjectFileId: getUnityYamlDocumentFileId(document, 'm_GameObject'),
     scriptGuid: scriptReference?.guid,
     editorClassIdentifier,
     editorTypeName: parseEditorClassIdentifier(editorClassIdentifier),
@@ -1167,218 +1114,6 @@ function trackSerializedInstanceScriptIdentity(
     diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount += 1;
   } else if (object && (object.scriptGuid || object.editorTypeName)) {
     diagnostics.unresolvedSerializedInstanceScriptCount += 1;
-  }
-}
-
-function parsePersistentCalls(body: string, startLine: number): PersistentCallSnapshot[] {
-  const lines = body.split(/\r?\n/);
-  const calls: PersistentCallSnapshot[] = [];
-  const stack: Array<{ indent: number; key: string }> = [];
-  let activeEventFieldName: string | undefined;
-  let currentCall: Partial<PersistentCallSnapshot> | undefined;
-
-  function flushCall(): void {
-    if (currentCall?.eventFieldName) {
-      calls.push({
-        eventFieldName: currentCall.eventFieldName,
-        line: currentCall.methodLine ?? currentCall.line ?? startLine,
-        character: currentCall.methodCharacter ?? currentCall.character ?? 0,
-        methodLine: currentCall.methodLine,
-        methodCharacter: currentCall.methodCharacter,
-        targetFileId: currentCall.targetFileId,
-        targetTypeName: currentCall.targetTypeName ?? '',
-        methodName: currentCall.methodName ?? '',
-        callState: currentCall.callState ?? 1
-      });
-    }
-    currentCall = undefined;
-  }
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    const absoluteLine = startLine + lineIndex;
-    const indent = getIndent(line);
-    const trimmed = line.trim();
-
-    if (trimmed.length === 0) {
-      continue;
-    }
-
-    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
-      stack.pop();
-    }
-
-    const key = parseYamlKey(trimmed);
-    if (key) {
-      if (key === 'm_PersistentCalls') {
-        activeEventFieldName = stack[stack.length - 1]?.key;
-      } else if (trimmed.startsWith('- m_Target:')) {
-        flushCall();
-        currentCall = {
-          eventFieldName: activeEventFieldName ?? '<unknown>',
-          line: absoluteLine,
-          character: getIndent(line),
-          targetFileId: extractFileId(trimmed)
-        };
-      } else if (currentCall) {
-        updatePersistentCall(currentCall, key, trimmed, absoluteLine, getValueCharacter(line));
-      }
-
-      // The stack is intentionally small and indentation-based because Unity YAML uses stable field nesting.
-      if (!trimmed.startsWith('- ')) {
-        stack.push({ indent, key });
-      }
-    } else if (currentCall) {
-      updatePersistentCall(currentCall, undefined, trimmed, absoluteLine, getValueCharacter(line));
-    }
-  }
-
-  flushCall();
-  return calls;
-}
-
-function parsePrefabOverridePersistentCalls(document: SerializedDocument): PersistentCallSnapshot[] {
-  if (document.classId !== prefabInstanceClassId) {
-    return [];
-  }
-
-  const callsByKey = new Map<string, Partial<PersistentCallSnapshot> & { fallbackLine?: number; fallbackCharacter?: number }>();
-  const lines = document.body.split(/\r?\n/);
-  let currentTargetFileId: string | undefined;
-  let currentPropertyPath: string | undefined;
-  let currentLine = document.startLine;
-  let currentCharacter = 0;
-
-  function flushModification(): void {
-    if (!currentPropertyPath) {
-      return;
-    }
-
-    // Unity stores prefab overrides as independent property changes, so group them by owner field and call index.
-    const parsedPath = persistentCallPropertyPathPattern.exec(currentPropertyPath);
-    if (!parsedPath) {
-      return;
-    }
-
-    const key = `${currentTargetFileId ?? ''}#${parsedPath[1]}#${parsedPath[2]}`;
-    const call = callsByKey.get(key) ?? {
-      ownerFileId: currentTargetFileId,
-      eventFieldName: parsedPath[1],
-      fallbackLine: currentLine,
-      fallbackCharacter: currentCharacter
-    };
-    call.ownerFileId = currentTargetFileId;
-    call.eventFieldName = parsedPath[1];
-    call.line = call.line ?? currentLine;
-    call.character = call.character ?? currentCharacter;
-    call.fallbackLine = Math.min(call.fallbackLine ?? currentLine, currentLine);
-    call.fallbackCharacter = call.fallbackLine === currentLine ? currentCharacter : call.fallbackCharacter;
-
-    if (parsedPath[3] === 'm_MethodName') {
-      call.methodName = '';
-      call.methodLine = currentLine;
-      call.methodCharacter = currentCharacter;
-      call.line = currentLine;
-      call.character = currentCharacter;
-    } else if (parsedPath[3] === 'm_TargetAssemblyTypeName') {
-      call.targetTypeName = '';
-    } else if (parsedPath[3] === 'm_Target') {
-      call.targetFileId = undefined;
-    } else if (parsedPath[3] === 'm_CallState') {
-      call.callState = 1;
-    }
-
-    callsByKey.set(key, call);
-  }
-
-  function applyValue(key: string | undefined, trimmed: string, line: number, valueCharacter: number): void {
-    if (!currentPropertyPath) {
-      return;
-    }
-
-    const parsedPath = persistentCallPropertyPathPattern.exec(currentPropertyPath);
-    if (!parsedPath) {
-      return;
-    }
-
-    const call = callsByKey.get(`${currentTargetFileId ?? ''}#${parsedPath[1]}#${parsedPath[2]}`);
-    if (!call) {
-      return;
-    }
-
-    if (key === 'value' && parsedPath[3] === 'm_MethodName') {
-      call.methodName = valueAfterColon(trimmed);
-      call.methodLine = line;
-      call.methodCharacter = valueCharacter;
-      call.line = line;
-      call.character = valueCharacter;
-    } else if (key === 'value' && parsedPath[3] === 'm_TargetAssemblyTypeName') {
-      call.targetTypeName = valueAfterColon(trimmed);
-    } else if (key === 'value' && parsedPath[3] === 'm_CallState') {
-      call.callState = Number(valueAfterColon(trimmed));
-    } else if (key === 'objectReference' && parsedPath[3] === 'm_Target') {
-      call.targetFileId = extractFileId(trimmed);
-    }
-  }
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    const absoluteLine = document.startLine + lineIndex;
-    const trimmed = line.trim();
-    const key = parseYamlKey(trimmed);
-
-    if (trimmed.startsWith('- target:')) {
-      currentTargetFileId = extractFileId(trimmed);
-      currentPropertyPath = undefined;
-      currentLine = absoluteLine;
-      currentCharacter = getValueCharacter(line);
-      continue;
-    }
-
-    if (key === 'propertyPath') {
-      currentPropertyPath = valueAfterColon(trimmed);
-      currentLine = absoluteLine;
-      currentCharacter = getValueCharacter(line);
-      flushModification();
-      continue;
-    }
-
-    applyValue(key, trimmed, absoluteLine, getValueCharacter(line));
-  }
-
-  return [...callsByKey.values()].map(call => ({
-    eventFieldName: call.eventFieldName ?? '<unknown>',
-    ownerFileId: call.ownerFileId,
-    line: call.methodLine ?? call.line ?? call.fallbackLine ?? document.startLine,
-    character: call.methodCharacter ?? call.character ?? call.fallbackCharacter ?? 0,
-    methodLine: call.methodLine,
-    methodCharacter: call.methodCharacter,
-    targetFileId: call.targetFileId,
-    targetTypeName: call.targetTypeName ?? '',
-    methodName: call.methodName ?? '',
-    callState: call.callState ?? 1
-  }));
-}
-
-function updatePersistentCall(
-  currentCall: Partial<PersistentCallSnapshot>,
-  key: string | undefined,
-  trimmed: string,
-  line: number,
-  valueCharacter: number
-): void {
-  if (key === 'm_Target' && !currentCall.targetFileId) {
-    currentCall.targetFileId = extractFileId(trimmed);
-  } else if (key === 'fileID' && !currentCall.targetFileId) {
-    currentCall.targetFileId = valueAfterColon(trimmed);
-  } else if (key === 'm_TargetAssemblyTypeName') {
-    currentCall.targetTypeName = valueAfterColon(trimmed);
-  } else if (key === 'm_MethodName') {
-    currentCall.methodName = valueAfterColon(trimmed);
-    currentCall.methodLine = line;
-    currentCall.methodCharacter = valueCharacter;
-  } else if (key === 'm_CallState') {
-    currentCall.callState = Number(valueAfterColon(trimmed));
   }
 }
 
@@ -2201,44 +1936,6 @@ function findNearestNamespace(matches: RegExpMatchArray[], offset: number): stri
   return namespaceName;
 }
 
-function findScalarValue(body: string, fieldName: string): string | undefined {
-  const pattern = new RegExp(`^\\s*${escapeRegExp(fieldName)}:\\s*(.*)$`, 'm');
-  const value = pattern.exec(body)?.[1]?.trim();
-  return value === undefined || value === '' ? undefined : value;
-}
-
-function findFileIdValue(body: string, fieldName: string): string | undefined {
-  const pattern = new RegExp(`^\\s*${escapeRegExp(fieldName)}:\\s*\\{([^}]*)\\}`, 'm');
-  const mapping = pattern.exec(body)?.[1];
-  return mapping ? fileIdPattern.exec(mapping)?.[1] : undefined;
-}
-
-function findGuidValueWithPosition(
-  body: string,
-  fieldName: string,
-  startLine: number
-): { guid: string; line: number; character: number } | undefined {
-  const pattern = new RegExp(`^\\s*${escapeRegExp(fieldName)}:\\s*\\{([^}]*)\\}`, 'mg');
-  const match = pattern.exec(body);
-  const mapping = match?.[1];
-  const guid = mapping ? guidPattern.exec(mapping)?.[1] : undefined;
-
-  if (!match || !guid) {
-    return undefined;
-  }
-
-  // The CodeLens target should land on the script reference when possible, not just on the YAML header.
-  const matchOffset = match.index;
-  const guidOffset = body.indexOf(guid, matchOffset);
-  const line = startLine + countLineBreaks(body, 0, matchOffset);
-  const lineStart = body.lastIndexOf('\n', guidOffset - 1);
-  return {
-    guid,
-    line,
-    character: guidOffset - lineStart - 1
-  };
-}
-
 function getGameObjectName(
   objects: ReadonlyMap<string, SerializedObjectRecord>,
   gameObjectFileId: string | undefined
@@ -2251,17 +1948,8 @@ function getGameObjectName(
   return gameObject?.classId === gameObjectClassId ? gameObject.name : undefined;
 }
 
-function parseYamlKey(trimmed: string): string | undefined {
-  const normalized = trimmed.startsWith('- ') ? trimmed.slice(2) : trimmed;
-  return /^([A-Za-z_][A-Za-z0-9_]*):/.exec(normalized)?.[1];
-}
-
 function extractFileId(text: string): string | undefined {
   return fileIdPattern.exec(text)?.[1];
-}
-
-function getIndent(line: string): number {
-  return line.length - line.trimStart().length;
 }
 
 function countLineBreaks(text: string, startOffset: number, endOffset: number): number {
@@ -2273,25 +1961,6 @@ function countLineBreaks(text: string, startOffset: number, endOffset: number): 
   }
 
   return line;
-}
-
-function getValueCharacter(line: string): number {
-  const colonIndex = line.indexOf(':');
-  if (colonIndex === -1) {
-    return getIndent(line);
-  }
-
-  let valueIndex = colonIndex + 1;
-  while (valueIndex < line.length && line[valueIndex] === ' ') {
-    valueIndex += 1;
-  }
-
-  return valueIndex;
-}
-
-function getCharacterAtOffset(text: string, offset: number): number {
-  const lineStart = text.lastIndexOf('\n', offset - 1);
-  return offset - lineStart - 1;
 }
 
 function valueAfterColon(trimmed: string): string {
@@ -2381,10 +2050,6 @@ function isCSharpFile(uri: vscode.Uri): boolean {
 
 function escapeMarkdown(value: string): string {
   return value.replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1');
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function countUnfinishedAssets(totalCount: number, diagnostics: UnityEventReferenceDiagnostics): number {
