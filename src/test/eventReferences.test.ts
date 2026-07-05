@@ -1169,11 +1169,15 @@ describe('eventReferences', () => {
     const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
     assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(fieldTargetLens, undefined);
+    assert.strictEqual(fieldTargetLens?.command?.title, '0 UnityEvent targets');
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].locations.length, 2);
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
   it('uses m_EditorClassIdentifier to show serialized instances when script GUID is not indexed', async () => {
@@ -1210,7 +1214,7 @@ describe('eventReferences', () => {
     assert.strictEqual(serializedInstanceLens?.command?.title, '1 Unity serialized instances');
   });
 
-  it('shows field references without field targets for Unity built-in methods', async () => {
+  it('shows zero field targets for Unity built-in methods', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/TutorialCheck.cs', [
       'using UnityEngine.Events;',
@@ -1242,13 +1246,17 @@ describe('eventReferences', () => {
     const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
     assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(fieldTargetLens, undefined);
+    assert.strictEqual(fieldTargetLens?.command?.title, '0 UnityEvent targets');
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].locations.length, 2);
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(19, 22));
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[1].range.start, new FakePosition(26, 22));
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
   it('detects simple and nested generic UnityEvent fields', async () => {
@@ -1512,7 +1520,7 @@ describe('eventReferences', () => {
     assert.strictEqual(closeFieldLens?.command?.title, '2 UnityEvent references');
     assert.strictEqual(closeTargetLens?.command?.title, '2 UnityEvent targets');
     assert.strictEqual(pastedFieldLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(pastedTargetLens, undefined);
+    assert.strictEqual(pastedTargetLens?.command?.title, '0 UnityEvent targets');
 
     const doorLenses = await runtime.provideCodeLenses(doorDocument);
     const openMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Open');
@@ -1520,6 +1528,10 @@ describe('eventReferences', () => {
 
     assert.strictEqual(openMethodLens?.command?.title, '2 UnityEvent references');
     assert.strictEqual(closeMethodLens?.command?.title, '2 UnityEvent references');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', pastedTargetLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
   it('shows an informational message when a reference location command has no matches', async () => {

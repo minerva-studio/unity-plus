@@ -931,14 +931,14 @@ function createEventReferenceProvider(
       if (!index && target.kind !== 'serializedInstance' && target.eventReferences) {
         const eventReferences = target.eventReferences;
         if (eventReferences.length === 0) {
-          runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+          runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
           return;
         }
 
         if (target.kind === 'fieldTarget') {
           const locations = await createTargetMethodLocations(runtime, eventReferences);
           if (locations.length === 0) {
-            runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+            runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
             return;
           }
 
@@ -974,7 +974,7 @@ function createEventReferenceProvider(
           return;
         }
 
-        runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+        runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
         return;
       }
 
@@ -994,7 +994,7 @@ function createEventReferenceProvider(
       if (target.kind === 'fieldTarget') {
         const locations = await createTargetMethodLocations(runtime, eventReferences);
         if (locations.length === 0) {
-          runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+          runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
           return;
         }
 
@@ -1424,38 +1424,34 @@ function createCodeLensesFromIndex(
 
   for (const field of fields) {
     const fieldReferences = index.getFieldReferences(scriptPath, field.name, field.typeName);
-    if (fieldReferences.length > 0) {
-      fieldReferenceLensCount += 1;
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: fieldReferences.length }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'field',
-          scriptPath,
-          symbolName: field.name,
-          typeName: field.typeName,
-          ...(options.embedReferences ? { eventReferences: fieldReferences } : {}),
-          position: field.range.start
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
+    fieldReferenceLensCount += 1;
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: fieldReferences.length }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'field',
+        scriptPath,
+        symbolName: field.name,
+        typeName: field.typeName,
+        ...(options.embedReferences ? { eventReferences: fieldReferences } : {}),
+        position: field.range.start
+      } satisfies EventReferenceLocationTarget]
+    }));
 
     const fieldTargets = index.getFieldTargets(scriptPath, field.name, field.typeName);
-    if (fieldTargets.length > 0) {
-      fieldTargetLensCount += 1;
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'fieldTarget',
-          scriptPath,
-          symbolName: field.name,
-          typeName: field.typeName,
-          ...(options.embedReferences ? { eventReferences: fieldTargets } : {}),
-          position: field.range.start
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
+    fieldTargetLensCount += 1;
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
+      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'fieldTarget',
+        scriptPath,
+        symbolName: field.name,
+        typeName: field.typeName,
+        ...(options.embedReferences ? { eventReferences: fieldTargets } : {}),
+        position: field.range.start
+      } satisfies EventReferenceLocationTarget]
+    }));
   }
 
   if (options.includeZeroSummaryLenses) {
@@ -2245,6 +2241,16 @@ function getReferencesForLocationTarget(
   }
 
   return index.getFieldReferences(target.scriptPath, target.symbolName, target.typeName);
+}
+
+/** Creates the empty-location message for field targets without implying C# Invoke references. */
+function createNoEventReferenceLocationsMessage(
+  runtimeVscode: typeof vscode,
+  kind: EventReferenceLocationTarget['kind']
+): string {
+  return kind === 'fieldTarget'
+    ? runtimeVscode.l10n.t('Unity Plus: no UnityEvent target methods found for this field.')
+    : runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.');
 }
 
 async function createTargetMethodLocations(
