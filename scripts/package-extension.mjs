@@ -17,7 +17,6 @@ run('npm', ['run', 'compile']);
 run('npx', [
   'vsce',
   'package',
-  '--no-dependencies',
   '--allow-missing-repository',
   '--out',
   vsixArgumentPath

@@ -242,5 +242,8 @@
     "eslint": "^8.57.0",
     "mocha": "^10.7.0",
     "typescript": "^5.5.3"
+  },
+  "dependencies": {
+    "@vscode/ripgrep": "1.18.0"
   }
 }

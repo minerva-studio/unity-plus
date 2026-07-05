@@ -680,9 +680,11 @@ describe('eventReferences', () => {
     assert.strictEqual(index.getReferenceCount(gateScriptPath, 'CanInteract'), 1);
   });
 
-  it('uses stable asset enumeration and GUID prefilter for the current-file priority path', async () => {
-    let assetScans = 0;
+  it('uses sidecar metadata and text candidates for the current-file priority path', async () => {
+    let metadataIndexBuilds = 0;
+    const searchedTexts: string[] = [];
     let assetReads = 0;
+    let metaReads = 0;
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
@@ -699,32 +701,45 @@ describe('eventReferences', () => {
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
       logger: createTestLogger(),
-      createIndex: () => createMetadataIndex()
+      createIndex: () => {
+        const baseIndex = createMetadataIndex();
+        return {
+          ...baseIndex,
+          rebuild: async () => {
+            metadataIndexBuilds += 1;
+          },
+          dispose: () => baseIndex.dispose()
+        };
+      }
     });
 
     registerEventReferenceFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
       metadataIndex: lazyIndex,
       isEnabled: () => true,
-      findAssetFiles: async () => {
-        assetScans += 1;
-        return [
-          createUri('/Project/Assets/ShouldNotParse.prefab'),
-          createUri('/Project/Assets/Gate.prefab')
-        ];
+      searchAssetFilesContainingText: async (_root, _runtimeVscode, texts) => {
+        searchedTexts.push(...texts);
+        return {
+          backend: 'ripgrep',
+          files: [createUri('/Project/Assets/Gate.prefab')],
+          searchCount: texts.length,
+          elapsedMilliseconds: 1
+        };
       },
       readTextFile: async uri => {
+        if (uri.fsPath.endsWith('Gate.cs.meta')) {
+          metaReads += 1;
+          return `guid: ${gateGuid}`;
+        }
+
         assetReads += 1;
-        return uri.fsPath.endsWith('ShouldNotParse.prefab')
-          ? createPrefabYaml(2).replace(gateGuid, tutorialGuid)
-          : createPrefabYaml(2);
+        return createPrefabYaml(2);
       },
       resolveCSharpType: async typeName => createTypeResolver()(typeName)
     });
 
     const pendingLenses = await runtime.provideCodeLenses(csharpDocument);
 
-    assert.strictEqual(assetScans, 0);
     assert.deepStrictEqual(pendingLenses.map(lens => lens.command?.title), [
       '- Unity serialized instances',
       '- UnityEvent references',
@@ -733,8 +748,10 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
 
     const lenses = await runtime.provideCodeLenses(csharpDocument);
-    assert.strictEqual(assetScans, 1);
-    assert.strictEqual(assetReads, 2);
+    assert.strictEqual(metadataIndexBuilds, 0);
+    assert.deepStrictEqual(searchedTexts, [gateGuid]);
+    assert.strictEqual(metaReads, 1);
+    assert.strictEqual(assetReads, 1);
     assert.strictEqual(lenses.length, 4);
     assert.strictEqual(lenses[0].command?.title, '1 Unity serialized instances');
     assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
@@ -775,9 +792,14 @@ describe('eventReferences', () => {
       metadataIndex: lazyIndex,
       isEnabled: () => true,
       findAssetFiles: async () => [],
-      findAssetFilesContainingText: async () => {
+      searchAssetFilesContainingText: async () => {
         candidateSearches += 1;
-        return [];
+        return {
+          backend: 'ripgrep',
+          files: [],
+          searchCount: 1,
+          elapsedMilliseconds: 1
+        };
       },
       readTextFile: async () => ''
     });
@@ -791,16 +813,14 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
 
     assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-      '0 Unity serialized instances',
-      '0 UnityEvent references',
-      '0 UnityEvent targets'
+      '0 Unity serialized instances'
     ]);
     assert.strictEqual(candidateSearches, 0);
     assert.strictEqual(output.lines.some(line => line.includes('script GUID not found in metadata index')), true);
   });
 
   it('reuses one in-flight priority scan for repeated CodeLens requests on the same script', async () => {
-    let assetScans = 0;
+    let candidateSearches = 0;
     let releaseSearch: (() => void) | undefined;
     const searchStarted = new Promise<void>(resolve => {
       releaseSearch = resolve;
@@ -828,12 +848,20 @@ describe('eventReferences', () => {
       runtimeVscode: runtime.runtime,
       metadataIndex: lazyIndex,
       isEnabled: () => true,
-      findAssetFiles: async () => {
-        assetScans += 1;
+      searchAssetFilesContainingText: async (_root, _runtimeVscode, texts) => {
+        candidateSearches += 1;
+        assert.deepStrictEqual(texts, [gateGuid]);
         await searchStarted;
-        return [createUri('/Project/Assets/Gate.prefab')];
+        return {
+          backend: 'ripgrep',
+          files: [createUri('/Project/Assets/Gate.prefab')],
+          searchCount: texts.length,
+          elapsedMilliseconds: 1
+        };
       },
-      readTextFile: async () => createPrefabYaml(2),
+      readTextFile: async uri => uri.fsPath.endsWith('Gate.cs.meta')
+        ? `guid: ${gateGuid}`
+        : createPrefabYaml(2),
       resolveCSharpType: async typeName => createTypeResolver()(typeName)
     });
 
@@ -841,7 +869,7 @@ describe('eventReferences', () => {
     const second = runtime.provideCodeLenses(csharpDocument);
     await waitForTimers();
 
-    assert.strictEqual(assetScans, 1);
+    assert.strictEqual(candidateSearches, 1);
     assert.deepStrictEqual((await first).map(lens => lens.command?.title), [
       '- Unity serialized instances',
       '- UnityEvent references',
@@ -861,7 +889,7 @@ describe('eventReferences', () => {
   });
 
   it('does not reuse priority scan results after switching to another script', async () => {
-    const scannedAssetRoots: string[] = [];
+    const searchedTexts: string[] = [];
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
@@ -877,16 +905,30 @@ describe('eventReferences', () => {
       runtimeVscode: runtime.runtime,
       metadataIndex: lazyIndex,
       isEnabled: () => true,
-      findAssetFiles: async () => {
-        scannedAssetRoots.push('scan');
-        return [
-          createUri('/Project/Assets/Gate.prefab'),
-          createUri('/Project/Assets/GateController.prefab')
-        ];
+      searchAssetFilesContainingText: async (_root, _runtimeVscode, texts) => {
+        searchedTexts.push(...texts);
+        return {
+          backend: 'ripgrep',
+          files: texts[0] === gateGuid
+            ? [createUri('/Project/Assets/Gate.prefab')]
+            : [createUri('/Project/Assets/GateController.prefab')],
+          searchCount: texts.length,
+          elapsedMilliseconds: 1
+        };
       },
-      readTextFile: async uri => uri.fsPath.endsWith('Gate.prefab')
-        ? createPrefabYaml(2)
-        : createGateControllerYaml(2),
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('Gate.cs.meta')) {
+          return `guid: ${gateGuid}`;
+        }
+
+        if (uri.fsPath.endsWith('IronDoor.cs.meta')) {
+          return `guid: ${ironDoorGuid}`;
+        }
+
+        return uri.fsPath.endsWith('Gate.prefab')
+          ? createPrefabYaml(2)
+          : createGateControllerYaml(2);
+      },
       resolveCSharpType: async fullTypeName => {
         if (fullTypeName === 'Amlos.Fixtures.IronDoor') {
           return ironDoorScriptPath;
@@ -928,7 +970,7 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChangeAfter(previousChangeCount);
     const ironDoorLenses = await runtime.provideCodeLenses(ironDoorDocument);
 
-    assert.deepStrictEqual(scannedAssetRoots, ['scan', 'scan']);
+    assert.deepStrictEqual(searchedTexts, [gateGuid, ironDoorGuid]);
     assert.strictEqual(gateLenses.some(lens => lens.command?.title === '1 Unity serialized instances'), true);
     assert.strictEqual(ironDoorLenses.some(lens => lens.command?.title === '2 Unity serialized instances'), true);
     assert.strictEqual(ironDoorLenses.filter(lens => lens.command?.title === '2 UnityEvent references').length, 2);
@@ -1463,7 +1505,7 @@ describe('eventReferences', () => {
     assert.strictEqual(closeFieldLens?.command?.title, '2 UnityEvent references');
     assert.strictEqual(closeTargetLens?.command?.title, '2 UnityEvent targets');
     assert.strictEqual(pastedFieldLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(pastedTargetLens, undefined);
+    assert.strictEqual(pastedTargetLens?.command?.title, '0 UnityEvent targets');
 
     const doorLenses = await runtime.provideCodeLenses(doorDocument);
     const openMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Open');

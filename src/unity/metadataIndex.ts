@@ -2,6 +2,8 @@ import { relative } from 'node:path';
 import { createRequire } from 'node:module';
 import type * as vscode from 'vscode';
 import { UnityPlusLogger } from './logger';
+import { trySearchUnityTextMatches } from './textSearch';
+import type { UnityTextSearchBackend } from './textSearch';
 
 export interface UnityMetadataIndex extends vscode.Disposable {
   rebuild(): Promise<void>;
@@ -13,6 +15,7 @@ export interface UnityMetadataIndex extends vscode.Disposable {
 export interface UnityMetadataIndexStatistics {
   rootPath: string;
   globs: readonly string[];
+  discoveryBackend: UnityMetadataDiscoveryBackend;
   foundMetaFileCount: number;
   readMetaFileCount: number;
   parsedGuidCount: number;
@@ -31,6 +34,7 @@ export interface LazyUnityMetadataIndex extends vscode.Disposable {
 export interface UnityMetadataIndexOptions {
   root: vscode.Uri;
   logger: UnityPlusLogger;
+  findMetaGuidEntries?: () => Promise<UnityMetaGuidDiscoveryResult>;
   findMetaFiles?: () => Promise<readonly vscode.Uri[]>;
   readTextFile?: (uri: vscode.Uri) => Promise<string>;
   watchMetaFiles?: (handlers: UnityMetaFileWatchHandlers) => vscode.Disposable;
@@ -41,6 +45,20 @@ export interface UnityMetaFileWatchHandlers {
   onCreate(uri: vscode.Uri): void;
   onChange(uri: vscode.Uri): void;
   onDelete(uri: vscode.Uri): void;
+}
+
+export type UnityMetadataDiscoveryBackend = UnityTextSearchBackend | 'directoryWalkFallback' | 'custom';
+
+export interface UnityMetaGuidEntry {
+  uri: vscode.Uri;
+  guid: string;
+}
+
+export interface UnityMetaGuidDiscoveryResult {
+  entries?: readonly UnityMetaGuidEntry[];
+  files?: readonly vscode.Uri[];
+  backend: UnityMetadataDiscoveryBackend;
+  malformedCount?: number;
 }
 
 export interface LazyUnityMetadataIndexOptions extends UnityMetadataIndexOptions {
@@ -60,6 +78,12 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
   const assetPathToGuid = new Map<string, string>();
   const metaPathToGuid = new Map<string, string>();
   let usedDirectoryWalkFallback = false;
+  const findMetaGuidEntries = options.findMetaGuidEntries ?? (options.findMetaFiles ? undefined : async () => {
+    const runtimeVscode = await import('vscode');
+    return await findUnityMetaGuidEntriesWithFallback(options.root, runtimeVscode, options.logger, () => {
+      usedDirectoryWalkFallback = true;
+    });
+  });
   const findMetaFiles = options.findMetaFiles ?? (async () => {
     const runtimeVscode = await import('vscode');
     return await findUnityMetaFilesWithFallback(options.root, runtimeVscode, options.logger, () => {
@@ -82,10 +106,31 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
     statistics = createEmptyStatistics(options.root);
     usedDirectoryWalkFallback = false;
 
-    const metaFiles = await findMetaFiles();
-    statistics.foundMetaFileCount = metaFiles.length;
-    statistics.usedDirectoryWalkFallback = usedDirectoryWalkFallback;
-    await runWithConcurrency(metaFiles, uri => updateMetaFile(uri, statistics), defaultRebuildConcurrency);
+    if (findMetaGuidEntries) {
+      const discovery = await findMetaGuidEntries();
+      statistics.discoveryBackend = discovery.backend;
+      statistics.usedDirectoryWalkFallback = discovery.backend === 'directoryWalkFallback' || usedDirectoryWalkFallback;
+
+      if (discovery.entries) {
+        statistics.foundMetaFileCount = discovery.entries.length + (discovery.malformedCount ?? 0);
+        statistics.readMetaFileCount = statistics.foundMetaFileCount;
+        statistics.malformedMetaFileCount = discovery.malformedCount ?? 0;
+        for (const entry of discovery.entries) {
+          setMetaGuid(entry.uri, entry.guid);
+        }
+      } else {
+        const metaFiles = discovery.files ?? [];
+        statistics.foundMetaFileCount = metaFiles.length;
+        await runWithConcurrency(metaFiles, uri => updateMetaFile(uri, statistics), defaultRebuildConcurrency);
+      }
+    } else {
+      const metaFiles = await findMetaFiles();
+      statistics.discoveryBackend = 'custom';
+      statistics.foundMetaFileCount = metaFiles.length;
+      statistics.usedDirectoryWalkFallback = usedDirectoryWalkFallback;
+      await runWithConcurrency(metaFiles, uri => updateMetaFile(uri, statistics), defaultRebuildConcurrency);
+    }
+
     statistics.parsedGuidCount = guidToAssetPath.size;
     logMetadataStatistics(options.logger, statistics);
   }
@@ -109,10 +154,7 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
       }
 
       removeMetaFile(uri);
-      const assetPath = toAssetPath(uri);
-      guidToAssetPath.set(guid, assetPath);
-      assetPathToGuid.set(pathKey(assetPath), guid);
-      metaPathToGuid.set(metaKey(uri), guid);
+      setMetaGuid(uri, guid);
     } catch (error) {
       removeMetaFile(uri);
       if (rebuildStatistics) {
@@ -120,6 +162,14 @@ export function createUnityMetadataIndex(options: UnityMetadataIndexOptions): Un
       }
       options.logger.warn(`Could not index Unity metadata file ${uri.fsPath}: ${errorMessage(error)}`);
     }
+  }
+
+  /** Stores one parsed meta GUID in all lookup maps. */
+  function setMetaGuid(uri: vscode.Uri, guid: string): void {
+    const assetPath = toAssetPath(uri);
+    guidToAssetPath.set(guid, assetPath);
+    assetPathToGuid.set(pathKey(assetPath), guid);
+    metaPathToGuid.set(metaKey(uri), guid);
   }
 
   function removeMetaFile(uri: vscode.Uri): void {
@@ -192,6 +242,53 @@ export function parseUnityMetaGuid(content: string): string | undefined {
   return guidPattern.exec(content)?.[1];
 }
 
+/** Finds Unity .meta GUIDs with ripgrep first, falling back to stable VS Code file enumeration. */
+export async function findUnityMetaGuidEntriesWithFallback(
+  root: vscode.Uri,
+  runtimeVscode: typeof vscode,
+  logger?: Pick<UnityPlusLogger, 'warn'>,
+  onFallback?: () => void
+): Promise<UnityMetaGuidDiscoveryResult> {
+  const search = await trySearchUnityTextMatches({
+    root,
+    runtimeVscode,
+    texts: ['guid:'],
+    includeGlobs: defaultMetaFilesGlobs
+  });
+
+  if (search) {
+    const entries: UnityMetaGuidEntry[] = [];
+    let malformedCount = 0;
+
+    for (const match of search.matches) {
+      const guid = parseUnityMetaGuid(match.text);
+      if (!guid) {
+        malformedCount += 1;
+        continue;
+      }
+
+      entries.push({ uri: match.uri, guid });
+    }
+
+    return {
+      entries,
+      backend: search.backend,
+      malformedCount
+    };
+  }
+
+  let usedDirectoryWalk = false;
+  const files = await findUnityMetaFilesWithFallback(root, runtimeVscode, logger, () => {
+    usedDirectoryWalk = true;
+    onFallback?.();
+  });
+
+  return {
+    files,
+    backend: usedDirectoryWalk ? 'directoryWalkFallback' : 'findFilesFallback'
+  };
+}
+
 /** Finds Unity .meta files with VS Code search, then falls back to a bounded Assets/Packages directory walk. */
 export async function findUnityMetaFilesWithFallback(
   root: vscode.Uri,
@@ -257,6 +354,7 @@ function createEmptyStatistics(root: vscode.Uri): UnityMetadataIndexStatistics {
   return {
     rootPath: root.fsPath,
     globs: defaultMetaFilesGlobs,
+    discoveryBackend: 'custom',
     foundMetaFileCount: 0,
     readMetaFileCount: 0,
     parsedGuidCount: 0,
@@ -268,8 +366,7 @@ function createEmptyStatistics(root: vscode.Uri): UnityMetadataIndexStatistics {
 
 /** Writes a compact metadata rebuild diagnostic summary to the Unity Plus output. */
 function logMetadataStatistics(logger: UnityPlusLogger, statistics: UnityMetadataIndexStatistics): void {
-  const discoveryMethod = statistics.usedDirectoryWalkFallback ? 'directoryWalkFallback' : 'findFiles';
-  logger.info(`Unity metadata index: root=${statistics.rootPath}, discovery=${discoveryMethod}, globs=${statistics.globs.join(', ')}, found=${statistics.foundMetaFileCount}, read=${statistics.readMetaFileCount}, parsed GUIDs=${statistics.parsedGuidCount}, malformed=${statistics.malformedMetaFileCount}, read errors=${statistics.readErrorCount}.`);
+  logger.info(`Unity metadata index: root=${statistics.rootPath}, discovery=${statistics.discoveryBackend}, globs=${statistics.globs.join(', ')}, found=${statistics.foundMetaFileCount}, read=${statistics.readMetaFileCount}, parsed GUIDs=${statistics.parsedGuidCount}, malformed=${statistics.malformedMetaFileCount}, read errors=${statistics.readErrorCount}.`);
 
   if (statistics.parsedGuidCount === 0) {
     logger.warn('Unity metadata index is empty; UnityEvent CodeLens cannot resolve script GUIDs.');

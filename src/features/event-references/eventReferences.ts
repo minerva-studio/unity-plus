@@ -2,7 +2,8 @@ import { createRequire } from 'node:module';
 import { extname } from 'node:path';
 import type * as vscode from 'vscode';
 import { UnityPlusLogger } from '../../unity/logger';
-import type { LazyUnityMetadataIndex, UnityMetadataIndex } from '../../unity/metadataIndex';
+import { parseUnityMetaGuid, type LazyUnityMetadataIndex, type UnityMetadataIndex } from '../../unity/metadataIndex';
+import { searchUnityFilesContainingText, type UnityTextSearchBackend, type UnityTextSearchFileResult } from '../../unity/textSearch';
 import {
   getUnityYamlDocumentFileId,
   getUnityYamlDocumentScalar,
@@ -60,7 +61,9 @@ export interface UnitySerializedAssetReferenceIndex {
 export interface UnityEventReferenceDiagnostics {
   discoveredAssetCount: number;
   candidateAssetCount: number;
+  candidateSearchBackend: UnityEventCandidateSearchBackend;
   textCandidateSearchCount: number;
+  assetReadCount: number;
   prefabCount: number;
   sceneCount: number;
   assetCount: number;
@@ -96,6 +99,7 @@ export interface EventReferenceFeatureOptions {
   isEnabled?: () => boolean;
   findAssetFiles?: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
   findAssetFilesContainingText?: (root: vscode.Uri, runtimeVscode: typeof vscode, text: string) => Promise<readonly vscode.Uri[]>;
+  searchAssetFilesContainingText?: UnityAssetTextSearch;
   findCSharpFiles?: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
   readTextFile?: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
   getCacheVersion?: () => number;
@@ -109,6 +113,7 @@ interface EventReferenceRuntime {
   metadataIndex: LazyUnityMetadataIndex;
   findAssetFiles: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
   findAssetFilesContainingText?: (root: vscode.Uri, runtimeVscode: typeof vscode, text: string) => Promise<readonly vscode.Uri[]>;
+  searchAssetFilesContainingText?: UnityAssetTextSearch;
   findCSharpFiles: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
   readTextFile: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
   getCacheVersion: () => number;
@@ -116,6 +121,15 @@ interface EventReferenceRuntime {
   buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
   scanStatus?: UnityEventReferenceScanStatusReporter;
 }
+
+type UnityEventCandidateSearchBackend = UnityTextSearchBackend | 'injectedTextSearch' | 'none';
+
+type UnityAssetTextSearch = (
+  root: vscode.Uri,
+  runtimeVscode: typeof vscode,
+  texts: readonly string[],
+  cancellationToken?: vscode.CancellationToken
+) => Promise<UnityTextSearchFileResult>;
 
 export type CSharpTypeResolver = (
   fullTypeName: string,
@@ -261,6 +275,8 @@ const backgroundScanYieldEvery = 1;
 const backgroundBuildDebounceMilliseconds = 150;
 const scanStatusRetainMilliseconds = 8000;
 const progressReportInterval = 10;
+const eventReferenceCandidateTexts = ['m_Script', 'm_PersistentCalls', '.m_PersistentCalls.'];
+const serializedAssetSearchGlobs = ['Assets/**/*.{prefab,unity,asset}', 'Packages/**/*.{prefab,unity,asset}'];
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
 const supportedAssetExtensions = new Set(['.prefab', '.unity', '.asset']);
 const buildSettingsScenePathPattern = /^\s*path:\s*(Assets\/.*\.unity)\s*$/gm;
@@ -280,6 +296,9 @@ export function registerEventReferenceFeature(
   let indexController: UnityEventReferenceIndexController | undefined;
 
   if (options.metadataIndex) {
+    const useDefaultAssetSearch = !options.findAssetFiles &&
+      !options.findAssetFilesContainingText &&
+      !options.searchAssetFilesContainingText;
     const scanStatus = createUnityEventReferenceScanStatus(runtimeVscode, logger);
     const featureRuntime: EventReferenceRuntime = {
       runtimeVscode,
@@ -287,6 +306,7 @@ export function registerEventReferenceFeature(
       metadataIndex: options.metadataIndex,
       findAssetFiles: options.findAssetFiles ?? findDefaultAssetFiles,
       findAssetFilesContainingText: options.findAssetFilesContainingText,
+      searchAssetFilesContainingText: options.searchAssetFilesContainingText ?? (useDefaultAssetSearch ? findDefaultAssetFilesContainingText : undefined),
       findCSharpFiles: options.findCSharpFiles ?? findDefaultCSharpFiles,
       readTextFile: options.readTextFile ?? readDefaultTextFile,
       getCacheVersion: options.getCacheVersion ?? (() => 0),
@@ -391,6 +411,7 @@ export async function buildUnityEventReferenceIndex(
 
   diagnostics.discoveredAssetCount = discovery.files.length;
   diagnostics.candidateAssetCount = discovery.files.length;
+  diagnostics.candidateSearchBackend = discovery.backend;
   diagnostics.textCandidateSearchCount = discovery.textSearchCount;
   diagnostics.skippedAssetCount += discovery.files.length - assetFiles.length;
   context.scanStatus?.update({
@@ -417,6 +438,7 @@ export async function buildUnityEventReferenceIndex(
       }
 
       const content = await runtime.readTextFile(assetUri, runtime.runtimeVscode);
+      diagnostics.assetReadCount += 1;
       throwIfCancellationRequested(context.cancellationToken);
 
       if (!isUnityEventReferenceCandidateContent(content)) {
@@ -1003,17 +1025,17 @@ async function buildPriorityReferenceIndex(
 ): Promise<PriorityScanResult> {
   const startedAt = Date.now();
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-  runtime.scanStatus?.start('Preparing Unity metadata', 'Unity refs: metadata');
-  runtime.scanStatus?.update({ label: 'Unity refs: metadata', phase: 'Preparing Unity metadata', scriptPath });
-  const metadata = await runtime.metadataIndex.getOrBuild();
-  const metadataGuidCount = metadata.getStatistics?.().parsedGuidCount;
+  runtime.scanStatus?.start('Reading current script metadata', 'Unity refs: current');
+  runtime.scanStatus?.update({ label: 'Unity refs: current', phase: 'Reading current script metadata', scriptPath });
+  const currentScriptMetadata = await resolveCurrentScriptMetadata(runtime, scriptPath);
+  const metadataGuidCount = currentScriptMetadata.metadataGuidCount;
   runtime.scanStatus?.update({
-    label: 'Unity refs: metadata',
-    phase: 'Unity metadata ready',
+    label: 'Unity refs: current',
+    phase: currentScriptMetadata.scriptGuid ? 'Current script metadata ready' : 'Current script GUID missing',
     scriptPath,
     metadataGuidCount
   });
-  const scriptGuid = metadata.getGuid(scriptPath);
+  const scriptGuid = currentScriptMetadata.scriptGuid;
   const diagnostics = createEmptyDiagnostics();
 
   if (!scriptGuid || isCancellationRequested(token)) {
@@ -1044,16 +1066,17 @@ async function buildPriorityReferenceIndex(
     scriptGuid,
     metadataGuidCount
   });
-  const candidateUris = runtime.findAssetFilesContainingText
-    ? await runtime.findAssetFilesContainingText(runtime.metadataIndex.root, runtime.runtimeVscode, scriptGuid)
-    : await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode);
+  const discovery = await findCurrentScriptCandidateAssetFiles(runtime, scriptGuid, token);
+  const candidateUris = discovery.files;
   const references: UnityEventReference[] = [];
   const serializedInstances: UnitySerializedInstanceLocation[] = [];
   const resolveCSharpType = createCurrentDocumentTypeResolver(runtime, document, scriptPath, token);
+  const metadata = createPriorityMetadataIndex(scriptPath, scriptGuid, currentScriptMetadata.metadata);
 
   diagnostics.discoveredAssetCount = candidateUris.length;
   diagnostics.candidateAssetCount = candidateUris.length;
-  diagnostics.textCandidateSearchCount = runtime.findAssetFilesContainingText ? 1 : 0;
+  diagnostics.candidateSearchBackend = discovery.backend;
+  diagnostics.textCandidateSearchCount = discovery.textSearchCount;
   runtime.scanStatus?.update({
     label: 'Unity refs: current',
     phase: 'Parsing current script candidates',
@@ -1092,7 +1115,8 @@ async function buildPriorityReferenceIndex(
     }
 
     const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
-    if (!content.includes(scriptGuid)) {
+    diagnostics.assetReadCount += 1;
+    if (discovery.backend === 'findFilesFallback' && !content.includes(scriptGuid)) {
       runtime.scanStatus?.update({
         label: 'Unity refs: current',
         phase: 'Filtering current script candidates',
@@ -1159,6 +1183,62 @@ async function buildPriorityReferenceIndex(
   });
   runtime.logger.debug(`UnityEvent priority scan for ${scriptPath}: ${candidateUris.length} candidate asset(s), ${references.length} reference(s), ${serializedInstances.length} instance(s).`);
   return { index, diagnostics, scriptGuid };
+}
+
+/** Resolves the current script GUID without forcing a full Unity metadata rebuild. */
+async function resolveCurrentScriptMetadata(
+  runtime: EventReferenceRuntime,
+  scriptPath: string
+): Promise<{ scriptGuid?: string; metadata?: UnityMetadataIndex; metadataGuidCount?: number }> {
+  const sidecarGuid = await readCurrentScriptSidecarGuid(runtime, scriptPath);
+  const metadata = runtime.metadataIndex.isBuilt()
+    ? await runtime.metadataIndex.getOrBuild()
+    : undefined;
+
+  if (sidecarGuid) {
+    return {
+      scriptGuid: sidecarGuid,
+      metadata,
+      metadataGuidCount: metadata?.getStatistics?.().parsedGuidCount
+    };
+  }
+
+  if (!metadata) {
+    return {};
+  }
+
+  return {
+    scriptGuid: metadata.getGuid(scriptPath),
+    metadata,
+    metadataGuidCount: metadata.getStatistics?.().parsedGuidCount
+  };
+}
+
+/** Reads Assets/Foo.cs.meta directly so priority scans avoid full metadata indexing. */
+async function readCurrentScriptSidecarGuid(
+  runtime: EventReferenceRuntime,
+  scriptPath: string
+): Promise<string | undefined> {
+  try {
+    const metaUri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, `${scriptPath}.meta`);
+    const content = await runtime.readTextFile(metaUri, runtime.runtimeVscode);
+    return parseUnityMetaGuid(content);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Creates a tiny metadata overlay that knows the current script GUID plus any ready full index. */
+function createPriorityMetadataIndex(
+  scriptPath: string,
+  scriptGuid: string,
+  metadata: UnityMetadataIndex | undefined
+): Pick<UnityMetadataIndex, 'getAssetPath'> {
+  return {
+    getAssetPath: guid => guid.toLowerCase() === scriptGuid.toLowerCase()
+      ? scriptPath
+      : metadata?.getAssetPath(guid)
+  };
 }
 
 /** Creates an empty priority result so failed or GUID-less scans still render zero-count feedback. */
@@ -1229,7 +1309,7 @@ function findCodeLensStatusAnchorRange(
     new runtimeVscode.Range(new runtimeVscode.Position(0, 0), new runtimeVscode.Position(0, 0));
 }
 
-/** Resolves editor-class identifiers against the current C# file before falling back to the configured resolver. */
+/** Resolves editor-class identifiers only against the current C# file for fast priority scans. */
 function createCurrentDocumentTypeResolver(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument,
@@ -1245,10 +1325,7 @@ function createCurrentDocumentTypeResolver(
       return scriptPath;
     }
 
-    return await runtime.resolveCSharpType?.(fullTypeName, runtime, {
-      mode: 'background',
-      cancellationToken: token
-    });
+    return undefined;
   };
 }
 
@@ -1364,7 +1441,7 @@ function createCodeLensesFromIndex(
     }
 
     const fieldTargets = index.getFieldTargets(scriptPath, field.name, field.typeName);
-    if (fieldTargets.length > 0) {
+    if (fieldTargets.length > 0 || shouldShowZeroFieldTargetLens(fieldReferences)) {
       fieldTargetLensCount += 1;
       codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
         title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
@@ -1397,36 +1474,17 @@ function createCodeLensesFromIndex(
         } satisfies EventReferenceLocationTarget]
       }));
     }
-
-    if (methodLensCount + fieldReferenceLensCount === 0) {
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: 0 }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'method',
-          scriptPath,
-          eventReferences: [],
-          position
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
-
-    if (fieldTargetLensCount === 0) {
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: 0 }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'fieldTarget',
-          scriptPath,
-          eventReferences: [],
-          position
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
   }
 
   runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
   return codeLenses;
+}
+
+/** Shows a zero target lens only when references point at Unity built-in APIs, not unresolved project methods. */
+function shouldShowZeroFieldTargetLens(fieldReferences: readonly UnityEventReference[]): boolean {
+  return fieldReferences.some(reference =>
+    !reference.scriptPath && reference.targetTypeName.startsWith('UnityEngine.')
+  );
 }
 
 /** Chooses the single C# type that should receive path-based serialized instance counts. */
@@ -1837,7 +1895,9 @@ function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
   return {
     discoveredAssetCount: 0,
     candidateAssetCount: 0,
+    candidateSearchBackend: 'none',
     textCandidateSearchCount: 0,
+    assetReadCount: 0,
     prefabCount: 0,
     sceneCount: 0,
     assetCount: 0,
@@ -1881,7 +1941,11 @@ function incrementAssetCount(diagnostics: UnityEventReferenceDiagnostics, assetK
 function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source: UnityEventReferenceDiagnostics): void {
   target.discoveredAssetCount += source.discoveredAssetCount;
   target.candidateAssetCount += source.candidateAssetCount;
+  target.candidateSearchBackend = source.candidateSearchBackend !== 'none'
+    ? source.candidateSearchBackend
+    : target.candidateSearchBackend;
   target.textCandidateSearchCount += source.textCandidateSearchCount;
+  target.assetReadCount += source.assetReadCount;
   target.prefabCount += source.prefabCount;
   target.sceneCount += source.sceneCount;
   target.assetCount += source.assetCount;
@@ -1918,9 +1982,11 @@ function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: UnityEvent
   const skippedAssets = diagnostics.skippedAssetCount + diagnostics.canceledAssetCount;
   return [
     runtimeVscode.l10n.t('discovered {count} serialized asset(s)', { count: diagnostics.discoveredAssetCount }),
-    runtimeVscode.l10n.t('asset candidates: {candidateCount} asset(s), {searchCount} text search(es)', {
+    runtimeVscode.l10n.t('asset candidates: {candidateCount} asset(s), {searchCount} text search(es), backend {backend}, read {readCount}', {
       candidateCount: diagnostics.candidateAssetCount,
-      searchCount: diagnostics.textCandidateSearchCount
+      searchCount: diagnostics.textCandidateSearchCount,
+      backend: diagnostics.candidateSearchBackend,
+      readCount: diagnostics.assetReadCount
     }),
     runtimeVscode.l10n.t('scanned {prefabCount} prefab(s), {sceneCount} scene(s), and {assetCount} asset file(s)', {
       prefabCount: diagnostics.prefabCount,
@@ -2373,11 +2439,79 @@ function getBackgroundScanConcurrency(runtimeVscode: typeof vscode): number {
 async function findUnityEventCandidateAssetFiles(
   runtime: EventReferenceRuntime,
   context: UnityEventReferenceBuildContext
-): Promise<{ files: readonly vscode.Uri[]; usedTextSearch: boolean; textSearchCount: number }> {
+): Promise<{ files: readonly vscode.Uri[]; backend: UnityEventCandidateSearchBackend; textSearchCount: number }> {
   throwIfCancellationRequested(context.cancellationToken);
+  if (runtime.searchAssetFilesContainingText) {
+    const result = await runtime.searchAssetFilesContainingText(
+      runtime.metadataIndex.root,
+      runtime.runtimeVscode,
+      eventReferenceCandidateTexts,
+      context.cancellationToken
+    );
+
+    return {
+      files: result.files,
+      backend: result.backend,
+      textSearchCount: result.searchCount
+    };
+  }
+
+  if (runtime.findAssetFilesContainingText) {
+    const candidates = new Map<string, vscode.Uri>();
+    for (const text of eventReferenceCandidateTexts) {
+      throwIfCancellationRequested(context.cancellationToken);
+      for (const uri of await runtime.findAssetFilesContainingText(runtime.metadataIndex.root, runtime.runtimeVscode, text)) {
+        candidates.set(uri.fsPath.replace(/\\/g, '/').toLowerCase(), uri);
+      }
+    }
+
+    return {
+      files: [...candidates.values()],
+      backend: 'injectedTextSearch',
+      textSearchCount: eventReferenceCandidateTexts.length
+    };
+  }
+
   return {
     files: await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode),
-    usedTextSearch: false,
+    backend: 'none',
+    textSearchCount: 0
+  };
+}
+
+/** Finds candidate assets for a current-script priority scan. */
+async function findCurrentScriptCandidateAssetFiles(
+  runtime: EventReferenceRuntime,
+  scriptGuid: string,
+  token: vscode.CancellationToken
+): Promise<{ files: readonly vscode.Uri[]; backend: UnityEventCandidateSearchBackend; textSearchCount: number }> {
+  throwIfCancellationRequested(token);
+
+  if (runtime.searchAssetFilesContainingText) {
+    const result = await runtime.searchAssetFilesContainingText(
+      runtime.metadataIndex.root,
+      runtime.runtimeVscode,
+      [scriptGuid],
+      token
+    );
+    return {
+      files: result.files,
+      backend: result.backend,
+      textSearchCount: result.searchCount
+    };
+  }
+
+  if (runtime.findAssetFilesContainingText) {
+    return {
+      files: await runtime.findAssetFilesContainingText(runtime.metadataIndex.root, runtime.runtimeVscode, scriptGuid),
+      backend: 'injectedTextSearch',
+      textSearchCount: 1
+    };
+  }
+
+  return {
+    files: await runtime.findAssetFiles(runtime.metadataIndex.root, runtime.runtimeVscode),
+    backend: 'findFilesFallback',
     textSearchCount: 0
   };
 }
@@ -2503,6 +2637,22 @@ async function findDefaultAssetFiles(
   ));
   const files = fileGroups.flat();
   return files.filter(uri => supportedAssetExtensions.has(extname(uri.fsPath).toLowerCase()));
+}
+
+/** Searches serialized Unity assets for fixed text with ripgrep and stable fallbacks. */
+async function findDefaultAssetFilesContainingText(
+  root: vscode.Uri,
+  runtimeVscode: typeof vscode,
+  texts: readonly string[],
+  cancellationToken?: vscode.CancellationToken
+): Promise<UnityTextSearchFileResult> {
+  return await searchUnityFilesContainingText({
+    root,
+    runtimeVscode,
+    texts,
+    includeGlobs: serializedAssetSearchGlobs,
+    cancellationToken
+  });
 }
 
 async function findDefaultCSharpFiles(

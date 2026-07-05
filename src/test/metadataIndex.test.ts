@@ -39,6 +39,35 @@ describe('metadataIndex', () => {
     assert.strictEqual(output.lines.some(line => line.includes('found=1, read=1, parsed GUIDs=1')), true);
   });
 
+  it('maps GUIDs from text search entries without reading every meta file', async () => {
+    const output = createMemoryOutput();
+    const index = createUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createLogger({
+        output,
+        getLevel: () => 'info'
+      }),
+      findMetaGuidEntries: async () => ({
+        backend: 'ripgrep',
+        entries: [{
+          uri: createUri('/Project/Assets/Player.cs.meta'),
+          guid: firstGuid
+        }]
+      }),
+      readTextFile: async () => {
+        throw new Error('metadata text search entries should not read meta files');
+      },
+      watchMetaFiles: createNoopWatcher
+    });
+
+    await index.rebuild();
+
+    assert.strictEqual(index.getAssetPath(firstGuid), 'Assets/Player.cs');
+    assert.strictEqual(index.getStatistics?.().discoveryBackend, 'ripgrep');
+    assert.strictEqual(index.getStatistics?.().readMetaFileCount, 1);
+    assert.strictEqual(output.lines.some(line => line.includes('discovery=ripgrep')), true);
+  });
+
   it('updates GUID mappings from meta file watcher events', async () => {
     const output = createMemoryOutput();
     let handlers: UnityMetaFileWatchHandlers | undefined;

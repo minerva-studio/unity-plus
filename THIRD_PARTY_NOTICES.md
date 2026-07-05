@@ -11,6 +11,13 @@
 
 The upstream repository did not include a root `LICENSE` file at the vendored commit, so this notice records the package metadata and README license evidence used for the scoped copy.
 
+## @vscode/ripgrep
+
+- Source: https://github.com/microsoft/vscode-ripgrep
+- Package: `@vscode/ripgrep` 1.18.0 and platform package `@vscode/ripgrep-win32-x64` 1.18.0
+- Purpose: bundled ripgrep binary for fast Unity YAML candidate search.
+- License: MIT, as declared by the package metadata. The package `LICENSE` files are included in the VSIX with the runtime dependency.
+
 MIT License text:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

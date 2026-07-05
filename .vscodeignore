@@ -1,6 +1,12 @@
 .github/**
 docs/**
 node_modules/**
+!node_modules/
+!node_modules/@vscode/
+!node_modules/@vscode/ripgrep/
+!node_modules/@vscode/ripgrep/**
+!node_modules/@vscode/ripgrep-win32-x64/
+!node_modules/@vscode/ripgrep-win32-x64/**
 scripts/**
 src/**
 out/test/**
