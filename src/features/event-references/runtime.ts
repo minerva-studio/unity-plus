@@ -1,0 +1,118 @@
+import type * as vscode from 'vscode';
+import type { UnityPlusLogger } from '../../unity/logger';
+import type { LazyUnityMetadataIndex } from '../../unity/metadataIndex';
+import type { UnityTextSearchFileResult } from '../../unity/textSearch';
+import type {
+  UnityEventReference,
+  UnityEventReferenceBuildContext,
+  UnityEventReferenceDiagnostics,
+  UnityEventReferenceScanStatusReporter,
+  UnitySerializedAssetReferenceIndex,
+  UnitySerializedInstanceLocation
+} from './model';
+
+export interface EventReferenceFeatureOptions {
+  metadataIndex?: LazyUnityMetadataIndex;
+  runtimeVscode?: typeof vscode;
+  isEnabled?: () => boolean;
+  findAssetFiles?: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
+  findAssetFilesContainingText?: (root: vscode.Uri, runtimeVscode: typeof vscode, text: string) => Promise<readonly vscode.Uri[]>;
+  searchAssetFilesContainingText?: UnityAssetTextSearch;
+  findCSharpFiles?: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
+  readTextFile?: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
+  getCacheVersion?: () => number;
+  resolveCSharpType?: CSharpTypeResolver;
+  buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
+}
+
+export interface EventReferenceRuntime {
+  runtimeVscode: typeof vscode;
+  logger: UnityPlusLogger;
+  metadataIndex: LazyUnityMetadataIndex;
+  findAssetFiles: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
+  findAssetFilesContainingText?: (root: vscode.Uri, runtimeVscode: typeof vscode, text: string) => Promise<readonly vscode.Uri[]>;
+  searchAssetFilesContainingText?: UnityAssetTextSearch;
+  findCSharpFiles: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
+  readTextFile: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
+  getCacheVersion: () => number;
+  resolveCSharpType?: CSharpTypeResolver;
+  buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
+  scanStatus?: UnityEventReferenceScanStatusReporter;
+}
+
+export type UnityAssetTextSearch = (
+  root: vscode.Uri,
+  runtimeVscode: typeof vscode,
+  texts: readonly string[],
+  cancellationToken?: vscode.CancellationToken
+) => Promise<UnityTextSearchFileResult>;
+
+export type CSharpTypeResolver = (
+  fullTypeName: string,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile'>,
+  context?: UnityEventReferenceBuildContext
+) => Promise<string | undefined>;
+
+export interface CSharpTypeIndex {
+  /** Resolves a C# full type name or short type name to a project asset path. */
+  resolve(fullTypeName: string): string | undefined;
+}
+
+export type CSharpTypeIndexBuilder = (
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile'>,
+  context?: UnityEventReferenceBuildContext
+) => Promise<CSharpTypeIndex>;
+
+export interface EventReferenceLocationTarget {
+  kind: 'method' | 'field' | 'fieldTarget' | 'serializedInstance';
+  scriptPath: string;
+  symbolName?: string;
+  typeName?: string;
+  serializedInstances?: readonly UnitySerializedInstanceLocation[];
+  eventReferences?: readonly UnityEventReference[];
+  position: vscode.Position;
+}
+
+export type UnityEventReferenceIndexStatus = 'idle' | 'building' | 'ready' | 'failed';
+
+export interface UnityEventReferenceIndexController {
+  readonly onDidChangeCodeLenses: vscode.Event<void>;
+  getStatus(): UnityEventReferenceIndexStatus;
+  getReadyIndex(): UnitySerializedAssetReferenceIndex | undefined;
+  scheduleBuild(): void;
+  forceBuild(context?: UnityEventReferenceBuildContext): Promise<UnitySerializedAssetReferenceIndex | undefined>;
+  notifyCodeLensesChanged(): void;
+}
+
+export interface PriorityScanResult {
+  index: UnitySerializedAssetReferenceIndex;
+  diagnostics: UnityEventReferenceDiagnostics;
+  scriptGuid?: string;
+  reason?: string;
+}
+
+export interface PriorityScanState {
+  key: string;
+  status: 'pending' | 'ready' | 'failed';
+  promise?: Promise<PriorityScanResult>;
+  result?: PriorityScanResult;
+}
+
+export interface CodeLensRenderOptions {
+  embedReferences: boolean;
+  includeZeroSummaryLenses?: boolean;
+}
+
+export interface RunWithConcurrencyOptions {
+  cancellationToken?: vscode.CancellationToken;
+  yieldEvery?: number;
+  onProgress?: (completedCount: number, totalCount: number) => void;
+}
+
+export const gameObjectClassId = 1;
+export const monoBehaviourClassId = 114;
+export const defaultAssetScanConcurrency = 4;
+export const scanYieldEvery = 4;
+export const backgroundScanYieldEvery = 1;
+export const backgroundBuildDebounceMilliseconds = 150;
+export const progressReportInterval = 10;
