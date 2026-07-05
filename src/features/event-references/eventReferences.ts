@@ -949,7 +949,7 @@ function createEventReferenceProvider(
             return;
           }
 
-          await showTargetMethodLocations(runtime, locations);
+          await showTargetMethodLocations(runtime, target, locations);
           return;
         }
 
@@ -1000,7 +1000,7 @@ function createEventReferenceProvider(
           return;
         }
 
-        await showTargetMethodLocations(runtime, locations);
+        await showTargetMethodLocations(runtime, target, locations);
         return;
       }
 
@@ -2403,28 +2403,20 @@ function createNoEventReferenceLocationsMessage(
     : runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.');
 }
 
+/** Creates declaration locations for YAML-declared target methods without running click-time target inference. */
 async function createTargetMethodLocations(
   runtime: EventReferenceRuntime,
   references: readonly UnityEventReference[]
 ): Promise<vscode.Location[]> {
   const locations: vscode.Location[] = [];
   const seenLocations = new Set<string>();
-  let resolveCSharpType: ((fullTypeName: string) => Promise<string | undefined>) | undefined;
 
   for (const reference of references) {
-    const scriptPath = reference.scriptPath ?? await resolveTargetScriptPath(runtime, reference, async fullTypeName => {
-      if (!resolveCSharpType) {
-        resolveCSharpType = await createBuildScopedTypeResolver(runtime, { mode: 'background' });
-      }
-
-      return await resolveCSharpType(fullTypeName);
-    });
-
-    if (!scriptPath) {
+    if (!reference.scriptPath) {
       continue;
     }
 
-    const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, scriptPath);
+    const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
     try {
       const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
       const position = findCSharpMethodPosition(runtime.runtimeVscode, content, reference.methodName);
@@ -2439,30 +2431,16 @@ async function createTargetMethodLocations(
   return locations;
 }
 
-/** Resolves a YAML-declared target type to a C# script path only for click navigation. */
-async function resolveTargetScriptPath(
-  runtime: EventReferenceRuntime,
-  reference: UnityEventReference,
-  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
-): Promise<string | undefined> {
-  const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
-  if (!targetTypeName || isUnityBuiltInTargetTypeName(targetTypeName)) {
-    return undefined;
-  }
-
-  return await resolveCSharpType(targetTypeName);
-}
-
-/** Shows YAML-declared target methods using the first target declaration as the peek anchor. */
+/** Shows YAML-declared target methods using the UnityEvent field as the stable peek anchor. */
 async function showTargetMethodLocations(
   runtime: EventReferenceRuntime,
+  target: EventReferenceLocationTarget,
   locations: readonly vscode.Location[]
 ): Promise<void> {
-  const anchor = locations[0];
   await runtime.runtimeVscode.commands.executeCommand(
     'editor.action.showReferences',
-    anchor.uri,
-    anchor.range.start,
+    toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
+    target.position,
     locations
   );
 }

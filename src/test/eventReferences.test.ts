@@ -533,7 +533,7 @@ describe('eventReferences', () => {
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[3].command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 3);
     assert.strictEqual(runtime.referenceCommands[2].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(4, 14));
+    assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(3, 20));
     assert.strictEqual(runtime.referenceCommands[2].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
   });
@@ -770,6 +770,7 @@ describe('eventReferences', () => {
   });
 
   it('counts current-file priority targets from target assembly type without full metadata', async () => {
+    let csharpScans = 0;
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
@@ -801,6 +802,10 @@ describe('eventReferences', () => {
       readTextFile: async uri => uri.fsPath.endsWith('Gate.cs.meta')
         ? `guid: ${gateGuid}`
         : createUnresolvedTargetAssemblyYaml(2),
+      findCSharpFiles: async () => {
+        csharpScans += 1;
+        return [createUri('/Project/Assets/IronDoor.cs')];
+      },
       resolveCSharpType: async () => undefined
     });
 
@@ -813,6 +818,12 @@ describe('eventReferences', () => {
 
     assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
     assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(csharpScans, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
   it('shows zero CodeLens feedback when the current script has no metadata GUID', async () => {
@@ -1365,7 +1376,7 @@ describe('eventReferences', () => {
 
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(6, 14));
+    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(4, 25));
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(6, 14));
   });
@@ -1415,7 +1426,7 @@ describe('eventReferences', () => {
 
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(9, 14));
+    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(3, 20));
     assert.strictEqual(runtime.referenceCommands[0].locations.length, 1);
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(9, 14));
   });
