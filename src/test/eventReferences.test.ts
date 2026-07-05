@@ -1169,7 +1169,7 @@ describe('eventReferences', () => {
     const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
     assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(fieldTargetLens?.command?.title, '0 UnityEvent targets');
+    assert.strictEqual(fieldTargetLens, undefined);
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
@@ -1242,7 +1242,7 @@ describe('eventReferences', () => {
     const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
     assert.strictEqual(fieldReferenceLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(fieldTargetLens?.command?.title, '0 UnityEvent targets');
+    assert.strictEqual(fieldTargetLens, undefined);
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldReferenceLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
@@ -1305,6 +1305,13 @@ describe('eventReferences', () => {
     assert.strictEqual(fieldTargetLenses.length, 2);
     assert.strictEqual(fieldLenses.every(lens => lens.command?.title === '1 UnityEvent references'), true);
     assert.strictEqual(fieldTargetLenses.every(lens => lens.command?.title === '1 UnityEvent targets'), true);
+
+    const checkTargetLens = fieldTargetLenses.find(lens => lens.command?.arguments?.[0]?.symbolName === 'OnCheckEnable');
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', checkTargetLens?.command?.arguments?.[0]);
+
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(6, 14));
   });
 
   it('deduplicates UnityEvent field target CodeLens locations across normal and override bindings', async () => {
@@ -1505,7 +1512,7 @@ describe('eventReferences', () => {
     assert.strictEqual(closeFieldLens?.command?.title, '2 UnityEvent references');
     assert.strictEqual(closeTargetLens?.command?.title, '2 UnityEvent targets');
     assert.strictEqual(pastedFieldLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(pastedTargetLens?.command?.title, '0 UnityEvent targets');
+    assert.strictEqual(pastedTargetLens, undefined);
 
     const doorLenses = await runtime.provideCodeLenses(doorDocument);
     const openMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Open');

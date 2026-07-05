@@ -1441,7 +1441,7 @@ function createCodeLensesFromIndex(
     }
 
     const fieldTargets = index.getFieldTargets(scriptPath, field.name, field.typeName);
-    if (fieldTargets.length > 0 || shouldShowZeroFieldTargetLens(fieldReferences)) {
+    if (fieldTargets.length > 0) {
       fieldTargetLensCount += 1;
       codeLenses.push(new runtime.runtimeVscode.CodeLens(field.range, {
         title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
@@ -1478,13 +1478,6 @@ function createCodeLensesFromIndex(
 
   runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
   return codeLenses;
-}
-
-/** Shows a zero target lens only when references point at Unity built-in APIs, not unresolved project methods. */
-function shouldShowZeroFieldTargetLens(fieldReferences: readonly UnityEventReference[]): boolean {
-  return fieldReferences.some(reference =>
-    !reference.scriptPath && reference.targetTypeName.startsWith('UnityEngine.')
-  );
 }
 
 /** Chooses the single C# type that should receive path-based serialized instance counts. */
