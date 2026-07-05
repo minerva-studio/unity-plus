@@ -1431,6 +1431,106 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(9, 14));
   });
 
+  it('does not use field Invoke call sites when a YAML target declaration cannot be found', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool InvokeFromCode()',
+      '  {',
+      '    OnCheckEnable.Invoke();',
+      '    return true;',
+      '  }',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
+  });
+
+  it('ignores same-name methods outside the YAML target type', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    const targetDocument = createTextDocument('/Project/Assets/IronDoor.cs', [
+      'public class WrongType',
+      '{',
+      '  public void Open()',
+      '  {',
+      '  }',
+      '}',
+      'public class IronDoor',
+      '{',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => {
+        if (uri.fsPath.endsWith('Gate.cs')) {
+          return csharpDocument.getText();
+        }
+
+        return uri.fsPath.endsWith('IronDoor.cs')
+          ? targetDocument.getText()
+          : createUnresolvedTargetAssemblyYaml(2);
+      },
+      resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? ironDoorScriptPath : createTypeResolver()(typeName)
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
+
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
+  });
+
   it('deduplicates UnityEvent field target CodeLens locations across normal and override bindings', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
@@ -1592,7 +1692,7 @@ describe('eventReferences', () => {
     assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
   });
 
-  it('resolves UnityEvent target scripts from m_Target fileIDs before falling back to type names', async () => {
+  it('resolves UnityEvent target scripts from target assembly type names', async () => {
     const runtime = createEventReferenceRuntime();
     const controllerDocument = createTextDocument('/Project/Assets/GateController.cs', [
       'using UnityEngine.Events;',
@@ -1636,7 +1736,7 @@ describe('eventReferences', () => {
 
         return createGateControllerYaml(2);
       },
-      resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? undefined : createTypeResolver()(typeName)
+      resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? ironDoorScriptPath : createTypeResolver()(typeName)
     });
 
     await assertPendingCodeLenses(runtime, controllerDocument);
@@ -1664,8 +1764,15 @@ describe('eventReferences', () => {
     assert.strictEqual(openMethodLens?.command?.title, '2 UnityEvent references');
     assert.strictEqual(closeMethodLens?.command?.title, '2 UnityEvent references');
 
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', openTargetLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/GateController.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(3, 20));
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/IronDoor.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(2, 14));
+
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', pastedTargetLens?.command?.arguments?.[0]);
-    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 

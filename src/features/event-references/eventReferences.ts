@@ -178,6 +178,13 @@ interface CSharpMethodDeclaration {
   nameEnd: number;
 }
 
+interface CSharpTypeBodyDeclaration {
+  shortName: string;
+  fullName: string;
+  bodyStart: number;
+  bodyEnd: number;
+}
+
 interface CSharpFieldSnapshot {
   name: string;
   typeName?: string;
@@ -638,18 +645,17 @@ async function parseUnityEventReferencesCore(
       const target = call.targetFileId ? objects.get(call.targetFileId) : undefined;
       const owner = call.ownerFileId ? objects.get(call.ownerFileId) : objects.get(ownerFileId);
       const ownerIdentity = await resolveSerializedObjectScriptIdentity(owner, metadataIndex, resolveCSharpType);
-      const targetIdentity = await resolveSerializedObjectScriptIdentity(target, metadataIndex, resolveCSharpType);
       trackOwnerScriptIdentity(diagnostics, owner, ownerIdentity);
 
       const eventScriptPath = ownerIdentity.scriptPath;
       const eventOwnerTypeName = ownerIdentity.typeName;
-      const resolvedTargetTypeName = targetTypeName || targetIdentity.typeName || '';
-      let scriptPath = targetIdentity.scriptPath;
-      let scriptTypeName = resolvedTargetTypeName || targetIdentity.typeName;
+      const resolvedTargetTypeName = targetTypeName || '';
+      let scriptPath: string | undefined;
+      const scriptTypeName = resolvedTargetTypeName;
 
       if (!resolvedTargetTypeName) {
         diagnostics.skippedMissingTargetTypeNameCount += 1;
-      } else if (!scriptPath) {
+      } else if (!isUnityBuiltInTargetTypeName(resolvedTargetTypeName)) {
         scriptPath = await resolveCSharpType(resolvedTargetTypeName);
       }
 
@@ -659,7 +665,7 @@ async function parseUnityEventReferencesCore(
         diagnostics.skippedUnresolvedTargetTypeNameCount += 1;
       }
 
-      if (!eventScriptPath && !eventOwnerTypeName && !scriptPath && !scriptTypeName) {
+      if (!eventScriptPath && !eventOwnerTypeName && !resolvedTargetTypeName) {
         continue;
       }
 
@@ -1318,7 +1324,10 @@ function createCurrentDocumentTypeResolver(
   return async fullTypeName => {
     throwIfCancellationRequested(token);
 
-    if (currentTypes.some(type => typeKey(type.fullName) === typeKey(fullTypeName))) {
+    if (currentTypes.some(type =>
+      typeKey(type.fullName) === typeKey(fullTypeName) ||
+      typeKey(type.name) === typeKey(shortTypeName(fullTypeName))
+    )) {
       return scriptPath;
     }
 
@@ -2412,14 +2421,19 @@ async function createTargetMethodLocations(
   const seenLocations = new Set<string>();
 
   for (const reference of references) {
-    if (!reference.scriptPath) {
+    if (!reference.scriptPath || !reference.targetTypeName || isUnityBuiltInTargetTypeName(reference.targetTypeName)) {
       continue;
     }
 
     const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
     try {
       const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
-      const position = findCSharpMethodPosition(runtime.runtimeVscode, content, reference.methodName);
+      const position = findCSharpTargetMethodPosition(
+        runtime.runtimeVscode,
+        content,
+        reference.targetTypeName,
+        reference.methodName
+      );
       if (position) {
         appendUniqueLocation(locations, seenLocations, new runtime.runtimeVscode.Location(uri, position));
       }
@@ -2474,6 +2488,95 @@ function findCSharpMethodPosition(
   }
 
   return undefined;
+}
+
+/** Finds a YAML target method declaration inside the C# type named by m_TargetAssemblyTypeName. */
+function findCSharpTargetMethodPosition(
+  runtimeVscode: typeof vscode,
+  content: string,
+  targetTypeName: string,
+  methodName: string
+): vscode.Position | undefined {
+  const targetType = findCSharpTargetTypeBody(content, targetTypeName);
+  if (!targetType) {
+    return undefined;
+  }
+
+  const declaration = findCSharpMethodDeclarations(content, methodName).find(candidate =>
+    candidate.nameStart > targetType.bodyStart && candidate.nameStart < targetType.bodyEnd
+  );
+  if (!declaration) {
+    return undefined;
+  }
+
+  const line = countLineBreaks(content, 0, declaration.nameStart);
+  const previousLineBreak = content.lastIndexOf('\n', declaration.nameStart - 1);
+  const character = declaration.nameStart - previousLineBreak - 1;
+  return new runtimeVscode.Position(line, character);
+}
+
+/** Finds the C# type body that corresponds to a YAML target assembly type name. */
+function findCSharpTargetTypeBody(content: string, targetTypeName: string): CSharpTypeBodyDeclaration | undefined {
+  return findCSharpTypeBodyDeclarations(content).find(type =>
+    typeKey(type.fullName) === typeKey(targetTypeName) ||
+    typeKey(type.shortName) === typeKey(shortTypeName(targetTypeName))
+  );
+}
+
+/** Parses C# type declarations with body spans for target-method declaration lookup. */
+function findCSharpTypeBodyDeclarations(content: string): CSharpTypeBodyDeclaration[] {
+  const declarations: CSharpTypeBodyDeclaration[] = [];
+  const namespaceMatches = [...content.matchAll(/\bnamespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:[;{])/g)];
+  const fileScopedNamespace = /^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m.exec(content)?.[1];
+  const typePattern = /\b(?:public|private|protected|internal|abstract|sealed|static|partial|new|\s)*(?:class|struct|interface|record)\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = typePattern.exec(content))) {
+    const shortName = match[1];
+    const bodyStart = content.indexOf('{', typePattern.lastIndex);
+    if (bodyStart === -1) {
+      continue;
+    }
+
+    const bodyEnd = findMatchingBrace(content, bodyStart);
+    if (bodyEnd === -1) {
+      continue;
+    }
+
+    const namespaceName = fileScopedNamespace ?? findNearestNamespace(namespaceMatches, match.index);
+    declarations.push({
+      shortName,
+      fullName: namespaceName ? `${namespaceName}.${shortName}` : shortName,
+      bodyStart,
+      bodyEnd
+    });
+  }
+
+  return declarations;
+}
+
+/** Finds a balanced closing brace for a C# type body candidate. */
+function findMatchingBrace(text: string, openBrace: number): number {
+  let depth = 0;
+
+  for (let index = openBrace; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '"' || char === "'") {
+      index = skipQuotedCSharpLiteral(text, index);
+      continue;
+    }
+
+    if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return -1;
 }
 
 function toReferenceLocation(
