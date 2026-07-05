@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import type * as vscode from 'vscode';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
-import { createLazyUnityMetadataIndex, createUnityMetadataIndex, defaultMetaFilesGlob, defaultMetaFilesGlobs, parseUnityMetaGuid, UnityMetaFileWatchHandlers } from '../unity/metadataIndex';
+import { createLazyUnityMetadataIndex, createUnityMetadataIndex, defaultMetaFilesGlob, defaultMetaFilesGlobs, findUnityMetaFilesWithFallback, parseUnityMetaGuid, UnityMetaFileWatchHandlers } from '../unity/metadataIndex';
 
 const firstGuid = '11111111111111111111111111111111';
 const secondGuid = '22222222222222222222222222222222';
@@ -33,6 +33,10 @@ describe('metadataIndex', () => {
 
     assert.strictEqual(index.getAssetPath(firstGuid), 'Assets/Player.cs');
     assert.strictEqual(index.getGuid('Assets/Player.cs'), firstGuid);
+    assert.strictEqual(index.getStatistics?.().foundMetaFileCount, 1);
+    assert.strictEqual(index.getStatistics?.().readMetaFileCount, 1);
+    assert.strictEqual(index.getStatistics?.().parsedGuidCount, 1);
+    assert.strictEqual(output.lines.some(line => line.includes('found=1, read=1, parsed GUIDs=1')), true);
   });
 
   it('updates GUID mappings from meta file watcher events', async () => {
@@ -94,7 +98,63 @@ describe('metadataIndex', () => {
     await index.rebuild();
 
     assert.strictEqual(index.getAssetPath(firstGuid), 'Assets/Valid.asset');
+    assert.strictEqual(index.getStatistics?.().malformedMetaFileCount, 1);
     assert.strictEqual(output.lines.some(line => line.includes('Skipped malformed Unity metadata file')), true);
+  });
+
+  it('reports read errors and warns when the metadata index is empty', async () => {
+    const output = createMemoryOutput();
+    const index = createUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createLogger({
+        output,
+        getLevel: () => 'debug'
+      }),
+      findMetaFiles: async () => [createUri('/Project/Assets/Broken.cs.meta')],
+      readTextFile: async () => {
+        throw new Error('denied');
+      },
+      watchMetaFiles: createNoopWatcher
+    });
+
+    await index.rebuild();
+
+    assert.strictEqual(index.getStatistics?.().foundMetaFileCount, 1);
+    assert.strictEqual(index.getStatistics?.().readErrorCount, 1);
+    assert.strictEqual(index.getStatistics?.().parsedGuidCount, 0);
+    assert.strictEqual(output.lines.some(line => line.includes('Unity metadata index is empty')), true);
+  });
+
+  it('falls back to directory walking when VS Code file search returns no meta files', async () => {
+    const fallbackCalls: string[] = [];
+    const runtime = createMetadataSearchRuntime({
+      '/Project/Assets': [
+        ['Player.cs.meta', 1],
+        ['Nested', 2],
+        ['Library', 2]
+      ],
+      '/Project/Assets/Nested': [
+        ['Enemy.prefab.meta', 1]
+      ],
+      '/Project/Assets/Library': [
+        ['Ignored.asset.meta', 1]
+      ],
+      '/Project/Packages': [
+        ['package.json.meta', 1]
+      ]
+    });
+    const files = await findUnityMetaFilesWithFallback(
+      createUri('/Project'),
+      runtime,
+      { warn: message => fallbackCalls.push(message) }
+    );
+
+    assert.deepStrictEqual(files.map(uri => uri.fsPath), [
+      '/Project/Assets/Player.cs.meta',
+      '/Project/Assets/Nested/Enemy.prefab.meta',
+      '/Project/Packages/package.json.meta'
+    ]);
+    assert.strictEqual(fallbackCalls.length, 1);
   });
 
   it('keeps the legacy Assets metadata glob and scans package metadata too', () => {
@@ -166,7 +226,35 @@ function createMemoryOutput(): MemoryLogOutput {
 }
 
 function createUri(fsPath: string): vscode.Uri {
-  return { fsPath } as vscode.Uri;
+  return { fsPath, path: fsPath } as vscode.Uri;
+}
+
+/** Creates a small VS Code runtime fake for metadata search fallback tests. */
+function createMetadataSearchRuntime(
+  directories: Record<string, Array<[string, number]>>
+): typeof vscode {
+  return {
+    workspace: {
+      findFiles: async () => [],
+      fs: {
+        readDirectory: async (uri: vscode.Uri) => directories[uri.fsPath] ?? []
+      }
+    },
+    RelativePattern: class {
+      constructor(
+        public readonly base: vscode.Uri,
+        public readonly pattern: string
+      ) {}
+    },
+    Uri: {
+      joinPath: (base: vscode.Uri, ...segments: string[]) =>
+        createUri([base.fsPath.replace(/\\/g, '/').replace(/\/$/, ''), ...segments].join('/'))
+    },
+    FileType: {
+      File: 1,
+      Directory: 2
+    }
+  } as unknown as typeof vscode;
 }
 
 function createNoopWatcher(_handlers: UnityMetaFileWatchHandlers): vscode.Disposable {

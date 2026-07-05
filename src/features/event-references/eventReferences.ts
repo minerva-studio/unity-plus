@@ -189,6 +189,7 @@ interface UnityEventReferenceIndexController {
   getReadyIndex(): UnitySerializedAssetReferenceIndex | undefined;
   scheduleBuild(): void;
   forceBuild(context?: UnityEventReferenceBuildContext): Promise<UnitySerializedAssetReferenceIndex | undefined>;
+  notifyCodeLensesChanged(): void;
 }
 
 export type UnityEventReferenceBuildMode = 'background' | 'interactive';
@@ -202,23 +203,46 @@ export interface UnityEventReferenceBuildContext {
 
 interface UnityEventReferenceScanStatusReporter {
   /** Shows the background scan status item with the first visible phase. */
-  start(phase: string): void;
+  start(phase: string, label?: string): void;
   /** Updates the status item with bounded scan progress. */
   update(status: UnityEventReferenceScanStatus): void;
   /** Hides the status item and records the final scan result. */
-  finish(result: 'completed' | 'failed' | 'canceled', diagnostics?: UnityEventReferenceDiagnostics): void;
+  finish(result: 'completed' | 'failed' | 'canceled', diagnostics?: UnityEventReferenceDiagnostics, status?: UnityEventReferenceScanStatus): void;
   /** Releases the status item when the extension feature is disposed. */
   dispose(): void;
 }
 
 interface UnityEventReferenceScanStatus {
   phase: string;
+  label?: string;
+  scriptPath?: string;
+  scriptGuid?: string;
+  metadataGuidCount?: number;
   candidateCount?: number;
   scannedCount?: number;
   totalCount?: number;
   referenceCount?: number;
   instanceCount?: number;
   elapsedMilliseconds?: number;
+}
+
+interface PriorityScanState {
+  key: string;
+  status: 'pending' | 'ready' | 'failed';
+  promise?: Promise<PriorityScanResult>;
+  result?: PriorityScanResult;
+}
+
+interface PriorityScanResult {
+  index: UnitySerializedAssetReferenceIndex;
+  diagnostics: UnityEventReferenceDiagnostics;
+  scriptGuid?: string;
+  reason?: string;
+}
+
+interface CodeLensRenderOptions {
+  embedReferences: boolean;
+  includeZeroSummaryLenses?: boolean;
 }
 
 interface RunWithConcurrencyOptions {
@@ -235,6 +259,7 @@ const defaultAssetScanConcurrency = 4;
 const scanYieldEvery = 4;
 const backgroundScanYieldEvery = 1;
 const backgroundBuildDebounceMilliseconds = 150;
+const scanStatusRetainMilliseconds = 8000;
 const progressReportInterval = 10;
 const eventReferenceCandidateTexts = ['m_Script:', 'm_PersistentCalls', '.m_PersistentCalls.'];
 const editorBuildSettingsPath = 'ProjectSettings/EditorBuildSettings.asset';
@@ -351,9 +376,15 @@ export async function buildUnityEventReferenceIndex(
 
   throwIfCancellationRequested(context.cancellationToken);
   context.progress?.report({ message: runtime.runtimeVscode.l10n.t('Finding Unity serialized assets') });
-  context.scanStatus?.update({ phase: 'Finding Unity serialized asset candidates' });
+  context.scanStatus?.update({ label: 'Unity refs: metadata', phase: 'Preparing Unity metadata' });
 
   const metadataIndex = metadata ?? await runtime.metadataIndex.getOrBuild();
+  context.scanStatus?.update({
+    label: 'Unity refs: metadata',
+    phase: 'Unity metadata ready',
+    metadataGuidCount: metadataIndex.getStatistics?.().parsedGuidCount
+  });
+  context.scanStatus?.update({ label: 'Unity refs: project', phase: 'Finding Unity serialized asset candidates' });
   const discovery = await findUnityEventCandidateAssetFiles(runtime, context);
   const assetFiles = await filterAssetFilesForConfiguredSceneScope(runtime, discovery.files);
   const resolveCSharpType = await createBuildScopedTypeResolver(runtime, context);
@@ -364,6 +395,7 @@ export async function buildUnityEventReferenceIndex(
   diagnostics.textCandidateSearchCount = discovery.textSearchCount;
   diagnostics.skippedAssetCount += discovery.files.length - assetFiles.length;
   context.scanStatus?.update({
+    label: 'Unity refs: project',
     phase: 'Scanning Unity serialized assets',
     candidateCount: assetFiles.length,
     scannedCount: 0,
@@ -407,6 +439,7 @@ export async function buildUnityEventReferenceIndex(
     yieldEvery: context.mode === 'background' ? backgroundScanYieldEvery : scanYieldEvery,
     onProgress: (completedCount, totalCount) => {
       context.scanStatus?.update({
+        label: 'Unity refs: project',
         phase: 'Scanning Unity serialized assets',
         candidateCount: assetFiles.length,
         scannedCount: completedCount,
@@ -653,32 +686,40 @@ function createEventReferenceIndexController(runtime: EventReferenceRuntime): Un
     const scanStatus = context.mode === 'background' ? runtime.scanStatus : undefined;
     const buildContext = scanStatus ? { ...context, scanStatus } : context;
     status = 'building';
-    scanStatus?.start('Preparing UnityEvent reference scan');
+    scanStatus?.start('Preparing UnityEvent reference scan', 'Unity refs: project');
     buildPromise = buildUnityEventReferenceIndex(runtime, undefined, buildContext)
       .then(builtIndex => {
         if (buildVersion !== runtime.getCacheVersion()) {
           status = 'idle';
-          scanStatus?.finish('canceled');
+          scanStatus?.finish('canceled', undefined, { label: 'Unity refs: project', phase: 'Canceled' });
           return undefined;
         }
 
         index = builtIndex;
         status = 'ready';
-        scanStatus?.finish('completed', builtIndex.getDiagnostics());
+        scanStatus?.finish('completed', builtIndex.getDiagnostics(), {
+          label: 'Unity refs: project',
+          phase: 'Project scan complete',
+          candidateCount: builtIndex.getDiagnostics().candidateAssetCount,
+          scannedCount: builtIndex.getDiagnostics().prefabCount + builtIndex.getDiagnostics().sceneCount + builtIndex.getDiagnostics().assetCount,
+          referenceCount: builtIndex.getDiagnostics().resolvedReferenceCount,
+          instanceCount: builtIndex.getDiagnostics().serializedInstanceCount,
+          elapsedMilliseconds: builtIndex.getDiagnostics().elapsedMilliseconds
+        });
         codeLensEvents.fire();
         return builtIndex;
       })
       .catch(error => {
         if (isCancellationError(error)) {
           status = previousIndex ? 'ready' : 'idle';
-          scanStatus?.finish('canceled');
+          scanStatus?.finish('canceled', undefined, { label: 'Unity refs: project', phase: 'Canceled' });
           runtime.logger.info('UnityEvent reference index build canceled.');
           codeLensEvents.fire();
           return undefined;
         }
 
         status = 'failed';
-        scanStatus?.finish('failed');
+        scanStatus?.finish('failed', undefined, { label: 'Unity refs: project', phase: 'Failed' });
         runtime.logger.warn(`Could not build UnityEvent reference index: ${errorMessage(error)}`);
         codeLensEvents.fire();
         return undefined;
@@ -718,7 +759,8 @@ function createEventReferenceIndexController(runtime: EventReferenceRuntime): Un
       return status === 'ready' ? index : undefined;
     },
     scheduleBuild,
-    forceBuild
+    forceBuild,
+    notifyCodeLensesChanged: () => codeLensEvents.fire()
   };
 }
 
@@ -727,7 +769,7 @@ function createEventReferenceProvider(
   controller: UnityEventReferenceIndexController,
   isEnabled: () => boolean
 ): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
-  let priorityScan: { key: string; promise: Promise<vscode.CodeLens[]> } | undefined;
+  let priorityScan: PriorityScanState | undefined;
 
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
@@ -738,27 +780,71 @@ function createEventReferenceProvider(
 
       const index = controller.getReadyIndex();
       if (!index) {
+        const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
+
         if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
           controller.scheduleBuild();
-          return [];
+          return createScanStateCodeLenses(runtime, document, scriptPath, '-');
         }
 
-        const priorityKey = `${runtime.getCacheVersion()}:${toProjectPath(runtime.metadataIndex.root, document.uri)}`;
-        if (priorityScan?.key === priorityKey) {
-          return await priorityScan.promise;
+        const priorityKey = `${runtime.getCacheVersion()}:${scriptPath}`;
+        if (!priorityScan || priorityScan.key !== priorityKey) {
+          const state: PriorityScanState = {
+            key: priorityKey,
+            status: 'pending'
+          };
+          const promise = buildPriorityReferenceIndex(runtime, document, token)
+            .then(result => {
+              if (priorityScan === state) {
+                state.status = 'ready';
+                state.result = result;
+                controller.notifyCodeLensesChanged();
+              }
+
+              return result;
+            })
+            .catch(error => {
+              if (priorityScan === state) {
+                state.status = 'failed';
+                state.result = createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
+                runtime.scanStatus?.finish('failed', state.result.diagnostics, {
+                  label: 'Unity refs: current',
+                  phase: 'Current script scan failed',
+                  scriptPath,
+                  referenceCount: 0,
+                  instanceCount: 0
+                });
+                controller.notifyCodeLensesChanged();
+              }
+
+              runtime.logger.warn(`UnityEvent priority scan failed for ${scriptPath}: ${errorMessage(error)}`);
+              return createEmptyPriorityScanResult(runtime, scriptPath, errorMessage(error));
+            });
+          state.promise = promise;
+          priorityScan = state;
         }
 
-        const promise = createPriorityCodeLenses(runtime, document, token)
-          .finally(() => {
-            if (priorityScan?.promise === promise) {
-              priorityScan = undefined;
-            }
+        if (priorityScan.status === 'ready' && priorityScan.result) {
+          return createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
+            embedReferences: true,
+            includeZeroSummaryLenses: true
           });
-        priorityScan = { key: priorityKey, promise };
-        return await promise;
+        }
+
+        if (priorityScan.status === 'failed' && priorityScan.result) {
+          return createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
+            embedReferences: true,
+            includeZeroSummaryLenses: true
+          });
+        }
+
+        return createScanStateCodeLenses(runtime, document, scriptPath, '-');
       }
 
-      return createCodeLensesFromIndex(runtime, document, index, { embedReferences: false });
+      return createCodeLensesFromIndex(runtime, document, index, {
+        embedReferences: false,
+        includeZeroSummaryLenses: true
+      });
     },
     async provideHover(document, position, token) {
       if (!isEnabled() || !isCSharpFile(document.uri) || isCancellationRequested(token)) {
@@ -802,6 +888,11 @@ function createEventReferenceProvider(
       const index = controller.getReadyIndex();
       if (!index && target.kind === 'serializedInstance' && target.serializedInstances) {
         const serializedReferences = target.serializedInstances;
+        if (serializedReferences.length === 0) {
+          runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no Unity serialized instances found for this script.'));
+          return;
+        }
+
         await runtime.runtimeVscode.commands.executeCommand(
           'editor.action.showReferences',
           toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
@@ -813,6 +904,11 @@ function createEventReferenceProvider(
 
       if (!index && target.kind !== 'serializedInstance' && target.eventReferences) {
         const eventReferences = target.eventReferences;
+        if (eventReferences.length === 0) {
+          runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.'));
+          return;
+        }
+
         if (target.kind === 'fieldTarget') {
           const locations = await createTargetMethodLocations(runtime, eventReferences);
           if (locations.length === 0) {
@@ -895,23 +991,57 @@ function createEventReferenceProvider(
   };
 }
 
-/** Creates current-file CodeLens entries by parsing only assets that contain the current script GUID. */
-async function createPriorityCodeLenses(
+/** Builds a temporary current-file reference index from assets that contain the current script GUID. */
+async function buildPriorityReferenceIndex(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument,
   token: vscode.CancellationToken
-): Promise<vscode.CodeLens[]> {
+): Promise<PriorityScanResult> {
+  const startedAt = Date.now();
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
+  runtime.scanStatus?.start('Preparing Unity metadata', 'Unity refs: metadata');
+  runtime.scanStatus?.update({ label: 'Unity refs: metadata', phase: 'Preparing Unity metadata', scriptPath });
   const metadata = await runtime.metadataIndex.getOrBuild();
+  const metadataGuidCount = metadata.getStatistics?.().parsedGuidCount;
+  runtime.scanStatus?.update({
+    label: 'Unity refs: metadata',
+    phase: 'Unity metadata ready',
+    scriptPath,
+    metadataGuidCount
+  });
   const scriptGuid = metadata.getGuid(scriptPath);
+  const diagnostics = createEmptyDiagnostics();
 
   if (!scriptGuid || isCancellationRequested(token)) {
-    return [];
+    const reason = scriptGuid ? 'scan canceled' : 'script GUID not found in metadata index';
+    diagnostics.elapsedMilliseconds = Date.now() - startedAt;
+    runtime.logger.warn(`UnityEvent priority scan for ${scriptPath}: ${reason}.`);
+    runtime.scanStatus?.finish('completed', diagnostics, {
+      label: 'Unity refs: current',
+      phase: reason,
+      scriptPath,
+      metadataGuidCount,
+      referenceCount: 0,
+      instanceCount: 0,
+      elapsedMilliseconds: diagnostics.elapsedMilliseconds
+    });
+    return {
+      index: createReferenceIndex([], [], diagnostics),
+      diagnostics,
+      reason
+    };
   }
 
   const findCandidates = runtime.findAssetFilesContainingText ?? findDefaultAssetFilesContainingText;
+  runtime.scanStatus?.start('Searching current script references', 'Unity refs: current');
+  runtime.scanStatus?.update({
+    label: 'Unity refs: current',
+    phase: 'Searching current script candidates',
+    scriptPath,
+    scriptGuid,
+    metadataGuidCount
+  });
   const candidateUris = await findCandidates(runtime.metadataIndex.root, runtime.runtimeVscode, scriptGuid);
-  const diagnostics = createEmptyDiagnostics();
   const references: UnityEventReference[] = [];
   const serializedInstances: UnitySerializedInstanceLocation[] = [];
   const resolveCSharpType = createCurrentDocumentTypeResolver(runtime, document, scriptPath, token);
@@ -919,10 +1049,36 @@ async function createPriorityCodeLenses(
   diagnostics.discoveredAssetCount = candidateUris.length;
   diagnostics.candidateAssetCount = candidateUris.length;
   diagnostics.textCandidateSearchCount = 1;
+  runtime.scanStatus?.update({
+    label: 'Unity refs: current',
+    phase: 'Parsing current script candidates',
+    scriptPath,
+    scriptGuid,
+    metadataGuidCount,
+    candidateCount: candidateUris.length,
+    scannedCount: 0,
+    totalCount: candidateUris.length,
+    referenceCount: 0,
+    instanceCount: 0,
+    elapsedMilliseconds: Date.now() - startedAt
+  });
 
-  for (const uri of candidateUris) {
+  for (const [index, uri] of candidateUris.entries()) {
     if (isCancellationRequested(token)) {
-      return [];
+      diagnostics.elapsedMilliseconds = Date.now() - startedAt;
+      runtime.scanStatus?.finish('canceled', diagnostics, {
+        label: 'Unity refs: current',
+        phase: 'Canceled',
+        scriptPath,
+        scriptGuid,
+        candidateCount: candidateUris.length,
+        scannedCount: index,
+        totalCount: candidateUris.length,
+        referenceCount: references.length,
+        instanceCount: serializedInstances.length,
+        elapsedMilliseconds: diagnostics.elapsedMilliseconds
+      });
+      throw new UnityEventReferenceScanCanceledError();
     }
 
     const assetKind = getAssetKind(uri);
@@ -945,14 +1101,109 @@ async function createPriorityCodeLenses(
     mergeDiagnostics(diagnostics, parsed.diagnostics);
     references.push(...currentReferences);
     serializedInstances.push(...locations);
+    runtime.scanStatus?.update({
+      label: 'Unity refs: current',
+      phase: 'Parsing current script candidates',
+      scriptPath,
+      scriptGuid,
+      metadataGuidCount,
+      candidateCount: candidateUris.length,
+      scannedCount: index + 1,
+      totalCount: candidateUris.length,
+      referenceCount: references.length,
+      instanceCount: serializedInstances.length,
+      elapsedMilliseconds: Date.now() - startedAt
+    });
     await yieldToEventLoop();
   }
 
   diagnostics.resolvedReferenceCount = references.length;
   diagnostics.serializedInstanceCount = serializedInstances.length;
+  diagnostics.elapsedMilliseconds = Date.now() - startedAt;
   const index = createReferenceIndex(references, serializedInstances, diagnostics);
+  runtime.scanStatus?.finish('completed', diagnostics, {
+    label: 'Unity refs: current',
+    phase: 'Current script scan complete',
+    scriptPath,
+    scriptGuid,
+    metadataGuidCount,
+    candidateCount: candidateUris.length,
+    scannedCount: candidateUris.length,
+    totalCount: candidateUris.length,
+    referenceCount: references.length,
+    instanceCount: serializedInstances.length,
+    elapsedMilliseconds: diagnostics.elapsedMilliseconds
+  });
   runtime.logger.debug(`UnityEvent priority scan for ${scriptPath}: ${candidateUris.length} candidate asset(s), ${references.length} reference(s), ${serializedInstances.length} instance(s).`);
-  return createCodeLensesFromIndex(runtime, document, index, { embedReferences: true });
+  return { index, diagnostics, scriptGuid };
+}
+
+/** Creates an empty priority result so failed or GUID-less scans still render zero-count feedback. */
+function createEmptyPriorityScanResult(
+  runtime: EventReferenceRuntime,
+  scriptPath: string,
+  reason: string
+): PriorityScanResult {
+  const diagnostics = createEmptyDiagnostics();
+  runtime.logger.debug(`UnityEvent priority scan for ${scriptPath} produced no index: ${reason}.`);
+  return {
+    index: createReferenceIndex([], [], diagnostics),
+    diagnostics,
+    reason
+  };
+}
+
+/** Creates visible scan-state CodeLens entries when no ready reference index is available yet. */
+function createScanStateCodeLenses(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument,
+  scriptPath: string,
+  marker: '-' | '0'
+): vscode.CodeLens[] {
+  const anchorRange = findCodeLensStatusAnchorRange(runtime.runtimeVscode, document);
+  const position = anchorRange.start;
+
+  return [
+    new runtime.runtimeVscode.CodeLens(anchorRange, {
+      title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: marker }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'serializedInstance',
+        scriptPath,
+        serializedInstances: marker === '0' ? [] : undefined,
+        position
+      } satisfies EventReferenceLocationTarget]
+    }),
+    new runtime.runtimeVscode.CodeLens(anchorRange, {
+      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: marker }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'method',
+        scriptPath,
+        eventReferences: marker === '0' ? [] : undefined,
+        position
+      } satisfies EventReferenceLocationTarget]
+    }),
+    new runtime.runtimeVscode.CodeLens(anchorRange, {
+      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: marker }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'fieldTarget',
+        scriptPath,
+        eventReferences: marker === '0' ? [] : undefined,
+        position
+      } satisfies EventReferenceLocationTarget]
+    })
+  ];
+}
+
+/** Picks a stable class-level range for scan state and zero-count summary CodeLens entries. */
+function findCodeLensStatusAnchorRange(
+  runtimeVscode: typeof vscode,
+  document: vscode.TextDocument
+): vscode.Range {
+  return findCSharpTypes(runtimeVscode, document)[0]?.range ??
+    new runtimeVscode.Range(new runtimeVscode.Position(0, 0), new runtimeVscode.Position(0, 0));
 }
 
 /** Resolves editor-class identifiers against the current C# file before falling back to the configured resolver. */
@@ -1014,7 +1265,7 @@ function createCodeLensesFromIndex(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument,
   index: UnitySerializedAssetReferenceIndex,
-  options: { embedReferences: boolean }
+  options: CodeLensRenderOptions
 ): vscode.CodeLens[] {
   const methods = findCSharpMethods(runtime.runtimeVscode, document);
   const fields = findUnityEventFields(runtime.runtimeVscode, document);
@@ -1102,6 +1353,50 @@ function createCodeLensesFromIndex(
           typeName: field.typeName,
           ...(options.embedReferences ? { eventReferences: fieldTargets } : {}),
           position: field.range.start
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+  }
+
+  if (options.includeZeroSummaryLenses) {
+    const anchorRange = findCodeLensStatusAnchorRange(runtime.runtimeVscode, document);
+    const position = anchorRange.start;
+
+    if (serializedInstanceLensCount === 0) {
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
+        title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: 0 }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'serializedInstance',
+          scriptPath,
+          serializedInstances: [],
+          position
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+
+    if (methodLensCount + fieldReferenceLensCount === 0) {
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: 0 }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'method',
+          scriptPath,
+          eventReferences: [],
+          position
+        } satisfies EventReferenceLocationTarget]
+      }));
+    }
+
+    if (fieldTargetLensCount === 0) {
+      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
+        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: 0 }),
+        command: 'unityPlus.showUnityEventReferenceLocations',
+        arguments: [{
+          kind: 'fieldTarget',
+          scriptPath,
+          eventReferences: [],
+          position
         } satisfies EventReferenceLocationTarget]
       }));
     }
@@ -2065,7 +2360,7 @@ async function findUnityEventCandidateAssetFiles(
     const candidates = new Map<string, vscode.Uri>();
     for (const text of eventReferenceCandidateTexts) {
       throwIfCancellationRequested(context.cancellationToken);
-      context.scanStatus?.update({ phase: `Searching Unity asset candidates: ${text}` });
+      context.scanStatus?.update({ label: 'Unity refs: project', phase: `Searching Unity asset candidates: ${text}` });
 
       for (const uri of await textFinder(runtime.metadataIndex.root, runtime.runtimeVscode, text)) {
         if (!supportedAssetExtensions.has(extname(uri.fsPath).toLowerCase())) {
@@ -2115,16 +2410,22 @@ function createUnityEventReferenceScanStatus(
     ? window.createStatusBarItem(runtimeVscode.StatusBarAlignment?.Left, 100)
     : undefined;
   let startedAt = 0;
+  let hideTimer: ReturnType<typeof setTimeout> | undefined;
 
   return {
-    start(phase) {
+    start(phase, label = 'Unity refs') {
       startedAt = Date.now();
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = undefined;
+      }
+
       if (!item) {
         return;
       }
 
-      item.text = '$(sync~spin) Unity refs: 0/?';
-      item.tooltip = formatScanStatusTooltip({ phase, elapsedMilliseconds: 0 });
+      item.text = `$(sync~spin) ${label}: 0/?`;
+      item.tooltip = formatScanStatusTooltip({ label, phase, elapsedMilliseconds: 0 });
       item.show();
     },
     update(status) {
@@ -2134,16 +2435,46 @@ function createUnityEventReferenceScanStatus(
 
       const scannedCount = status.scannedCount ?? 0;
       const totalCount = status.totalCount ?? status.candidateCount;
-      item.text = `$(sync~spin) Unity refs: ${scannedCount}/${totalCount ?? '?'}`;
+      const label = status.label ?? 'Unity refs';
+      const progressText = status.metadataGuidCount !== undefined
+        ? `${status.metadataGuidCount} GUIDs`
+        : `${scannedCount}/${totalCount ?? '?'}`;
+      item.text = `$(sync~spin) ${label}: ${progressText}`;
       item.tooltip = formatScanStatusTooltip({
         ...status,
         elapsedMilliseconds: status.elapsedMilliseconds ?? Date.now() - startedAt
       });
       item.show();
     },
-    finish(result, diagnostics) {
+    finish(result, diagnostics, status) {
       if (item) {
-        item.hide();
+        const label = status?.label ?? 'Unity refs';
+        const icon = result === 'completed'
+          ? '$(check)'
+          : result === 'canceled'
+            ? '$(circle-slash)'
+            : '$(warning)';
+        const references = status?.referenceCount ?? diagnostics?.resolvedReferenceCount ?? 0;
+        const instances = status?.instanceCount ?? diagnostics?.serializedInstanceCount ?? 0;
+        item.text = `${icon} ${label}: ${references} refs, ${instances} inst`;
+        item.tooltip = formatScanStatusTooltip({
+          label,
+          phase: status?.phase ?? result,
+          candidateCount: status?.candidateCount ?? diagnostics?.candidateAssetCount,
+          scannedCount: status?.scannedCount,
+          totalCount: status?.totalCount,
+          referenceCount: references,
+          instanceCount: instances,
+          metadataGuidCount: status?.metadataGuidCount,
+          scriptPath: status?.scriptPath,
+          scriptGuid: status?.scriptGuid,
+          elapsedMilliseconds: status?.elapsedMilliseconds ?? diagnostics?.elapsedMilliseconds ?? Date.now() - startedAt
+        });
+        item.show();
+        hideTimer = setTimeout(() => {
+          item.hide();
+          hideTimer = undefined;
+        }, scanStatusRetainMilliseconds);
       }
 
       if (diagnostics) {
@@ -2153,6 +2484,10 @@ function createUnityEventReferenceScanStatus(
       }
     },
     dispose() {
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+      }
+
       item?.dispose();
     }
   };
@@ -2161,7 +2496,11 @@ function createUnityEventReferenceScanStatus(
 /** Formats the status bar tooltip without allocating parser-side state. */
 function formatScanStatusTooltip(status: UnityEventReferenceScanStatus): string {
   const lines = [
+    `Scope: ${status.label ?? 'Unity refs'}`,
     `Phase: ${status.phase}`,
+    `Script: ${status.scriptPath ?? '-'}`,
+    `Script GUID: ${status.scriptGuid ?? '-'}`,
+    `Metadata GUIDs: ${status.metadataGuidCount ?? '?'}`,
     `Candidates: ${status.candidateCount ?? '?'}`,
     `Scanned: ${status.scannedCount ?? 0}/${status.totalCount ?? status.candidateCount ?? '?'}`,
     `References: ${status.referenceCount ?? 0}`,
