@@ -645,13 +645,12 @@ async function parseUnityEventReferencesCore(
       const eventOwnerTypeName = ownerIdentity.typeName;
       const resolvedTargetTypeName = targetTypeName || targetIdentity.typeName || '';
       let scriptPath = targetIdentity.scriptPath;
-      let scriptTypeName = targetIdentity.typeName;
+      let scriptTypeName = resolvedTargetTypeName || targetIdentity.typeName;
 
       if (!resolvedTargetTypeName) {
         diagnostics.skippedMissingTargetTypeNameCount += 1;
       } else if (!scriptPath) {
         scriptPath = await resolveCSharpType(resolvedTargetTypeName);
-        scriptTypeName = scriptTypeName ?? resolvedTargetTypeName;
       }
 
       if (scriptPath) {
@@ -1731,7 +1730,7 @@ function createReferenceIndex(
       const fieldKey = referenceKey(reference.eventScriptPath, reference.eventFieldName);
       appendMapValue(referencesByFieldKey, fieldKey, reference);
 
-      if (reference.scriptPath) {
+      if (isProjectUnityEventTargetReference(reference)) {
         addTargetFieldReference(targetReferencesByFieldKey, targetReferenceKeysByFieldKey, fieldKey, reference);
       }
     }
@@ -1740,7 +1739,7 @@ function createReferenceIndex(
       const fieldTypeKey = fieldTypeReferenceKey(reference.eventOwnerTypeName, reference.eventFieldName);
       appendMapValue(referencesByFieldTypeKey, fieldTypeKey, reference);
 
-      if (reference.scriptPath) {
+      if (isProjectUnityEventTargetReference(reference)) {
         addTargetFieldReference(targetReferencesByFieldTypeKey, targetReferenceKeysByFieldTypeKey, fieldTypeKey, reference);
       }
     }
@@ -1823,11 +1822,11 @@ function addTargetFieldReference(
   fieldKey: string,
   reference: UnityEventReference
 ): void {
-  if (!reference.scriptPath) {
+  const targetKey = unityEventTargetIdentityKey(reference);
+  if (!targetKey) {
     return;
   }
 
-  const targetKey = `${referenceKey(reference.scriptPath, reference.methodName)}#${reference.targetFileId ?? ''}`;
   const seenTargets = seenReferencesByFieldKey.get(fieldKey) ?? new Set<string>();
   if (seenTargets.has(targetKey)) {
     return;
@@ -1836,6 +1835,24 @@ function addTargetFieldReference(
   appendMapValue(referencesByFieldKey, fieldKey, reference);
   seenTargets.add(targetKey);
   seenReferencesByFieldKey.set(fieldKey, seenTargets);
+}
+
+/** Checks whether a YAML persistent call names a project C# target method. */
+function isProjectUnityEventTargetReference(reference: UnityEventReference): boolean {
+  const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
+  return !!targetTypeName &&
+    !!reference.methodName &&
+    !isUnityBuiltInTargetTypeName(targetTypeName);
+}
+
+/** Creates a method-level target identity from YAML type and method names. */
+function unityEventTargetIdentityKey(reference: UnityEventReference): string | undefined {
+  if (!isProjectUnityEventTargetReference(reference)) {
+    return undefined;
+  }
+
+  const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
+  return `${typeKey(targetTypeName ?? '')}#${reference.methodName}`;
 }
 
 function mergeUniqueReferences<T>(first: readonly T[] | undefined, second: readonly T[] | undefined): readonly T[] {
@@ -2392,13 +2409,22 @@ async function createTargetMethodLocations(
 ): Promise<vscode.Location[]> {
   const locations: vscode.Location[] = [];
   const seenLocations = new Set<string>();
+  let resolveCSharpType: ((fullTypeName: string) => Promise<string | undefined>) | undefined;
 
   for (const reference of references) {
-    if (!reference.scriptPath) {
+    const scriptPath = reference.scriptPath ?? await resolveTargetScriptPath(runtime, reference, async fullTypeName => {
+      if (!resolveCSharpType) {
+        resolveCSharpType = await createBuildScopedTypeResolver(runtime, { mode: 'background' });
+      }
+
+      return await resolveCSharpType(fullTypeName);
+    });
+
+    if (!scriptPath) {
       continue;
     }
 
-    const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
+    const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, scriptPath);
     try {
       const content = await runtime.readTextFile(uri, runtime.runtimeVscode);
       const position = findCSharpMethodPosition(runtime.runtimeVscode, content, reference.methodName);
@@ -2411,6 +2437,20 @@ async function createTargetMethodLocations(
   }
 
   return locations;
+}
+
+/** Resolves a YAML-declared target type to a C# script path only for click navigation. */
+async function resolveTargetScriptPath(
+  runtime: EventReferenceRuntime,
+  reference: UnityEventReference,
+  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
+): Promise<string | undefined> {
+  const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
+  if (!targetTypeName || isUnityBuiltInTargetTypeName(targetTypeName)) {
+    return undefined;
+  }
+
+  return await resolveCSharpType(targetTypeName);
 }
 
 /** Shows YAML-declared target methods using the first target declaration as the peek anchor. */
@@ -2958,6 +2998,14 @@ function countLineBreaks(text: string, startOffset: number, endOffset: number): 
 
 function simplifyAssemblyTypeName(typeName: string): string {
   return typeName.split(',')[0]?.trim() ?? typeName;
+}
+
+function isUnityBuiltInTargetTypeName(typeName: string): boolean {
+  const normalized = simplifyAssemblyTypeName(typeName);
+  return normalized === 'UnityEngine' ||
+    normalized.startsWith('UnityEngine.') ||
+    normalized === 'UnityEditor' ||
+    normalized.startsWith('UnityEditor.');
 }
 
 function parseEditorClassIdentifier(value: string | undefined): string | undefined {

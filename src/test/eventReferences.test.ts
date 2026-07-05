@@ -769,6 +769,52 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.statusBarItems[0].text.startsWith('$(check) Unity refs: current'), true);
   });
 
+  it('counts current-file priority targets from target assembly type without full metadata', async () => {
+    const runtime = createEventReferenceRuntime({
+      configuration: {
+        'eventReferences.autoScan': false
+      }
+    });
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      searchAssetFilesContainingText: async (_root, _runtimeVscode, texts) => ({
+        backend: 'ripgrep',
+        files: [createUri('/Project/Assets/Gate.prefab')],
+        searchCount: texts.length,
+        elapsedMilliseconds: 1
+      }),
+      readTextFile: async uri => uri.fsPath.endsWith('Gate.cs.meta')
+        ? `guid: ${gateGuid}`
+        : createUnresolvedTargetAssemblyYaml(2),
+      resolveCSharpType: async () => undefined
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+    const fieldReferenceLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+    assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
+    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+  });
+
   it('shows zero CodeLens feedback when the current script has no metadata GUID', async () => {
     let candidateSearches = 0;
     const output = createMemoryOutput();
@@ -1471,6 +1517,32 @@ describe('eventReferences', () => {
     assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
   });
 
+  it('counts field targets from target assembly type even when the target fileID cannot resolve', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => createUnresolvedTargetAssemblyYaml(2),
+      resolveCSharpType: async () => undefined
+    }, createMetadataIndex());
+    const targets = index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Gate');
+
+    assert.strictEqual(index.getFieldReferenceCount(gateScriptPath, 'OnCheckEnable', 'Gate'), 1);
+    assert.strictEqual(targets.length, 1);
+    assert.strictEqual(targets[0].targetTypeName, 'Amlos.Fixtures.IronDoor');
+    assert.strictEqual(targets[0].methodName, 'Open');
+    assert.strictEqual(targets[0].scriptPath, undefined);
+  });
+
   it('keeps method CodeLens when target script path resolves but target type name mismatches the C# namespace', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
@@ -1568,9 +1640,9 @@ describe('eventReferences', () => {
     const pastedTargetLens = controllerLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget' && lens.command.arguments[0].symbolName === 'OnBookPagePasted');
 
     assert.strictEqual(openFieldLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(openTargetLens?.command?.title, '2 UnityEvent targets');
+    assert.strictEqual(openTargetLens?.command?.title, '1 UnityEvent targets');
     assert.strictEqual(closeFieldLens?.command?.title, '2 UnityEvent references');
-    assert.strictEqual(closeTargetLens?.command?.title, '2 UnityEvent targets');
+    assert.strictEqual(closeTargetLens?.command?.title, '1 UnityEvent targets');
     assert.strictEqual(pastedFieldLens?.command?.title, '2 UnityEvent references');
     assert.strictEqual(pastedTargetLens?.command?.title, '0 UnityEvent targets');
 
@@ -2393,6 +2465,23 @@ function createMissingTargetTypeYaml(): string {
       '      - m_Target: {fileID: 460066068064628344}',
       '        m_MethodName: CanInteract',
       '        m_CallState: 2'
+  ].join('\n');
+}
+
+function createUnresolvedTargetAssemblyYaml(callState: number): string {
+  return [
+    '%YAML 1.1',
+    '--- !u!114 &460066068064628344',
+    'MonoBehaviour:',
+    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
+    '  OnCheckEnable:',
+    '    m_PersistentCalls:',
+    '      m_Calls:',
+    '      - m_Target: {fileID: 999999999}',
+    '        m_TargetAssemblyTypeName: Amlos.Fixtures.IronDoor, Amlos.Gameplay.Impl.Fixtures',
+    '        m_MethodName: Open',
+    '        m_Mode: 1',
+    `        m_CallState: ${callState}`
   ].join('\n');
 }
 
