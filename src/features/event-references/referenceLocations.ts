@@ -79,13 +79,20 @@ async function createTargetMethodLocations(
 
     const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
     try {
-      const position = await runtime.csharpLanguageService?.findTargetMethodPosition(
+      const positions = await runtime.csharpLanguageService?.findTargetMethodPosition(
         uri,
         reference.targetTypeName,
         reference.methodName
       );
-      if (position) {
-        appendUniqueLocation(locations, seenLocations, new runtime.runtimeVscode.Location(uri, toVscodePosition(runtime.runtimeVscode, position)));
+
+      if (positions?.length) {
+        for (const position of positions) {
+          appendUniqueLocation(
+            locations,
+            seenLocations,
+            new runtime.runtimeVscode.Location(uri, toVscodePosition(runtime.runtimeVscode, position))
+          );
+        }
       }
     } catch {
       // Missing or unreadable scripts cannot provide target locations, but other targets may still resolve.

@@ -2323,6 +2323,10 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
         }
 
         if (command === 'vscode.executeDocumentSymbolProvider') {
+          if (options.throwDocumentSymbols) {
+            throw new Error('document symbols unavailable');
+          }
+
           const [uri] = args as [vscode.Uri];
           const document = textDocuments.get(uri.fsPath);
           return document ? createFakeDocumentSymbols(runtime as unknown as typeof vscode, document) : [];
@@ -3110,7 +3114,7 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
       return undefined;
     },
     async findTargetMethodPosition() {
-      return undefined;
+      return [];
     },
     async findReferences() {
       return [];

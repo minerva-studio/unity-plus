@@ -136,7 +136,10 @@ function appendMapValue<T>(map: Map<string, T[]>, key: string, value: T): void {
   map.set(key, bucket);
 }
 
-/** Adds a target reference once per field and target method identity. */
+/** Adds a target reference once per field and target method identity.
+ *  When multiple references resolve to the same target method, the one with a
+ *  resolvable scriptPath is preferred so that downstream C# location lookups
+ *  have a concrete file to search. */
 function addTargetFieldReference(
   referencesByFieldKey: Map<string, UnityEventReference[]>,
   seenReferencesByFieldKey: Map<string, Set<string>>,
@@ -150,6 +153,21 @@ function addTargetFieldReference(
 
   const seenTargets = seenReferencesByFieldKey.get(fieldKey) ?? new Set<string>();
   if (seenTargets.has(targetKey)) {
+    // Same field already contributed a reference for this target method.
+    // Replace the stored reference when the new one carries a scriptPath that
+    // the existing representative lacks, so that downstream lookups always
+    // prefer the most-resolved YAML entry.
+    if (reference.scriptPath) {
+      const bucket = referencesByFieldKey.get(fieldKey);
+      if (bucket) {
+        const index = bucket.findIndex(
+          r => unityEventTargetIdentityKey(r) === targetKey && !r.scriptPath
+        );
+        if (index !== -1) {
+          bucket[index] = reference;
+        }
+      }
+    }
     return;
   }
 

@@ -58,7 +58,7 @@ export interface CSharpSymbolLanguageService extends CSharpLanguageService {
   findUnityEventFields(uri: vscode.Uri): Promise<CSharpFieldSymbolSnapshot[]>;
   findMethodAtPosition(uri: vscode.Uri, position: CSharpPosition): Promise<CSharpMethodSymbolSnapshot | undefined>;
   findUnityEventFieldAtPosition(uri: vscode.Uri, position: CSharpPosition): Promise<CSharpFieldSymbolSnapshot | undefined>;
-  findTargetMethodPosition(uri: vscode.Uri, targetTypeName: string, methodName: string): Promise<CSharpPosition | undefined>;
+  findTargetMethodPosition(uri: vscode.Uri, targetTypeName: string, methodName: string): Promise<CSharpPosition[]>;
 }
 
 interface TopLevelTypeSymbolCandidate {
@@ -121,7 +121,9 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
     },
     async findTargetMethodPosition(uri, targetTypeName, methodName) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
-      return findTargetMethodSymbolPosition(runtimeVscode, symbols, targetTypeName, methodName);
+      const positions: CSharpPosition[] = [];
+      collectTargetMethodSymbolPositions(runtimeVscode, symbols, targetTypeName, methodName, positions);
+      return positions;
     },
     async findReferences(uri, position) {
       const references = await runtimeVscode.commands.executeCommand<vscode.Location[]>(
@@ -261,55 +263,50 @@ function collectUnityEventFieldSymbols(
   }
 }
 
-/** Finds a target method symbol inside the type named by Unity YAML metadata. */
-function findTargetMethodSymbolPosition(
+/** Collects ALL matching method positions inside the type named by Unity YAML
+ *  metadata.  Avoiding the first overload / partial candidate prevents false
+ *  locations when the target type declares multiple same-name methods. */
+function collectTargetMethodSymbolPositions(
   runtimeVscode: typeof vscode,
   symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[],
   targetTypeName: string,
-  methodName: string
-): CSharpPosition | undefined {
+  methodName: string,
+  positions: CSharpPosition[]
+): void {
   for (const symbol of symbols) {
     if (isSymbolInformation(symbol)) {
       if (symbol.kind === runtimeVscode.SymbolKind.Method &&
         normalizeCSharpSymbolName(symbol.name) === methodName &&
         symbol.containerName &&
         matchesCSharpTypeName(symbol.containerName, targetTypeName)) {
-        return toCSharpPosition(symbol.location.range.start);
+        positions.push(toCSharpPosition(symbol.location.range.start));
       }
       continue;
     }
 
     if (getTopLevelTypeKind(runtimeVscode, symbol.kind) && matchesCSharpTypeName(symbol.name, targetTypeName)) {
-      return findMethodSymbolInType(runtimeVscode, symbol, methodName);
+      collectMethodSymbolsInType(runtimeVscode, symbol, methodName, positions);
+      continue; // Found the target type — don't recurse further into other types
     }
 
-    const childPosition = findTargetMethodSymbolPosition(runtimeVscode, symbol.children, targetTypeName, methodName);
-    if (childPosition) {
-      return childPosition;
-    }
+    collectTargetMethodSymbolPositions(runtimeVscode, symbol.children, targetTypeName, methodName, positions);
   }
-
-  return undefined;
 }
 
-/** Finds one method symbol inside a type symbol subtree. */
-function findMethodSymbolInType(
+/** Collects all method symbols with the given name inside a type symbol subtree. */
+function collectMethodSymbolsInType(
   runtimeVscode: typeof vscode,
   typeSymbol: vscode.DocumentSymbol,
-  methodName: string
-): CSharpPosition | undefined {
+  methodName: string,
+  positions: CSharpPosition[]
+): void {
   for (const child of typeSymbol.children) {
     if (child.kind === runtimeVscode.SymbolKind.Method && normalizeCSharpSymbolName(child.name) === methodName) {
-      return toCSharpPosition(child.selectionRange.start);
+      positions.push(toCSharpPosition(child.selectionRange.start));
     }
 
-    const nestedPosition = findMethodSymbolInType(runtimeVscode, child, methodName);
-    if (nestedPosition) {
-      return nestedPosition;
-    }
+    collectMethodSymbolsInType(runtimeVscode, child, methodName, positions);
   }
-
-  return undefined;
 }
 
 /** Checks symbol metadata for UnityEvent-typed fields. */
