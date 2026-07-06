@@ -227,6 +227,27 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
     assert.strictEqual(primaryType?.name, 'SymbolTest');
   });
 
+  test('findTypes and primary type work for an unopened .cs file', async () => {
+    const filePath = join(tempDir, 'UnopenedGate.cs');
+    writeFileSync(filePath, [
+      'namespace Amlos.Fixtures;',
+      'public class UnopenedGate',
+      '{',
+      '    public void Open() { }',
+      '}',
+    ].join('\n'), 'utf-8');
+    const uri = vscode.Uri.file(filePath);
+
+    const types = await service.findTypes(uri);
+    const primaryType = await service.getPrimaryTopLevelType(uri);
+
+    assert.deepStrictEqual(types.map(type => type.fullName), ['Amlos.Fixtures.UnopenedGate']);
+    assert.strictEqual(primaryType?.name, 'UnopenedGate');
+    assert.strictEqual(primaryType?.namespace, 'Amlos.Fixtures');
+    assert.strictEqual(primaryType?.nameRange?.start.line, 1);
+    assert.strictEqual(primaryType?.nameRange?.start.character, 'public class '.length);
+  });
+
   test('findReferences returns an array (may be empty)', async () => {
     const filePath = join(tempDir, 'RefTest.cs');
     writeFileSync(filePath, [
@@ -262,8 +283,10 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
     const methods = await service.findMethods(uri);
     const targets = await service.findTargetMethodPosition(uri, 'Amlos.Control.Interact.Interactable', 'Interact');
 
+    assert.deepStrictEqual(types.map(type => type.fullName), ['Amlos.Control.Interact.Interactable']);
     assert.strictEqual(types[0].range.start.line, 3);
     assert.strictEqual(types[0].range.start.character, lines[3].indexOf('Interactable'));
+    assert.strictEqual(types[0].range.end.character, lines[3].indexOf('Interactable') + 'Interactable'.length);
     assert.strictEqual(fields.find(field => field.name === 'OnCheckEnable')?.range.start.character, lines[5].indexOf('OnCheckEnable'));
     assert.strictEqual(fields.find(field => field.name === 'OnHighlighting')?.range.start.character, lines[6].indexOf('OnHighlighting'));
     assert.strictEqual(methods.find(method => method.name === 'Interact')?.range.start.character, lines[7].indexOf('Interact'));
@@ -271,5 +294,14 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
       line: 7,
       character: lines[7].indexOf('Interact')
     });
+  });
+
+  test('throws when neither document symbols nor source text are available', async () => {
+    const uri = vscode.Uri.file(join(tempDir, 'MissingFile.cs'));
+
+    await assert.rejects(
+      async () => await service.findTypes(uri),
+      /C# symbols and source text are unavailable/
+    );
   });
 });
