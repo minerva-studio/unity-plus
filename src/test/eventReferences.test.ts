@@ -177,6 +177,31 @@ describe('eventReferences', () => {
     assert.strictEqual(diagnostics.skippedMissingTargetTypeNameCount, 1);
   });
 
+  it('fails the UnityEvent index when a candidate asset cannot be read', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    await assert.rejects(
+      async () => await buildUnityEventReferenceIndex({
+        runtimeVscode: runtime.runtime,
+        logger: createTestLogger(),
+        metadataIndex: lazyIndex,
+        getCacheVersion: () => 0,
+        findAssetFiles: async () => [createUri('/Project/Assets/Broken.prefab')],
+        findCSharpFiles: async () => [],
+        readTextFile: async () => {
+          throw new Error('denied');
+        },
+        resolveCSharpType: async typeName => createTypeResolver()(typeName)
+      }, createMetadataIndex()),
+      /Could not scan UnityEvent references in .*Broken\.prefab: denied/
+    );
+  });
+
   it('indexes MonoBehaviour serialized instances from prefab and scene files', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -950,7 +975,7 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
-  it('shows zero CodeLens feedback when the current script has no metadata GUID', async () => {
+  it('rejects CodeLens feedback when the current script has no metadata GUID', async () => {
     let candidateSearches = 0;
     const output = createMemoryOutput();
     const runtime = createEventReferenceRuntime({
@@ -985,7 +1010,7 @@ describe('eventReferences', () => {
       readTextFile: async () => ''
     });
 
-    const document = createTextDocument('/Project/Assets/Unknown.cs', 'public class Unknown {}');
+    const document = createTextDocument('/Project/Assets/Gate.cs', 'public class Gate {}');
     const pendingLenses = await runtime.provideCodeLenses(document);
     assert.deepStrictEqual(pendingLenses.map(lens => lens.command?.title), [
       '- Unity serialized instances'
@@ -993,11 +1018,10 @@ describe('eventReferences', () => {
     assert.strictEqual(pendingLenses.every(lens => lens.range.start.line === 0 && lens.range.start.character === 13), true);
     await runtime.waitForCodeLensChange();
 
-    const readyLenses = await runtime.provideCodeLenses(document);
-    assert.deepStrictEqual(readyLenses.map(lens => lens.command?.title), [
-      '0 Unity serialized instances'
-    ]);
-    assert.strictEqual(readyLenses.every(lens => lens.range.start.line === 0 && lens.range.start.character === 13), true);
+    await assert.rejects(
+      async () => await runtime.provideCodeLenses(document),
+      /UnityEvent priority scan failed/
+    );
     assert.strictEqual(candidateSearches, 0);
     assert.strictEqual(output.lines.some(line => line.includes('script GUID not found in metadata index')), true);
   });
@@ -1019,7 +1043,7 @@ describe('eventReferences', () => {
       runtimeVscode: runtime.runtime,
       metadataIndex: lazyIndex,
       isEnabled: () => true,
-      readTextFile: async () => ''
+      readTextFile: async uri => uri.fsPath.endsWith('Gate.cs.meta') ? `guid: ${gateGuid}` : ''
     });
 
     token.cancel();
@@ -1045,13 +1069,13 @@ describe('eventReferences', () => {
       logger: createTestLogger(),
       createIndex: () => createMetadataIndex()
     });
-    const document = createTextDocument('/Project/Assets/Unknown.cs', 'public class Unknown {}');
+    const document = createTextDocument('/Project/Assets/Gate.cs', 'public class Gate {}');
 
     registerEventReferenceFeature(createTestLogger(), {
       runtimeVscode: runtime.runtime,
       metadataIndex: lazyIndex,
       isEnabled: () => true,
-      readTextFile: async () => ''
+      readTextFile: async uri => uri.fsPath.endsWith('Gate.cs.meta') ? `guid: ${gateGuid}` : ''
     });
 
     assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
@@ -1064,7 +1088,7 @@ describe('eventReferences', () => {
     ]);
   });
 
-  it('keeps CodeLens placeholders when C# symbols and source text are unavailable', async () => {
+  it('rejects CodeLens feedback when C# symbols and source text are unavailable', async () => {
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
@@ -1089,7 +1113,10 @@ describe('eventReferences', () => {
     assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), []);
     await runtime.waitForCodeLensChange();
 
-    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), []);
+    await assert.rejects(
+      async () => await runtime.provideCodeLenses(document),
+      /UnityEvent priority scan failed/
+    );
   });
 
   it('reuses one in-flight priority scan for repeated CodeLens requests on the same script', async () => {
@@ -2157,6 +2184,35 @@ describe('eventReferences', () => {
     assert.strictEqual(output.lines.some(line =>
       line.includes('1 C# file(s), 0 C# server type(s), 1 source fallback type(s), 2 resolvable type key(s).')
     ), true);
+  });
+
+  it('fails the UnityEvent index when source fallback C# files cannot be read', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    await assert.rejects(
+      async () => await buildUnityEventReferenceIndex({
+        runtimeVscode: runtime.runtime,
+        logger: createTestLogger(),
+        metadataIndex: lazyIndex,
+        getCacheVersion: () => 0,
+        findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+        findCSharpFiles: async () => [createUri('/Project/Assets/Scripts/Gate.cs')],
+        readTextFile: async uri => {
+          if (uri.fsPath.endsWith('.cs')) {
+            throw new Error('source denied');
+          }
+
+          return createPrefabYaml(2);
+        },
+        csharpLanguageService: createFakeCSharpSymbolLanguageService({})
+      }, createMetadataIndex()),
+      /Could not scan UnityEvent references in .*Gate\.prefab: Could not read C# source .*source denied/
+    );
   });
 
   it('extracts source type names from real Unity C# declaration shapes', () => {

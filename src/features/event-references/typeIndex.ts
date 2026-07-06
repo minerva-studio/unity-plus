@@ -2,7 +2,7 @@ import type { UnityEventReferenceBuildContext } from './model';
 import type { CSharpTypeIndex, EventReferenceRuntime } from './runtime';
 import { backgroundScanYieldEvery, defaultAssetScanConcurrency, progressReportInterval, scanYieldEvery } from './runtime';
 import { getBackgroundScanConcurrency } from './settings';
-import { isCancellationRequested, runWithConcurrency, shortTypeName, throwIfCancellationRequested, toProjectPath, UnityEventReferenceScanCanceledError } from './utils';
+import { errorMessage, isCancellationRequested, runWithConcurrency, shortTypeName, throwIfCancellationRequested, toProjectPath, UnityEventReferenceScanCanceledError } from './utils';
 
 interface SourceTypeCandidate {
   name: string;
@@ -128,8 +128,10 @@ async function findSourceTypesForIndex(
 
   try {
     source = await runtime.readTextFile(file, runtime.runtimeVscode);
-  } catch {
-    return [];
+  } catch (error) {
+    // Source parsing is the final type-index path after symbol lookup fails;
+    // failing to read it must fail the scan instead of erasing type matches.
+    throw new Error(`Could not read C# source for UnityEvent type index ${file.fsPath}: ${errorMessage(error)}`);
   }
 
   return findSourceTypes(source);

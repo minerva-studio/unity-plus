@@ -27,6 +27,10 @@ export function createEventReferenceProvider(
       try {
         const index = controller.getReadyIndex();
         if (!index) {
+          if (controller.getStatus() === 'failed') {
+            throw new Error('UnityEvent reference index build failed.');
+          }
+
           if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
             controller.scheduleBuild();
             return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
@@ -80,8 +84,8 @@ export function createEventReferenceProvider(
             });
           }
 
-          if (priorityScan.status === 'failed' || !priorityScan.result) {
-            return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
+          if (priorityScan.status === 'failed') {
+            throw new Error(`UnityEvent priority scan failed for ${scriptPath}.`);
           }
 
           return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
@@ -92,9 +96,9 @@ export function createEventReferenceProvider(
           includeZeroSummaryLenses: true
         });
       } catch (error) {
-        // CodeLens must stay visible even when indexing or symbol providers fail.
-        runtime.logger.warn(`UnityEvent CodeLens fallback for ${scriptPath}: ${errorMessage(error)}`);
-        return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
+        runtime.logger.warn(`UnityEvent CodeLens failed for ${scriptPath}: ${errorMessage(error)}`);
+        // Critical scan and symbol failures must stay visible to VS Code instead of becoming placeholder lenses.
+        throw error;
       }
     },
     async provideHover(document, position, token) {

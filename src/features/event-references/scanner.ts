@@ -90,7 +90,9 @@ export async function buildUnityEventReferenceIndex(
         throw error;
       }
 
-      runtime.logger.warn(`Could not scan UnityEvent references in ${assetUri.fsPath}: ${errorMessage(error)}`);
+      // Asset read and YAML parse failures make the scan incomplete, so the UI
+      // must report a failed scan instead of silently showing fewer references.
+      throw new Error(`Could not scan UnityEvent references in ${assetUri.fsPath}: ${errorMessage(error)}`);
     }
   }, context.mode === 'background' ? getBackgroundScanConcurrency(runtime.runtimeVscode) : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,

@@ -30,8 +30,8 @@ export async function buildPriorityReferenceIndex(
   const scriptGuid = currentScriptMetadata.scriptGuid;
   const diagnostics = createEmptyDiagnostics();
 
-  if (!scriptGuid || isCancellationRequested(token)) {
-    const reason = scriptGuid ? 'scan canceled' : 'script GUID not found in metadata index';
+  if (isCancellationRequested(token)) {
+    const reason = 'scan canceled';
     diagnostics.elapsedMilliseconds = Date.now() - startedAt;
     runtime.logger.warn(`UnityEvent priority scan for ${scriptPath}: ${reason}.`);
     runtime.scanStatus?.finish('completed', diagnostics, {
@@ -48,6 +48,22 @@ export async function buildPriorityReferenceIndex(
       diagnostics,
       reason
     };
+  }
+
+  if (!scriptGuid) {
+    const reason = 'script GUID not found in metadata index';
+    diagnostics.elapsedMilliseconds = Date.now() - startedAt;
+    runtime.scanStatus?.finish('failed', diagnostics, {
+      label: 'Unity refs: current',
+      phase: reason,
+      scriptPath,
+      metadataGuidCount,
+      referenceCount: 0,
+      instanceCount: 0,
+      elapsedMilliseconds: diagnostics.elapsedMilliseconds
+    });
+    // Without a GUID the priority scan cannot prove that zero references exist.
+    throw new Error(`UnityEvent priority scan for ${scriptPath}: ${reason}.`);
   }
 
   runtime.scanStatus?.start('Searching current script references', 'Unity refs: current');
