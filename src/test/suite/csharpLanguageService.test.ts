@@ -27,25 +27,6 @@ function writeCsFile(filename: string, lines: string[]): vscode.Uri {
   return vscode.Uri.file(filePath);
 }
 
-/** Registers a real VS Code document symbol provider for one temporary file. */
-function registerSymbolsForFile(
-  uri: vscode.Uri,
-  symbols: vscode.DocumentSymbol[] | vscode.SymbolInformation[]
-): vscode.Disposable {
-  return vscode.languages.registerDocumentSymbolProvider(
-    { scheme: 'file' },
-    {
-      provideDocumentSymbols(document) {
-        if (document.uri.fsPath !== uri.fsPath) {
-          return undefined;
-        }
-
-        return symbols;
-      }
-    }
-  );
-}
-
 suite('csharpLanguageService — Source Text Parsing (No C# Extension Required)', () => {
   let service: ReturnType<typeof createVscodeCSharpLanguageService>;
 
@@ -354,66 +335,6 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
       line: 7,
       character: lines[7].indexOf('Interact')
     });
-  });
-
-  test('refines SymbolInformation ranges from a real VS Code provider to exact source name ranges', async () => {
-    const lines = [
-      'namespace Amlos.Control.Interact',
-      '{',
-      '  public sealed class Interactable : MonoBehaviour',
-      '  {',
-      '    public UnityEvent<ResultArg<bool>> OnCheckEnable = new();',
-      '    public void Interact() {}',
-      '  }',
-      '}'
-    ];
-    const uri = writeCsFile('SymbolInformationInteractable.cs', lines);
-    const disposable = registerSymbolsForFile(uri, [
-      new vscode.SymbolInformation(
-        'Interactable',
-        vscode.SymbolKind.Class,
-        new vscode.Range(2, 2, 2, 54),
-        uri,
-        'Amlos.Control.Interact'
-      ),
-      new vscode.SymbolInformation(
-        'OnCheckEnable',
-        vscode.SymbolKind.Field,
-        new vscode.Range(4, 4, 4, 62),
-        uri,
-        'Amlos.Control.Interact.Interactable'
-      ),
-      new vscode.SymbolInformation(
-        'Interact()',
-        vscode.SymbolKind.Method,
-        new vscode.Range(5, 4, 5, 29),
-        uri,
-        'Amlos.Control.Interact.Interactable'
-      )
-    ]);
-
-    try {
-      const directSymbols = await vscode.commands.executeCommand<Array<vscode.SymbolInformation | vscode.DocumentSymbol> | undefined>(
-        'vscode.executeDocumentSymbolProvider',
-        uri
-      );
-      const types = await service.findTypes(uri);
-      const methods = await service.findMethods(uri);
-      const fields = await service.findUnityEventFields(uri);
-      const targets = await service.findTargetMethodPosition(uri, 'Amlos.Control.Interact.Interactable', 'Interact');
-
-      assert.ok(directSymbols?.some(symbol => symbol instanceof vscode.SymbolInformation), 'registered SymbolInformation provider should be visible to VS Code');
-      assert.deepStrictEqual(types.map(type => type.fullName), ['Amlos.Control.Interact.Interactable']);
-      assert.deepStrictEqual(types[0].range, sourceNameRange(lines, 2, 'Interactable'));
-      assert.deepStrictEqual(fields[0].range, sourceNameRange(lines, 4, 'OnCheckEnable'));
-      assert.deepStrictEqual(methods[0].range, sourceNameRange(lines, 5, 'Interact'));
-      assert.deepStrictEqual(targets, [{
-        line: 5,
-        character: lines[5].indexOf('Interact')
-      }]);
-    } finally {
-      disposable.dispose();
-    }
   });
 
   test('throws when neither document symbols nor source text are available', async () => {

@@ -90,7 +90,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
   return {
     async getPrimaryTopLevelType(uri) {
       const providerType = await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
-      if (providerType !== 'fallback') {
+      if (providerType && providerType !== 'fallback') {
         return providerType;
       }
 
@@ -105,6 +105,10 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const methods: CSharpMethodSymbolSnapshot[] = [];
       collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
+      if (methods.length === 0) {
+        return await findSourceMethodsOrThrow(runtimeVscode, uri);
+      }
+
       return await refineMethodRangesFromSource(runtimeVscode, uri, methods);
     },
     async findTypes(uri) {
@@ -115,6 +119,10 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const types: CSharpTypeSymbolSnapshot[] = [];
       collectCSharpTypeSymbols(runtimeVscode, symbols, [], types);
+      if (types.length === 0) {
+        return await findSourceTypesOrThrow(runtimeVscode, uri);
+      }
+
       return await refineTypeRangesFromSource(runtimeVscode, uri, types);
     },
     async findUnityEventFields(uri) {
@@ -148,6 +156,10 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
       const sourcePositions = await tryFindSourceTargetMethodPositions(runtimeVscode, uri, targetTypeName, methodName);
       if (sourcePositions?.length) {
         return sourcePositions;
+      }
+
+      if (positions.length === 0) {
+        return await findSourceTargetMethodPositionsOrThrow(runtimeVscode, uri, targetTypeName, methodName);
       }
 
       return positions;

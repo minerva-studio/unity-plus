@@ -1,60 +1,63 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { buildUnityEventReferenceIndex } from '../../features/event-references/eventReferences';
+import { findDefaultAssetFiles, findDefaultCSharpFiles } from '../../features/event-references/assetDiscovery';
+import { createCodeLensesFromIndex } from '../../features/event-references/codeLens';
+import { showReferenceLocations } from '../../features/event-references/referenceLocations';
+import type { EventReferenceLocationTarget, EventReferenceRuntime } from '../../features/event-references/runtime';
+import { readDefaultTextFile } from '../../features/event-references/utils';
 import { createVscodeCSharpLanguageService } from '../../unity/csharpLanguageService';
-import { createLazyUnityMetadataIndex, createUnityMetadataIndex } from '../../unity/metadataIndex';
+import { createLazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityPlusLogger } from '../../unity/logger';
 
-const gateGuid = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-const projectRoot = 'unity-plus-real-unity-event-';
-
-let tempDir: string;
+let fixtureRoot: vscode.Uri;
 
 suite('eventReferences - Real Unity Project Shape', () => {
-  suiteSetup(() => {
-    tempDir = createUnityProjectFixture();
+  suiteSetup(async function () {
+    this.timeout(120_000);
+    fixtureRoot = getUnityFixtureRoot();
+    await configureCSharpSolution(fixtureRoot);
+    await waitForUnityFixtureDiscovery(fixtureRoot);
+    await waitForCSharpLanguageServiceDeclarations(
+      vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs')),
+      ['type:Interactable', 'field:OnCheckEnable']
+    );
+    await waitForCSharpLanguageServiceDeclarations(
+      vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')),
+      ['type:Cannon', 'method:Fire']
+    );
   });
 
-  suiteTeardown(() => {
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  test('resolves UnityEvent target methods from real .meta, prefab YAML, and C# source', async () => {
-    const root = vscode.Uri.file(tempDir);
-    const gateScript = vscode.Uri.file(join(tempDir, 'Assets', 'Scripts', 'Gate.cs'));
-    const gatePrefab = vscode.Uri.file(join(tempDir, 'Assets', 'Prefabs', 'Gate.prefab'));
+  test('resolves UnityEvent target methods through default workspace scans', async function () {
+    this.timeout(120_000);
     const metadataIndex = createLazyUnityMetadataIndex({
-      root,
-      logger: createMemoryLogger(),
-      createIndex: options => createUnityMetadataIndex({
-        ...options,
-        findMetaFiles: async () => [
-          vscode.Uri.file(join(tempDir, 'Assets', 'Scripts', 'Gate.cs.meta'))
-        ],
-        watchMetaFiles: () => createDisposable()
-      })
+      root: fixtureRoot,
+      logger: createMemoryLogger()
     });
+
     try {
-      const index = await buildUnityEventReferenceIndex({
-        runtimeVscode: vscode,
-        logger: createMemoryLogger(),
-        metadataIndex,
-        getCacheVersion: () => 0,
-        findAssetFiles: async () => [gatePrefab],
-        findCSharpFiles: async () => [gateScript],
-        readTextFile: async uri => new TextDecoder('utf-8').decode(await vscode.workspace.fs.readFile(uri)),
-        csharpLanguageService: createVscodeCSharpLanguageService(vscode)
-      }, await metadataIndex.getOrBuild(), { mode: 'interactive' });
+      const runtime = createRealEventReferenceRuntime(metadataIndex);
+      const index = await buildUnityEventReferenceIndex(runtime, await metadataIndex.getOrBuild(), { mode: 'interactive' });
 
       const diagnostics = index.getDiagnostics();
-      const methodReferences = index.getReferences('Assets/Scripts/Gate.cs', 'CanInteract', 'Amlos.Fixtures.Gate');
-      const fieldReferences = index.getFieldReferences('Assets/Scripts/Gate.cs', 'OnCheckEnable', 'Amlos.Fixtures.Gate');
-      const fieldTargets = index.getFieldTargets('Assets/Scripts/Gate.cs', 'OnCheckEnable', 'Amlos.Fixtures.Gate');
+      const methodReferences = index.getReferences('Assets/Scripts/Cannon.cs', 'Fire', 'Amlos.Fixtures.Cannon');
+      const fieldReferences = index.getFieldReferences('Assets/Scripts/Interactable.cs', 'OnCheckEnable', 'Amlos.Control.Interact.Interactable');
+      const fieldTargets = index.getFieldTargets('Assets/Scripts/Interactable.cs', 'OnCheckEnable', 'Amlos.Control.Interact.Interactable');
+      const interactableDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs')));
+      const cannonDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
+      const interactableLenses = await createCodeLensesFromIndex(runtime, interactableDocument, index, {
+        embedReferences: false,
+        includeZeroSummaryLenses: true
+      });
+      const cannonLenses = await createCodeLensesFromIndex(runtime, cannonDocument, index, {
+        embedReferences: false,
+        includeZeroSummaryLenses: true
+      });
+      const serializedInstanceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance');
+      const fieldReferenceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+      const fieldTargetLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+      const methodLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
 
       assert.strictEqual(diagnostics.persistentCallCount, 1);
       assert.strictEqual(diagnostics.resolvedByTargetTypeNameCount, 1);
@@ -62,93 +65,148 @@ suite('eventReferences - Real Unity Project Shape', () => {
       assert.strictEqual(methodReferences.length, 1);
       assert.strictEqual(fieldReferences.length, 1);
       assert.strictEqual(fieldTargets.length, 1);
-      assert.strictEqual(fieldTargets[0].scriptPath, 'Assets/Scripts/Gate.cs');
+      assert.strictEqual(fieldTargets[0].scriptPath, 'Assets/Scripts/Cannon.cs');
+      assert.strictEqual(serializedInstanceLens?.command?.title, '1 Unity serialized instances');
+      assert.strictEqual(serializedInstanceLens?.range.start.line, 5);
+      assert.strictEqual(serializedInstanceLens?.range.start.character, 24);
+      assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
+      assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+      assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
+      assert.strictEqual(methodLens?.range.start.line, 6);
+      assert.strictEqual(methodLens?.range.start.character, 16);
+
+      const commandRecorder = createShowReferencesRecorder();
+      await showReferenceLocations(
+        { ...runtime, runtimeVscode: commandRecorder.runtimeVscode },
+        index,
+        fieldReferenceLens?.command?.arguments?.[0] as EventReferenceLocationTarget,
+        () => undefined,
+        () => true
+      );
+      await showReferenceLocations(
+        { ...runtime, runtimeVscode: commandRecorder.runtimeVscode },
+        index,
+        fieldTargetLens?.command?.arguments?.[0] as EventReferenceLocationTarget,
+        () => undefined,
+        () => true
+      );
+
+      assert.strictEqual(commandRecorder.calls.length, 2);
+      assert.strictEqual(normalizeFsPath(commandRecorder.calls[0].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Prefabs', 'Gate.prefab')));
+      assert.strictEqual(normalizeFsPath(commandRecorder.calls[1].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
+      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.line, 6);
+      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.character, 16);
     } finally {
       metadataIndex.dispose();
     }
   });
 });
 
-/** Creates a minimal on-disk Unity project with script metadata and prefab YAML. */
-function createUnityProjectFixture(): string {
-  const root = mkProjectDir();
-
-  mkdirSync(join(root, 'Assets', 'Scripts'), { recursive: true });
-  mkdirSync(join(root, 'Assets', 'Prefabs'), { recursive: true });
-  mkdirSync(join(root, 'ProjectSettings'), { recursive: true });
-  mkdirSync(join(root, 'Packages'), { recursive: true });
-
-  writeFileSync(join(root, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 2022.3.0f1\n', 'utf-8');
-  writeFileSync(join(root, 'Packages', 'manifest.json'), '{"dependencies":{}}\n', 'utf-8');
-  writeFileSync(join(root, 'Assets', 'Scripts', 'Gate.cs'), createGateScript(), 'utf-8');
-  writeFileSync(join(root, 'Assets', 'Scripts', 'Gate.cs.meta'), createMonoScriptMeta(gateGuid), 'utf-8');
-  writeFileSync(join(root, 'Assets', 'Prefabs', 'Gate.prefab'), createGatePrefab(), 'utf-8');
-
-  return root;
+/** Returns the Unity project folder opened by the integration test runner. */
+function getUnityFixtureRoot(): vscode.Uri {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(folder, 'integration tests must open the Unity fixture workspace');
+  return folder.uri;
 }
 
-/** Allocates a clean temporary directory for a Unity project fixture. */
-function mkProjectDir(): string {
-  const root = join(tmpdir(), `${projectRoot}${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  mkdirSync(root, { recursive: true });
-  return root;
+/** Points the real C# extension at the generated solution before symbol queries start. */
+async function configureCSharpSolution(root: vscode.Uri): Promise<void> {
+  const solutionPath = join(root.fsPath, 'UnityEventFixture.sln');
+  await vscode.workspace.getConfiguration('dotnet').update('defaultSolution', solutionPath, vscode.ConfigurationTarget.Global);
+  await vscode.workspace.openTextDocument(vscode.Uri.file(solutionPath));
+  await vscode.extensions.getExtension('ms-dotnettools.csdevkit')?.activate();
+  await vscode.extensions.getExtension('ms-dotnettools.csharp')?.activate();
+
+  try {
+    // The C# extension reads dotnet.defaultSolution when the language server starts.
+    await vscode.commands.executeCommand('dotnet.restartServer');
+  } catch {
+    // Some extension versions only register restart after activation completes.
+  }
 }
 
-/** Creates a C# script containing both the UnityEvent field and target method. */
-function createGateScript(): string {
-  return [
-    'using UnityEngine;',
-    'using UnityEngine.Events;',
-    '',
-    'namespace Amlos.Fixtures',
-    '{',
-    '    public sealed class Gate : MonoBehaviour',
-    '    {',
-    '        public UnityEvent OnCheckEnable = new();',
-    '',
-    '        public void CanInteract()',
-    '        {',
-    '        }',
-    '    }',
-    '}'
-  ].join('\n');
+/** Normalizes Windows drive casing so URI round-trips do not make assertions flaky. */
+function normalizeFsPath(path: string): string {
+  return path.replace(/\\/g, '/').toLowerCase();
 }
 
-/** Creates a Unity MonoScript .meta file with a stable script GUID. */
-function createMonoScriptMeta(guid: string): string {
-  return [
-    'fileFormatVersion: 2',
-    `guid: ${guid}`,
-    'MonoImporter:',
-    '  externalObjects: {}',
-    '  serializedVersion: 2',
-    '  defaultReferences: []'
-  ].join('\n');
+/** Waits until VS Code workspace discovery can see the real Unity fixture files. */
+async function waitForUnityFixtureDiscovery(root: vscode.Uri): Promise<void> {
+  const timeoutAt = Date.now() + 10_000;
+  while (Date.now() < timeoutAt) {
+    const assetFiles = await findDefaultAssetFiles(root, vscode);
+    const csharpFiles = await findDefaultCSharpFiles(root, vscode);
+    const hasPrefab = assetFiles.some(uri => normalizeFsPath(uri.fsPath).endsWith('/assets/prefabs/gate.prefab'));
+    const hasScripts = ['interactable.cs', 'cannon.cs'].every(file =>
+      csharpFiles.some(uri => normalizeFsPath(uri.fsPath).endsWith(`/assets/scripts/${file}`))
+    );
+
+    if (hasPrefab && hasScripts) {
+      return;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  assert.fail('VS Code workspace discovery did not find the Unity fixture prefab and C# scripts.');
 }
 
-/** Creates prefab YAML with a persistent UnityEvent call targeting the same MonoBehaviour. */
-function createGatePrefab(): string {
-  return [
-    '%YAML 1.1',
-    '%TAG !u! tag:unity3d.com,2011:',
-    '--- !u!1 &1000',
-    'GameObject:',
-    '  m_Name: North Gate',
-    '--- !u!114 &460066068064628344',
-    'MonoBehaviour:',
-    '  m_GameObject: {fileID: 1000}',
-    `  m_Script: {fileID: 11500000, guid: ${gateGuid}, type: 3}`,
-    '  OnCheckEnable:',
-    '    m_PersistentCalls:',
-    '      m_Calls:',
-    '      - m_Target: {fileID: 460066068064628344}',
-    '        m_TargetAssemblyTypeName: Amlos.Fixtures.Gate, Amlos.Gameplay.Core',
-    '        m_MethodName: CanInteract',
-    '        m_Mode: 0',
-    '        m_Arguments:',
-    '          m_ObjectArgument: {fileID: 0}',
-    '        m_CallState: 2'
-  ].join('\n');
+/** Waits until the production C# service can report expected declarations. */
+async function waitForCSharpLanguageServiceDeclarations(uri: vscode.Uri, expectedDeclarations: readonly string[]): Promise<void> {
+  const timeoutAt = Date.now() + 60_000;
+  const document = await vscode.workspace.openTextDocument(uri);
+  await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+  const csharpLanguageService = createVscodeCSharpLanguageService(vscode);
+  let lastDeclarations: string[] = [];
+  let lastProviderNames: string[] = [];
+
+  while (Date.now() < timeoutAt) {
+    const symbols = await vscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined>(
+      'vscode.executeDocumentSymbolProvider',
+      document.uri
+    );
+    lastProviderNames = flattenSymbolNames(symbols ?? []);
+    const [types, fields, methods] = await Promise.all([
+      csharpLanguageService.findTypes(document.uri),
+      csharpLanguageService.findUnityEventFields(document.uri),
+      csharpLanguageService.findMethods(document.uri)
+    ]);
+    lastDeclarations = [
+      ...types.map(type => `type:${type.name}`),
+      ...fields.map(field => `field:${field.name}`),
+      ...methods.map(method => `method:${method.name}`)
+    ];
+    const declarations = new Set(lastDeclarations);
+    if (expectedDeclarations.every(name => declarations.has(name))) {
+      return;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  assert.fail(
+    `C# language service did not include ${expectedDeclarations.join(', ')} for ${uri.fsPath}. ` +
+    `Last declarations: ${lastDeclarations.join(', ') || '<none>'}. ` +
+    `Last raw provider symbols: ${lastProviderNames.join(', ') || '<none>'}.`
+  );
+}
+
+/** Flattens VS Code document symbols into normalized declaration names. */
+function flattenSymbolNames(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): string[] {
+  const names: string[] = [];
+  for (const symbol of symbols) {
+    names.push(normalizeSymbolName(symbol.name));
+    if (symbol instanceof vscode.DocumentSymbol) {
+      names.push(...flattenSymbolNames(symbol.children));
+    }
+  }
+
+  return names;
+}
+
+/** Removes language-server display suffixes such as method parameter lists. */
+function normalizeSymbolName(name: string): string {
+  return name.replace(/\s*\(.*$/, '');
 }
 
 /** Creates a test logger that records messages without touching the UI. */
@@ -162,7 +220,44 @@ function createMemoryLogger(): UnityPlusLogger {
   };
 }
 
-/** Creates a disposable for test-only services that should not keep file watchers alive. */
-function createDisposable(): vscode.Disposable {
-  return { dispose: () => undefined };
+/** Creates the production UnityEvent runtime surface while keeping the real VS Code C# service. */
+function createRealEventReferenceRuntime(metadataIndex: EventReferenceRuntime['metadataIndex']): EventReferenceRuntime {
+  return {
+    runtimeVscode: vscode,
+    logger: createMemoryLogger(),
+    metadataIndex,
+    findAssetFiles: findDefaultAssetFiles,
+    findCSharpFiles: findDefaultCSharpFiles,
+    readTextFile: readDefaultTextFile,
+    getCacheVersion: () => 0,
+    csharpLanguageService: createVscodeCSharpLanguageService(vscode)
+  };
+}
+
+interface ShowReferencesCall {
+  uri: vscode.Uri;
+  position: vscode.Position;
+  locations: vscode.Location[];
+}
+
+/** Records peek-reference commands while delegating every other VS Code API to the real runtime. */
+function createShowReferencesRecorder(): { runtimeVscode: typeof vscode; calls: ShowReferencesCall[] } {
+  const calls: ShowReferencesCall[] = [];
+  const runtimeVscode = {
+    ...vscode,
+    commands: {
+      ...vscode.commands,
+      executeCommand: async (command: string, ...args: unknown[]) => {
+        if (command === 'editor.action.showReferences') {
+          const [uri, position, locations] = args as [vscode.Uri, vscode.Position, vscode.Location[]];
+          calls.push({ uri, position, locations });
+          return undefined;
+        }
+
+        return await vscode.commands.executeCommand(command, ...args);
+      }
+    }
+  } as typeof vscode;
+
+  return { runtimeVscode, calls };
 }
