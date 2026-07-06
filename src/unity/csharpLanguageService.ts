@@ -70,76 +70,31 @@ interface TopLevelTypeSymbolCandidate {
   range: vscode.Range;
 }
 
-interface SourceTypeCandidate {
-  name: string;
-  kind: CSharpTopLevelTypeKind;
-  namespace?: string;
-  baseTypeNames?: string[];
-  nameStart: number;
-  nameEnd: number;
-  bodyStart?: number;
-  bodyEnd?: number;
-}
-
-interface NamespaceRange {
-  name: string;
-  start: number;
-  end: number;
-  depth: number;
-}
-
 export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode): CSharpSymbolLanguageService {
   return {
     async getPrimaryTopLevelType(uri) {
-      const providerType = await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
-      if (providerType && providerType !== 'fallback') {
-        return providerType;
-      }
-
-      const sourceType = await getPrimaryTopLevelTypeFromSource(runtimeVscode, uri);
-      return sourceType === 'fallback' ? undefined : sourceType;
+      return await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
     },
     async findMethods(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
-      if (!symbols?.length) {
-        return await findSourceMethodsOrThrow(runtimeVscode, uri);
-      }
 
       const methods: CSharpMethodSymbolSnapshot[] = [];
       collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
-      if (methods.length === 0) {
-        return await findSourceMethodsOrThrow(runtimeVscode, uri);
-      }
-
-      return await refineMethodRangesFromSource(runtimeVscode, uri, methods);
+      return methods;
     },
     async findTypes(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
-      if (!symbols?.length) {
-        return await findSourceTypesOrThrow(runtimeVscode, uri);
-      }
 
       const types: CSharpTypeSymbolSnapshot[] = [];
       collectCSharpTypeSymbols(runtimeVscode, symbols, [], types);
-      if (types.length === 0) {
-        return await findSourceTypesOrThrow(runtimeVscode, uri);
-      }
-
-      return await refineTypeRangesFromSource(runtimeVscode, uri, types);
+      return types;
     },
     async findUnityEventFields(uri) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
-      if (!symbols?.length) {
-        return await findSourceUnityEventFieldsOrThrow(runtimeVscode, uri);
-      }
 
       const fields: CSharpFieldSymbolSnapshot[] = [];
       collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
-      if (fields.length === 0) {
-        return await findSourceUnityEventFieldsOrThrow(runtimeVscode, uri);
-      }
-
-      return await refineFieldRangesFromSource(runtimeVscode, uri, fields);
+      return fields;
     },
     async findMethodAtPosition(uri, position) {
       return (await this.findMethods(uri)).find(method => containsCSharpPosition(method.range, position));
@@ -149,21 +104,9 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
     },
     async findTargetMethodPosition(uri, targetTypeName, methodName) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
-      if (!symbols?.length) {
-        return await findSourceTargetMethodPositionsOrThrow(runtimeVscode, uri, targetTypeName, methodName);
-      }
 
       const positions: CSharpPosition[] = [];
       collectTargetMethodSymbolPositions(runtimeVscode, symbols, targetTypeName, methodName, positions);
-      const sourcePositions = await tryFindSourceTargetMethodPositions(runtimeVscode, uri, targetTypeName, methodName);
-      if (sourcePositions?.length) {
-        return sourcePositions;
-      }
-
-      if (positions.length === 0) {
-        return await findSourceTargetMethodPositionsOrThrow(runtimeVscode, uri, targetTypeName, methodName);
-      }
-
       return positions;
     },
     async isUnityObjectType(uri, typeName) {
@@ -208,13 +151,20 @@ async function isUnityObjectTypeFromHierarchy(
   typeName: string
 ): Promise<boolean> {
   try {
-    const types = await findSourceTypesOrThrow(runtimeVscode, uri);
-    const type = types.find(candidate => matchesCSharpTypeName(candidate.fullName, typeName) || matchesCSharpTypeName(candidate.name, typeName));
+    const types = await getDocumentSymbols(runtimeVscode, uri);
+    const candidates: TopLevelTypeSymbolCandidate[] = [];
+    for (const symbol of types) {
+      collectTopLevelTypeSymbols(runtimeVscode, symbol, [], candidates);
+    }
+    const type = candidates.find(candidate =>
+      matchesCSharpTypeName(toTopLevelTypeFullName(candidate), typeName) ||
+      matchesCSharpTypeName(candidate.name, typeName)
+    );
     if (!type) {
       return false;
     }
 
-    const position = new runtimeVscode.Position(type.range.start.line, type.range.start.character);
+    const position = type.position;
     const hierarchyItems = await runtimeVscode.commands.executeCommand<vscode.TypeHierarchyItem[] | undefined>(
       'vscode.prepareTypeHierarchy',
       uri,
@@ -225,9 +175,9 @@ async function isUnityObjectTypeFromHierarchy(
       return true;
     }
 
-    return await isUnityObjectTypeFromSourceHierarchy(runtimeVscode, uri, typeName);
+    return false;
   } catch {
-    return await isUnityObjectTypeFromSourceHierarchy(runtimeVscode, uri, typeName);
+    return false;
   }
 }
 
@@ -265,118 +215,6 @@ async function hasUnityObjectSupertype(
   return false;
 }
 
-/** Proves UnityEngine.Object inheritance from source when the C# hierarchy command omits local supertypes. */
-async function isUnityObjectTypeFromSourceHierarchy(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri,
-  typeName: string
-): Promise<boolean> {
-  try {
-    const currentTypes = await collectSourceTypesFromUri(runtimeVscode, uri);
-    const currentProof = getUnityObjectSourceInheritanceProof(currentTypes, typeName);
-    if (currentProof !== 'needs-workspace') {
-      return currentProof;
-    }
-
-    const workspaceTypes = await collectWorkspaceSourceTypes(runtimeVscode);
-    return provesUnityObjectSourceInheritance([...currentTypes, ...workspaceTypes], typeName);
-  } catch {
-    return false;
-  }
-}
-
-/** Reads source declarations from the open workspace without persisting another project-wide state cache. */
-async function collectWorkspaceSourceTypes(runtimeVscode: typeof vscode): Promise<SourceTypeCandidate[]> {
-  const uris = await runtimeVscode.workspace.findFiles('**/*.cs', '**/{.git,bin,obj,Library,Temp}/**');
-  const allTypes: SourceTypeCandidate[] = [];
-
-  for (const uri of uris) {
-    allTypes.push(...await collectSourceTypesFromUri(runtimeVscode, uri));
-  }
-
-  return allTypes;
-}
-
-/** Parses source type declarations for one document and keeps namespace/base metadata. */
-async function collectSourceTypesFromUri(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<SourceTypeCandidate[]> {
-  const source = await readSourceTextOrThrow(runtimeVscode, uri);
-  return findSourceTopLevelTypes(maskCommentsAndStrings(source));
-}
-
-/** Walks parsed C# base types until it can prove a UnityEngine.Object chain or exhausts the graph. */
-function provesUnityObjectSourceInheritance(
-  types: readonly SourceTypeCandidate[],
-  typeName: string
-): boolean {
-  return getUnityObjectSourceInheritanceProof(types, typeName) === true;
-}
-
-/** Distinguishes proven false from "custom base may be declared elsewhere". */
-function getUnityObjectSourceInheritanceProof(
-  types: readonly SourceTypeCandidate[],
-  typeName: string
-): boolean | 'needs-workspace' {
-  const pending = [typeName];
-  const seen = new Set<string>();
-  let sawUnresolvedBase = false;
-
-  while (pending.length > 0) {
-    const nextTypeName = pending.shift();
-    if (!nextTypeName) {
-      continue;
-    }
-
-    const key = csharpSymbolKey(nextTypeName);
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    const type = types.find(candidate =>
-      matchesCSharpTypeName(toSourceTypeFullName(candidate), nextTypeName) ||
-      matchesCSharpTypeName(candidate.name, nextTypeName)
-    );
-    if (!type) {
-      continue;
-    }
-
-    for (const baseTypeName of type.baseTypeNames ?? []) {
-      if (isKnownUnityObjectSourceBase(baseTypeName)) {
-        return true;
-      }
-
-      if (!types.some(candidate =>
-        matchesCSharpTypeName(toSourceTypeFullName(candidate), baseTypeName) ||
-        matchesCSharpTypeName(candidate.name, baseTypeName)
-      )) {
-        sawUnresolvedBase = true;
-      }
-
-      pending.push(baseTypeName);
-    }
-  }
-
-  return sawUnresolvedBase ? 'needs-workspace' : false;
-}
-
-/** Converts parsed source type metadata into the same full-name format used by symbol snapshots. */
-function toSourceTypeFullName(type: SourceTypeCandidate): string {
-  return type.namespace ? `${type.namespace}.${type.name}` : type.name;
-}
-
-/** Treats Unity's core object bases as proof while leaving ordinary framework Object alone. */
-function isKnownUnityObjectSourceBase(typeName: string): boolean {
-  const normalized = csharpSymbolKey(typeName.replace(/\s+/g, ''));
-  return normalized === 'unityengine.object' ||
-    normalized === 'unityengine.monobehaviour' ||
-    normalized === 'unityengine.scriptableobject' ||
-    normalized === 'monobehaviour' ||
-    normalized === 'scriptableobject';
-}
-
 /** Checks the item name and detail because C# servers differ in hierarchy labels. */
 function isUnityObjectHierarchyItem(item: vscode.TypeHierarchyItem): boolean {
   const detail = item.detail ?? '';
@@ -392,20 +230,21 @@ function matchesTypeHierarchyItemName(item: vscode.TypeHierarchyItem, typeName: 
     (detail ? matchesCSharpTypeName(`${detail}.${item.name}`, typeName) : false);
 }
 
+/** Creates the full C# type name from provider symbol namespace metadata. */
+function toTopLevelTypeFullName(type: TopLevelTypeSymbolCandidate): string {
+  return type.namespace ? `${type.namespace}.${type.name}` : type.name;
+}
+
 /** Reads C# symbols from the active language server after loading the document in VS Code. */
 async function getDocumentSymbols(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
-): Promise<Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined> {
-  try {
-    const document = await runtimeVscode.workspace.openTextDocument(uri);
-    return await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
-      'vscode.executeDocumentSymbolProvider',
-      document.uri
-    ) ?? [];
-  } catch {
-    return undefined;
-  }
+): Promise<Array<vscode.DocumentSymbol | vscode.SymbolInformation>> {
+  const document = await runtimeVscode.workspace.openTextDocument(uri);
+  return await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
+    'vscode.executeDocumentSymbolProvider',
+    document.uri
+  ) ?? [];
 }
 
 /** Collects method symbols and annotates each method with its nearest containing type. */
@@ -606,296 +445,14 @@ function csharpSymbolKey(value: string): string {
   return value.toLowerCase();
 }
 
-/** Parses source types when document symbols are unavailable but the text can still be read. */
-async function findSourceTypesOrThrow(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpTypeSymbolSnapshot[]> {
-  const source = await readSourceTextOrThrow(runtimeVscode, uri);
-  const masked = maskCommentsAndStrings(source);
-  const lineStarts = buildLineStarts(source);
-  return findSourceTopLevelTypes(masked).map(type => ({
-    name: type.name,
-    fullName: type.namespace ? `${type.namespace}.${type.name}` : type.name,
-    range: sourceRangeAt(lineStarts, type.nameStart, type.nameEnd)
-  }));
-}
-
-/** Parses source methods only after the C# server cannot provide document symbols. */
-async function findSourceMethodsOrThrow(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpMethodSymbolSnapshot[]> {
-  const source = await readSourceTextOrThrow(runtimeVscode, uri);
-  const masked = maskCommentsAndStrings(source);
-  const lineStarts = buildLineStarts(source);
-  const methods: CSharpMethodSymbolSnapshot[] = [];
-
-  for (const type of findSourceTopLevelTypes(masked)) {
-    if (type.bodyStart === undefined || type.bodyEnd === undefined) {
-      continue;
-    }
-
-    for (const member of findSourceMethodMembers(masked, type.bodyStart, type.bodyEnd)) {
-      methods.push({
-        name: member.name,
-        typeName: type.namespace ? `${type.namespace}.${type.name}` : type.name,
-        range: sourceRangeAt(lineStarts, member.nameStart, member.nameEnd)
-      });
-    }
-  }
-
-  return methods;
-}
-
-/** Parses UnityEvent fields from source when symbol metadata is not available. */
-async function findSourceUnityEventFieldsOrThrow(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpFieldSymbolSnapshot[]> {
-  const source = await readSourceTextOrThrow(runtimeVscode, uri);
-  const masked = maskCommentsAndStrings(source);
-  const lineStarts = buildLineStarts(source);
-  const fields: CSharpFieldSymbolSnapshot[] = [];
-
-  for (const type of findSourceTopLevelTypes(masked)) {
-    if (type.bodyStart === undefined || type.bodyEnd === undefined) {
-      continue;
-    }
-
-    for (const member of findSourceUnityEventFieldMembers(masked, type.bodyStart, type.bodyEnd)) {
-      fields.push({
-        name: member.name,
-        typeName: type.namespace ? `${type.namespace}.${type.name}` : type.name,
-        range: sourceRangeAt(lineStarts, member.nameStart, member.nameEnd)
-      });
-    }
-  }
-
-  return fields;
-}
-
-/** Parses target method declarations from source after server symbols fail. */
-async function findSourceTargetMethodPositionsOrThrow(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri,
-  targetTypeName: string,
-  methodName: string
-): Promise<CSharpPosition[]> {
-  const source = await readSourceTextOrThrow(runtimeVscode, uri);
-  const masked = maskCommentsAndStrings(source);
-  const lineStarts = buildLineStarts(source);
-  const positions: CSharpPosition[] = [];
-
-  for (const type of findSourceTopLevelTypes(masked)) {
-    const fullName = type.namespace ? `${type.namespace}.${type.name}` : type.name;
-    if (type.bodyStart === undefined || type.bodyEnd === undefined || !matchesCSharpTypeName(fullName, targetTypeName)) {
-      continue;
-    }
-
-    for (const member of findSourceMethodMembers(masked, type.bodyStart, type.bodyEnd)) {
-      if (member.name === methodName) {
-        positions.push(positionAt(lineStarts, member.nameStart));
-      }
-    }
-  }
-
-  return positions;
-}
-
-/** Refines server type ranges to exact source name ranges when source text is available. */
-async function refineTypeRangesFromSource(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri,
-  types: readonly CSharpTypeSymbolSnapshot[]
-): Promise<CSharpTypeSymbolSnapshot[]> {
-  const sourceTypes = await tryFindSourceTypes(runtimeVscode, uri);
-  if (!sourceTypes?.length) {
-    return [...types];
-  }
-
-  return types.map(type => {
-    const sourceType = sourceTypes.find(candidate =>
-      matchesCSharpTypeName(candidate.fullName, type.fullName) ||
-      matchesCSharpTypeName(candidate.name, type.name)
-    );
-    return sourceType ? {
-      ...type,
-      name: sourceType.name,
-      fullName: sourceType.fullName,
-      range: sourceType.range
-    } : type;
-  });
-}
-
-/** Refines server method ranges to exact source name ranges when source text is available. */
-async function refineMethodRangesFromSource(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri,
-  methods: readonly CSharpMethodSymbolSnapshot[]
-): Promise<CSharpMethodSymbolSnapshot[]> {
-  const sourceMethods = await tryFindSourceMethods(runtimeVscode, uri);
-  if (!sourceMethods?.length) {
-    return [...methods];
-  }
-
-  return methods.map(method => {
-    const sourceMethod = sourceMethods.find(candidate =>
-      candidate.name === method.name &&
-      (!method.typeName || !candidate.typeName || matchesCSharpTypeName(candidate.typeName, method.typeName))
-    );
-    return sourceMethod ? { ...method, range: sourceMethod.range } : method;
-  });
-}
-
-/** Refines server field ranges to exact source name ranges when source text is available. */
-async function refineFieldRangesFromSource(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri,
-  fields: readonly CSharpFieldSymbolSnapshot[]
-): Promise<CSharpFieldSymbolSnapshot[]> {
-  const sourceFields = await tryFindSourceUnityEventFields(runtimeVscode, uri);
-  if (!sourceFields?.length) {
-    return [...fields];
-  }
-
-  return fields.map(field => {
-    const sourceField = sourceFields.find(candidate =>
-      candidate.name === field.name &&
-      (!field.typeName || !candidate.typeName || matchesCSharpTypeName(candidate.typeName, field.typeName))
-    );
-    return sourceField ? { ...field, range: sourceField.range } : field;
-  });
-}
-
-/** Reads source types when available without turning unavailable source into a failure. */
-async function tryFindSourceTypes(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpTypeSymbolSnapshot[] | undefined> {
-  try {
-    return await findSourceTypesOrThrow(runtimeVscode, uri);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Reads source methods when available without turning unavailable source into a failure. */
-async function tryFindSourceMethods(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpMethodSymbolSnapshot[] | undefined> {
-  try {
-    return await findSourceMethodsOrThrow(runtimeVscode, uri);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Reads source UnityEvent fields when available without turning unavailable source into a failure. */
-async function tryFindSourceUnityEventFields(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpFieldSymbolSnapshot[] | undefined> {
-  try {
-    return await findSourceUnityEventFieldsOrThrow(runtimeVscode, uri);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Reads source target positions when available without turning unavailable source into a failure. */
-async function tryFindSourceTargetMethodPositions(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri,
-  targetTypeName: string,
-  methodName: string
-): Promise<CSharpPosition[] | undefined> {
-  try {
-    return await findSourceTargetMethodPositionsOrThrow(runtimeVscode, uri, targetTypeName, methodName);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Reads source text or throws so callers can distinguish unavailable symbols from a real empty result. */
-async function readSourceTextOrThrow(runtimeVscode: typeof vscode, uri: vscode.Uri): Promise<string> {
-  try {
-    return (await runtimeVscode.workspace.openTextDocument(uri)).getText();
-  } catch (error) {
-    throw new Error(`C# symbols and source text are unavailable for ${uri.fsPath}: ${String(error)}`);
-  }
-}
-
-interface SourceMemberCandidate {
-  name: string;
-  nameStart: number;
-  nameEnd: number;
-}
-
-/** Finds method declarations at direct type-member depth in masked C# source. */
-function findSourceMethodMembers(masked: string, bodyStart: number, bodyEnd: number): SourceMemberCandidate[] {
-  const body = masked.slice(bodyStart, bodyEnd);
-  const methodPattern = /\b(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|extern|new|unsafe|partial)\s+)*(?:[A-Za-z_][A-Za-z0-9_.<>,?\[\]]*\s+)+(@?[A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
-  const members: SourceMemberCandidate[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = methodPattern.exec(body))) {
-    const absoluteIndex = bodyStart + match.index;
-    if (getBraceDepthAt(masked, absoluteIndex) !== getBraceDepthAt(masked, bodyStart)) {
-      continue;
-    }
-
-    const name = normalizeSourceIdentifier(match[1]);
-    const nameStart = bodyStart + match.index + match[0].lastIndexOf(match[1]);
-    members.push({ name, nameStart, nameEnd: nameStart + match[1].length });
-  }
-
-  return members;
-}
-
-/** Finds UnityEvent field declarations at direct type-member depth in masked C# source. */
-function findSourceUnityEventFieldMembers(masked: string, bodyStart: number, bodyEnd: number): SourceMemberCandidate[] {
-  const body = masked.slice(bodyStart, bodyEnd);
-  const fieldPattern = /\b(?:(?:public|private|protected|internal|static|readonly|new|sealed|volatile)\s+)*((?:UnityEngine\.Events\.)?UnityEvent(?:\s*<[^;\n]+>)?)\s+(@?[A-Za-z_][A-Za-z0-9_]*)\b/g;
-  const members: SourceMemberCandidate[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = fieldPattern.exec(body))) {
-    const absoluteIndex = bodyStart + match.index;
-    if (getBraceDepthAt(masked, absoluteIndex) !== getBraceDepthAt(masked, bodyStart)) {
-      continue;
-    }
-
-    const name = normalizeSourceIdentifier(match[2]);
-    const nameStart = bodyStart + match.index + match[0].lastIndexOf(match[2]);
-    members.push({ name, nameStart, nameEnd: nameStart + match[2].length });
-  }
-
-  return members;
-}
-
-/** Creates a neutral C# range from source offsets. */
-function sourceRangeAt(lineStarts: readonly number[], start: number, end: number): CSharpRange {
-  return {
-    start: positionAt(lineStarts, start),
-    end: positionAt(lineStarts, end)
-  };
-}
-
-/** Normalizes escaped C# identifiers to their symbol names. */
-function normalizeSourceIdentifier(identifier: string): string {
-  return identifier.startsWith('@') ? identifier.slice(1) : identifier;
-}
-
 async function getPrimaryTopLevelTypeFromSymbols(
   runtimeVscode: typeof vscode,
   uri: vscode.Uri
-): Promise<CSharpTopLevelTypeSnapshot | 'fallback' | undefined> {
+): Promise<CSharpTopLevelTypeSnapshot | undefined> {
   const symbols = await getDocumentSymbols(runtimeVscode, uri);
 
-  if (!symbols?.length) {
-    return 'fallback';
+  if (symbols.length === 0) {
+    return undefined;
   }
 
   const candidates: TopLevelTypeSymbolCandidate[] = [];
@@ -991,401 +548,6 @@ function getTopLevelTypeKind(
   }
 
   return undefined;
-}
-
-async function getPrimaryTopLevelTypeFromSource(
-  runtimeVscode: typeof vscode,
-  uri: vscode.Uri
-): Promise<CSharpTopLevelTypeSnapshot | 'fallback' | undefined> {
-  let source: string;
-
-  try {
-    const document = await runtimeVscode.workspace.openTextDocument(uri);
-    source = document.getText();
-  } catch {
-    return 'fallback';
-  }
-
-  const masked = maskCommentsAndStrings(source);
-  const lineStarts = buildLineStarts(source);
-  const candidates = findSourceTopLevelTypes(masked);
-
-  if (candidates.length !== 1) {
-    return undefined;
-  }
-
-  const candidate = candidates[0];
-  return {
-    name: candidate.name,
-    kind: candidate.kind,
-    namespace: candidate.namespace,
-    position: positionAt(lineStarts, candidate.nameStart),
-    nameRange: {
-      start: positionAt(lineStarts, candidate.nameStart),
-      end: positionAt(lineStarts, candidate.nameEnd)
-    }
-  };
-}
-
-function findSourceTopLevelTypes(masked: string): SourceTypeCandidate[] {
-  const namespaceRanges = findNamespaceRanges(masked);
-  const typePattern = /\b(class|struct|enum|interface|record)\s+(?:(?:class|struct)\s+)?(@?[A-Za-z_][A-Za-z0-9_]*)/g;
-  const candidates: SourceTypeCandidate[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = typePattern.exec(masked))) {
-    const keyword = match[1] as CSharpTopLevelTypeKind;
-    const kind = keyword === 'record' ? 'record' : keyword;
-    const name = match[2];
-    const nameStart = match.index + match[0].lastIndexOf(name);
-    const nameEnd = nameStart + name.length;
-    const depth = getBraceDepthAt(masked, match.index);
-    const activeNamespace = findActiveNamespace(namespaceRanges, match.index);
-
-    // Only file-level or namespace-level types are allowed to drive file sync.
-    if (activeNamespace) {
-      if (depth !== activeNamespace.depth) {
-        continue;
-      }
-    } else if (depth !== 0) {
-      continue;
-    }
-
-    candidates.push({
-      name: name.startsWith('@') ? name.slice(1) : name,
-      kind,
-      namespace: activeNamespace?.name,
-      baseTypeNames: findSourceTypeBaseNames(masked, nameEnd),
-      nameStart,
-      nameEnd,
-      ...findSourceTypeBody(masked, nameEnd)
-    });
-  }
-
-  return candidates;
-}
-
-/** Parses the base-list names that appear between a type name and its opening brace. */
-function findSourceTypeBaseNames(masked: string, searchStart: number): string[] {
-  const openBraceIndex = masked.indexOf('{', searchStart);
-  const semicolonIndex = masked.indexOf(';', searchStart);
-  const declarationEnd = openBraceIndex === -1 || (semicolonIndex !== -1 && semicolonIndex < openBraceIndex) ?
-    semicolonIndex :
-    openBraceIndex;
-
-  if (declarationEnd === -1) {
-    return [];
-  }
-
-  const declarationTail = masked.slice(searchStart, declarationEnd);
-  const colonIndex = declarationTail.indexOf(':');
-  if (colonIndex === -1) {
-    return [];
-  }
-
-  return declarationTail.slice(colonIndex + 1)
-    .split(',')
-    .map(baseName => normalizeSourceBaseTypeName(baseName))
-    .filter(Boolean);
-}
-
-/** Removes generic arguments and C# trivia so base names can be matched conservatively. */
-function normalizeSourceBaseTypeName(baseName: string): string {
-  return baseName
-    .replace(/\bwhere\b[\s\S]*$/u, '')
-    .replace(/<[\s\S]*>/u, '')
-    .replace(/\?/g, '')
-    .trim();
-}
-
-/** Locates the body span for block-bodied type declarations. */
-function findSourceTypeBody(masked: string, searchStart: number): Pick<SourceTypeCandidate, 'bodyStart' | 'bodyEnd'> {
-  const openBraceIndex = masked.indexOf('{', searchStart);
-  const semicolonIndex = masked.indexOf(';', searchStart);
-
-  if (openBraceIndex === -1 || (semicolonIndex !== -1 && semicolonIndex < openBraceIndex)) {
-    return {};
-  }
-
-  const closeBraceIndex = findMatchingBrace(masked, openBraceIndex);
-  if (closeBraceIndex === undefined) {
-    return {};
-  }
-
-  return {
-    bodyStart: openBraceIndex + 1,
-    bodyEnd: closeBraceIndex
-  };
-}
-
-function findNamespaceRanges(masked: string): NamespaceRange[] {
-  const ranges: NamespaceRange[] = [];
-  const namespacePattern = /\bnamespace\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*(\{|;)/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = namespacePattern.exec(masked))) {
-    const name = match[1].replace(/\s+/g, '');
-    const delimiter = match[2];
-    const namespaceStart = match.index + match[0].length;
-
-    if (delimiter === ';') {
-      ranges.push({
-        name,
-        start: namespaceStart,
-        end: masked.length,
-        depth: getBraceDepthAt(masked, namespaceStart)
-      });
-      continue;
-    }
-
-    const braceIndex = match.index + match[0].lastIndexOf('{');
-    const closeBraceIndex = findMatchingBrace(masked, braceIndex);
-    if (closeBraceIndex === undefined) {
-      continue;
-    }
-
-    ranges.push({
-      name,
-      start: braceIndex + 1,
-      end: closeBraceIndex,
-      depth: getBraceDepthAt(masked, braceIndex + 1)
-    });
-  }
-
-  return ranges;
-}
-
-function findActiveNamespace(ranges: readonly NamespaceRange[], index: number): NamespaceRange | undefined {
-  return ranges
-    .filter(range => range.start <= index && index < range.end)
-    .sort((left, right) => right.start - left.start)[0];
-}
-
-function findMatchingBrace(text: string, openBraceIndex: number): number | undefined {
-  let depth = 0;
-
-  for (let index = openBraceIndex; index < text.length; index += 1) {
-    const character = text[index];
-    if (character === '{') {
-      depth += 1;
-    } else if (character === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        return index;
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function getBraceDepthAt(text: string, targetIndex: number): number {
-  let depth = 0;
-
-  for (let index = 0; index < targetIndex; index += 1) {
-    const character = text[index];
-    if (character === '{') {
-      depth += 1;
-    } else if (character === '}') {
-      depth = Math.max(0, depth - 1);
-    }
-  }
-
-  return depth;
-}
-
-function maskCommentsAndStrings(source: string): string {
-  const characters = [...source];
-  let index = 0;
-
-  while (index < characters.length) {
-    const current = characters[index];
-    const next = characters[index + 1];
-
-    if (current === '/' && next === '/') {
-      index = maskUntilLineEnd(characters, index);
-      continue;
-    }
-
-    if (current === '/' && next === '*') {
-      index = maskBlockComment(characters, index);
-      continue;
-    }
-
-    if (current === '@' && next === '"') {
-      index = maskVerbatimString(characters, index);
-      continue;
-    }
-
-    if (current === '$' && next === '@' && characters[index + 2] === '"') {
-      index = maskVerbatimString(characters, index);
-      continue;
-    }
-
-    if (current === '@' && next === '$' && characters[index + 2] === '"') {
-      index = maskVerbatimString(characters, index);
-      continue;
-    }
-
-    if (current === '"') {
-      index = maskString(characters, index);
-      continue;
-    }
-
-    if (current === '\'') {
-      index = maskCharLiteral(characters, index);
-      continue;
-    }
-
-    index += 1;
-  }
-
-  return characters.join('');
-}
-
-function maskUntilLineEnd(characters: string[], start: number): number {
-  let index = start;
-  while (index < characters.length && characters[index] !== '\n') {
-    characters[index] = ' ';
-    index += 1;
-  }
-
-  return index;
-}
-
-function maskBlockComment(characters: string[], start: number): number {
-  let index = start;
-  while (index < characters.length) {
-    const current = characters[index];
-    const next = characters[index + 1];
-    characters[index] = current === '\n' ? '\n' : ' ';
-
-    if (current === '*' && next === '/') {
-      characters[index + 1] = ' ';
-      return index + 2;
-    }
-
-    index += 1;
-  }
-
-  return index;
-}
-
-function maskString(characters: string[], start: number): number {
-  let index = start + 1;
-  characters[start] = ' ';
-
-  while (index < characters.length) {
-    const current = characters[index];
-    characters[index] = current === '\n' ? '\n' : ' ';
-
-    if (current === '\\') {
-      if (index + 1 < characters.length) {
-        characters[index + 1] = characters[index + 1] === '\n' ? '\n' : ' ';
-      }
-      index += 2;
-      continue;
-    }
-
-    if (current === '"') {
-      return index + 1;
-    }
-
-    index += 1;
-  }
-
-  return index;
-}
-
-function maskVerbatimString(characters: string[], start: number): number {
-  let index = start;
-  while (index < characters.length && characters[index] !== '"') {
-    characters[index] = ' ';
-    index += 1;
-  }
-
-  if (index < characters.length) {
-    characters[index] = ' ';
-    index += 1;
-  }
-
-  while (index < characters.length) {
-    const current = characters[index];
-    const next = characters[index + 1];
-    characters[index] = current === '\n' ? '\n' : ' ';
-
-    if (current === '"' && next === '"') {
-      characters[index + 1] = ' ';
-      index += 2;
-      continue;
-    }
-
-    if (current === '"') {
-      return index + 1;
-    }
-
-    index += 1;
-  }
-
-  return index;
-}
-
-function maskCharLiteral(characters: string[], start: number): number {
-  let index = start + 1;
-  characters[start] = ' ';
-
-  while (index < characters.length) {
-    const current = characters[index];
-    characters[index] = current === '\n' ? '\n' : ' ';
-
-    if (current === '\\') {
-      if (index + 1 < characters.length) {
-        characters[index + 1] = characters[index + 1] === '\n' ? '\n' : ' ';
-      }
-      index += 2;
-      continue;
-    }
-
-    if (current === '\'') {
-      return index + 1;
-    }
-
-    index += 1;
-  }
-
-  return index;
-}
-
-function buildLineStarts(source: string): number[] {
-  const lineStarts = [0];
-
-  for (let index = 0; index < source.length; index += 1) {
-    if (source[index] === '\n') {
-      lineStarts.push(index + 1);
-    }
-  }
-
-  return lineStarts;
-}
-
-function positionAt(lineStarts: readonly number[], index: number): CSharpPosition {
-  let low = 0;
-  let high = lineStarts.length - 1;
-
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    if (lineStarts[middle] <= index) {
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-
-  const line = Math.max(0, high);
-  return {
-    line,
-    character: index - lineStarts[line]
-  };
 }
 
 function findNearestNamespace(runtimeVscode: typeof vscode, ancestors: readonly vscode.DocumentSymbol[]): string | undefined {

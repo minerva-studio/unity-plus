@@ -8,7 +8,6 @@ import {
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 import { createLazyUnityMetadataIndex, UnityMetadataIndex } from '../unity/metadataIndex';
 import type { CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../unity/csharpLanguageService';
-import { findSourceTypes } from '../features/event-references/typeIndex';
 
 const gateGuid = '11111111111111111111111111111111';
 const gateScriptPath = 'Assets/Gate.cs';
@@ -1057,12 +1056,11 @@ describe('eventReferences', () => {
     );
   });
 
-  it('shows confirmed zero CodeLens when C# server symbols fall back to source text', async () => {
+  it('shows confirmed zero CodeLens when C# server returns no UnityEvent members', async () => {
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
-      },
-      throwDocumentSymbols: true
+      }
     });
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
@@ -1088,7 +1086,7 @@ describe('eventReferences', () => {
     ]);
   });
 
-  it('rejects CodeLens feedback when C# symbols and source text are unavailable', async () => {
+  it('rejects CodeLens feedback when C# symbols are unavailable', async () => {
     const runtime = createEventReferenceRuntime({
       configuration: {
         'eventReferences.autoScan': false
@@ -2104,7 +2102,7 @@ describe('eventReferences', () => {
     assert.strictEqual(references[0].scriptPath, gateScriptPath);
   });
 
-  it('falls back to C# language server symbols when workspace symbols do not resolve a target type', async () => {
+  it('uses C# language server symbols when workspace metadata cannot resolve a target type', async () => {
     const runtime = createEventReferenceRuntime();
     let csharpFileScans = 0;
     const lazyIndex = createLazyUnityMetadataIndex({
@@ -2140,97 +2138,6 @@ describe('eventReferences', () => {
     assert.strictEqual(index.getReferenceCount('Assets/Scripts/Gate.cs', 'Interact'), 1);
     assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
     assert.strictEqual(csharpFileScans, 1);
-  });
-
-  it('parses source C# types for UnityEvent target resolution without language-server symbols', async () => {
-    const runtime = createEventReferenceRuntime();
-    let csharpFileScans = 0;
-    const output = createMemoryOutput();
-    const logger = createLogger({
-      output,
-      getLevel: () => 'debug'
-    });
-    const lazyIndex = createLazyUnityMetadataIndex({
-      root: createUri('/Project'),
-      logger: createTestLogger(),
-      createIndex: () => createMetadataIndex()
-    });
-    const index = await buildUnityEventReferenceIndex({
-      runtimeVscode: runtime.runtime,
-      logger,
-      metadataIndex: lazyIndex,
-      getCacheVersion: () => 0,
-      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
-      findCSharpFiles: async () => {
-        csharpFileScans += 1;
-        return [createUri('/Project/Assets/Scripts/Gate.cs')];
-      },
-      readTextFile: async uri => uri.fsPath.endsWith('.cs')
-        ? [
-          'namespace Amlos.Fixtures;',
-          'public sealed partial class Gate',
-          '{',
-          '  public bool CanInteract() => true;',
-          '}'
-        ].join('\n')
-        : createPrefabYaml(2),
-      csharpLanguageService: createFakeCSharpSymbolLanguageService({})
-    }, createMetadataIndex());
-
-    assert.strictEqual(index.getReferenceCount('Assets/Scripts/Gate.cs', 'CanInteract', 'Amlos.Fixtures.Gate'), 1);
-    assert.strictEqual(index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Amlos.Fixtures.Gate').length, 1);
-    assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
-    assert.strictEqual(csharpFileScans, 1);
-    assert.strictEqual(output.lines.some(line =>
-      line.includes('1 C# file(s), 0 C# server type(s), 1 source fallback type(s), 2 resolvable type key(s).')
-    ), true);
-  });
-
-  it('fails the UnityEvent index when source fallback C# files cannot be read', async () => {
-    const runtime = createEventReferenceRuntime();
-    const lazyIndex = createLazyUnityMetadataIndex({
-      root: createUri('/Project'),
-      logger: createTestLogger(),
-      createIndex: () => createMetadataIndex()
-    });
-
-    await assert.rejects(
-      async () => await buildUnityEventReferenceIndex({
-        runtimeVscode: runtime.runtime,
-        logger: createTestLogger(),
-        metadataIndex: lazyIndex,
-        getCacheVersion: () => 0,
-        findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
-        findCSharpFiles: async () => [createUri('/Project/Assets/Scripts/Gate.cs')],
-        readTextFile: async uri => {
-          if (uri.fsPath.endsWith('.cs')) {
-            throw new Error('source denied');
-          }
-
-          return createPrefabYaml(2);
-        },
-        csharpLanguageService: createFakeCSharpSymbolLanguageService({})
-      }, createMetadataIndex()),
-      /Could not scan UnityEvent references in .*Gate\.prefab: Could not read C# source .*source denied/
-    );
-  });
-
-  it('extracts source type names from real Unity C# declaration shapes', () => {
-    assert.deepStrictEqual(findSourceTypes([
-      'namespace Amlos.Control.Interact',
-      '{',
-      '  public sealed class Interactable : MonoBehaviour {}',
-      '}',
-      'namespace Amlos.Fixtures;',
-      'public abstract partial class Cannon : Fixture {}',
-      'public readonly record struct CannonState(int Value);',
-      'class Outside {}'
-    ].join('\n')).map(type => type.fullName), [
-      'Amlos.Control.Interact.Interactable',
-      'Amlos.Fixtures.Cannon',
-      'Amlos.Fixtures.CannonState',
-      'Amlos.Fixtures.Outside'
-    ]);
   });
 
   it('does not scan for CodeLens when UnityEvent references are disabled', async () => {

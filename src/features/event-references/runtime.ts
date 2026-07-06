@@ -52,7 +52,7 @@ export type UnityAssetTextSearch = (
 
 export type CSharpTypeResolver = (
   fullTypeName: string,
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'metadataIndex' | 'findCSharpFiles' | 'csharpLanguageService'>,
   context?: UnityEventReferenceBuildContext
 ) => Promise<string | undefined>;
 
@@ -62,7 +62,7 @@ export interface CSharpTypeIndex {
 }
 
 export type CSharpTypeIndexBuilder = (
-  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'logger' | 'metadataIndex' | 'findCSharpFiles' | 'readTextFile' | 'csharpLanguageService'>,
+  runtime: Pick<EventReferenceRuntime, 'runtimeVscode' | 'logger' | 'metadataIndex' | 'findCSharpFiles' | 'csharpLanguageService'>,
   context?: UnityEventReferenceBuildContext
 ) => Promise<CSharpTypeIndex>;
 
