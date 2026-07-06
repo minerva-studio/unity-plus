@@ -27,6 +27,10 @@ suite('eventReferences - Real Unity Project Shape', () => {
       vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')),
       ['type:Cannon', 'method:Fire']
     );
+    await waitForCSharpLanguageServiceDeclarations(
+      vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'PlainService.cs')),
+      ['type:PlainService', 'method:Tick']
+    );
   });
 
   test('resolves UnityEvent target methods through default workspace scans', async function () {
@@ -46,11 +50,16 @@ suite('eventReferences - Real Unity Project Shape', () => {
       const fieldTargets = index.getFieldTargets('Assets/Scripts/Interactable.cs', 'OnCheckEnable', 'Amlos.Control.Interact.Interactable');
       const interactableDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs')));
       const cannonDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
+      const plainDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'PlainService.cs')));
       const interactableLenses = await createCodeLensesFromIndex(runtime, interactableDocument, index, {
         embedReferences: false,
         includeZeroSummaryLenses: true
       });
       const cannonLenses = await createCodeLensesFromIndex(runtime, cannonDocument, index, {
+        embedReferences: false,
+        includeZeroSummaryLenses: true
+      });
+      const plainLenses = await createCodeLensesFromIndex(runtime, plainDocument, index, {
         embedReferences: false,
         includeZeroSummaryLenses: true
       });
@@ -74,6 +83,7 @@ suite('eventReferences - Real Unity Project Shape', () => {
       assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
       assert.strictEqual(methodLens?.range.start.line, 6);
       assert.strictEqual(methodLens?.range.start.character, 16);
+      assert.strictEqual(plainLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), false);
 
       const commandRecorder = createShowReferencesRecorder();
       await showReferenceLocations(

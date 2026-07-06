@@ -1,6 +1,10 @@
 namespace UnityEngine
 {
-    public class MonoBehaviour
+    public class Object
+    {
+    }
+
+    public class MonoBehaviour : Object
     {
     }
 }

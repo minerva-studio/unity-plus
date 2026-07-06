@@ -59,6 +59,7 @@ export interface CSharpSymbolLanguageService extends CSharpLanguageService {
   findMethodAtPosition(uri: vscode.Uri, position: CSharpPosition): Promise<CSharpMethodSymbolSnapshot | undefined>;
   findUnityEventFieldAtPosition(uri: vscode.Uri, position: CSharpPosition): Promise<CSharpFieldSymbolSnapshot | undefined>;
   findTargetMethodPosition(uri: vscode.Uri, targetTypeName: string, methodName: string): Promise<CSharpPosition[]>;
+  isUnityObjectType(uri: vscode.Uri, typeName: string): Promise<boolean>;
 }
 
 interface TopLevelTypeSymbolCandidate {
@@ -73,6 +74,7 @@ interface SourceTypeCandidate {
   name: string;
   kind: CSharpTopLevelTypeKind;
   namespace?: string;
+  baseTypeNames?: string[];
   nameStart: number;
   nameEnd: number;
   bodyStart?: number;
@@ -164,6 +166,9 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       return positions;
     },
+    async isUnityObjectType(uri, typeName) {
+      return await isUnityObjectTypeFromHierarchy(runtimeVscode, uri, typeName);
+    },
     async findReferences(uri, position) {
       const references = await runtimeVscode.commands.executeCommand<vscode.Location[]>(
         'vscode.executeReferenceProvider',
@@ -194,6 +199,197 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
       );
     }
   };
+}
+
+/** Uses VS Code type hierarchy to prove whether a C# type inherits UnityEngine.Object. */
+async function isUnityObjectTypeFromHierarchy(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  typeName: string
+): Promise<boolean> {
+  try {
+    const types = await findSourceTypesOrThrow(runtimeVscode, uri);
+    const type = types.find(candidate => matchesCSharpTypeName(candidate.fullName, typeName) || matchesCSharpTypeName(candidate.name, typeName));
+    if (!type) {
+      return false;
+    }
+
+    const position = new runtimeVscode.Position(type.range.start.line, type.range.start.character);
+    const hierarchyItems = await runtimeVscode.commands.executeCommand<vscode.TypeHierarchyItem[] | undefined>(
+      'vscode.prepareTypeHierarchy',
+      uri,
+      position
+    );
+    const rootItems = (hierarchyItems ?? []).filter(item => matchesTypeHierarchyItemName(item, typeName));
+    if (await hasUnityObjectSupertype(runtimeVscode, rootItems.length > 0 ? rootItems : hierarchyItems ?? [])) {
+      return true;
+    }
+
+    return await isUnityObjectTypeFromSourceHierarchy(runtimeVscode, uri, typeName);
+  } catch {
+    return await isUnityObjectTypeFromSourceHierarchy(runtimeVscode, uri, typeName);
+  }
+}
+
+/** Walks type hierarchy parents while avoiding cycles from buggy language servers. */
+async function hasUnityObjectSupertype(
+  runtimeVscode: typeof vscode,
+  rootItems: readonly vscode.TypeHierarchyItem[]
+): Promise<boolean> {
+  const pending = [...rootItems];
+  const seen = new Set<string>();
+
+  while (pending.length > 0) {
+    const item = pending.shift();
+    if (!item) {
+      continue;
+    }
+
+    const key = `${item.uri.fsPath}:${item.name}:${item.detail ?? ''}:${item.range.start.line}:${item.range.start.character}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    if (isUnityObjectHierarchyItem(item)) {
+      return true;
+    }
+
+    const supertypes = await runtimeVscode.commands.executeCommand<vscode.TypeHierarchyItem[] | undefined>(
+      'vscode.provideSupertypes',
+      item
+    );
+    pending.push(...supertypes ?? []);
+  }
+
+  return false;
+}
+
+/** Proves UnityEngine.Object inheritance from source when the C# hierarchy command omits local supertypes. */
+async function isUnityObjectTypeFromSourceHierarchy(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  typeName: string
+): Promise<boolean> {
+  try {
+    const currentTypes = await collectSourceTypesFromUri(runtimeVscode, uri);
+    const currentProof = getUnityObjectSourceInheritanceProof(currentTypes, typeName);
+    if (currentProof !== 'needs-workspace') {
+      return currentProof;
+    }
+
+    const workspaceTypes = await collectWorkspaceSourceTypes(runtimeVscode);
+    return provesUnityObjectSourceInheritance([...currentTypes, ...workspaceTypes], typeName);
+  } catch {
+    return false;
+  }
+}
+
+/** Reads source declarations from the open workspace without persisting another project-wide state cache. */
+async function collectWorkspaceSourceTypes(runtimeVscode: typeof vscode): Promise<SourceTypeCandidate[]> {
+  const uris = await runtimeVscode.workspace.findFiles('**/*.cs', '**/{.git,bin,obj,Library,Temp}/**');
+  const allTypes: SourceTypeCandidate[] = [];
+
+  for (const uri of uris) {
+    allTypes.push(...await collectSourceTypesFromUri(runtimeVscode, uri));
+  }
+
+  return allTypes;
+}
+
+/** Parses source type declarations for one document and keeps namespace/base metadata. */
+async function collectSourceTypesFromUri(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<SourceTypeCandidate[]> {
+  const source = await readSourceTextOrThrow(runtimeVscode, uri);
+  return findSourceTopLevelTypes(maskCommentsAndStrings(source));
+}
+
+/** Walks parsed C# base types until it can prove a UnityEngine.Object chain or exhausts the graph. */
+function provesUnityObjectSourceInheritance(
+  types: readonly SourceTypeCandidate[],
+  typeName: string
+): boolean {
+  return getUnityObjectSourceInheritanceProof(types, typeName) === true;
+}
+
+/** Distinguishes proven false from "custom base may be declared elsewhere". */
+function getUnityObjectSourceInheritanceProof(
+  types: readonly SourceTypeCandidate[],
+  typeName: string
+): boolean | 'needs-workspace' {
+  const pending = [typeName];
+  const seen = new Set<string>();
+  let sawUnresolvedBase = false;
+
+  while (pending.length > 0) {
+    const nextTypeName = pending.shift();
+    if (!nextTypeName) {
+      continue;
+    }
+
+    const key = csharpSymbolKey(nextTypeName);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    const type = types.find(candidate =>
+      matchesCSharpTypeName(toSourceTypeFullName(candidate), nextTypeName) ||
+      matchesCSharpTypeName(candidate.name, nextTypeName)
+    );
+    if (!type) {
+      continue;
+    }
+
+    for (const baseTypeName of type.baseTypeNames ?? []) {
+      if (isKnownUnityObjectSourceBase(baseTypeName)) {
+        return true;
+      }
+
+      if (!types.some(candidate =>
+        matchesCSharpTypeName(toSourceTypeFullName(candidate), baseTypeName) ||
+        matchesCSharpTypeName(candidate.name, baseTypeName)
+      )) {
+        sawUnresolvedBase = true;
+      }
+
+      pending.push(baseTypeName);
+    }
+  }
+
+  return sawUnresolvedBase ? 'needs-workspace' : false;
+}
+
+/** Converts parsed source type metadata into the same full-name format used by symbol snapshots. */
+function toSourceTypeFullName(type: SourceTypeCandidate): string {
+  return type.namespace ? `${type.namespace}.${type.name}` : type.name;
+}
+
+/** Treats Unity's core object bases as proof while leaving ordinary framework Object alone. */
+function isKnownUnityObjectSourceBase(typeName: string): boolean {
+  const normalized = csharpSymbolKey(typeName.replace(/\s+/g, ''));
+  return normalized === 'unityengine.object' ||
+    normalized === 'unityengine.monobehaviour' ||
+    normalized === 'unityengine.scriptableobject' ||
+    normalized === 'monobehaviour' ||
+    normalized === 'scriptableobject';
+}
+
+/** Checks the item name and detail because C# servers differ in hierarchy labels. */
+function isUnityObjectHierarchyItem(item: vscode.TypeHierarchyItem): boolean {
+  const detail = item.detail ?? '';
+  return item.name === 'Object' && /\bUnityEngine\b/.test(detail) ||
+    item.name === 'UnityEngine.Object' ||
+    `${detail}.${item.name}` === 'UnityEngine.Object';
+}
+
+/** Matches the requested C# type against the hierarchy item label. */
+function matchesTypeHierarchyItemName(item: vscode.TypeHierarchyItem, typeName: string): boolean {
+  const detail = item.detail ?? '';
+  return matchesCSharpTypeName(item.name, typeName) ||
+    (detail ? matchesCSharpTypeName(`${detail}.${item.name}`, typeName) : false);
 }
 
 /** Reads C# symbols from the active language server after loading the document in VS Code. */
@@ -859,6 +1055,7 @@ function findSourceTopLevelTypes(masked: string): SourceTypeCandidate[] {
       name: name.startsWith('@') ? name.slice(1) : name,
       kind,
       namespace: activeNamespace?.name,
+      baseTypeNames: findSourceTypeBaseNames(masked, nameEnd),
       nameStart,
       nameEnd,
       ...findSourceTypeBody(masked, nameEnd)
@@ -866,6 +1063,39 @@ function findSourceTopLevelTypes(masked: string): SourceTypeCandidate[] {
   }
 
   return candidates;
+}
+
+/** Parses the base-list names that appear between a type name and its opening brace. */
+function findSourceTypeBaseNames(masked: string, searchStart: number): string[] {
+  const openBraceIndex = masked.indexOf('{', searchStart);
+  const semicolonIndex = masked.indexOf(';', searchStart);
+  const declarationEnd = openBraceIndex === -1 || (semicolonIndex !== -1 && semicolonIndex < openBraceIndex) ?
+    semicolonIndex :
+    openBraceIndex;
+
+  if (declarationEnd === -1) {
+    return [];
+  }
+
+  const declarationTail = masked.slice(searchStart, declarationEnd);
+  const colonIndex = declarationTail.indexOf(':');
+  if (colonIndex === -1) {
+    return [];
+  }
+
+  return declarationTail.slice(colonIndex + 1)
+    .split(',')
+    .map(baseName => normalizeSourceBaseTypeName(baseName))
+    .filter(Boolean);
+}
+
+/** Removes generic arguments and C# trivia so base names can be matched conservatively. */
+function normalizeSourceBaseTypeName(baseName: string): string {
+  return baseName
+    .replace(/\bwhere\b[\s\S]*$/u, '')
+    .replace(/<[\s\S]*>/u, '')
+    .replace(/\?/g, '')
+    .trim();
 }
 
 /** Locates the body span for block-bodied type declarations. */

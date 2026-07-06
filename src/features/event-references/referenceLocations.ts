@@ -13,10 +13,13 @@ export function createHoverMarkdown(
   markdown.appendMarkdown(`**${runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length })}**\n\n`);
 
   for (const reference of references.slice(0, 12)) {
-    const location = reference.gameObjectName
+    const source = reference.gameObjectName
       ? `${reference.assetPath} (${reference.gameObjectName})`
       : reference.assetPath;
-    markdown.appendMarkdown(`- ${escapeMarkdown(location)}: ${escapeMarkdown(reference.eventFieldName)} -> ${escapeMarkdown(reference.targetTypeName)}.${escapeMarkdown(reference.methodName)}\n`);
+    const target = `${reference.targetTypeName}.${reference.methodName}`;
+    // The hover text carries the Unity serialized binding context that VS Code
+    // peek locations cannot attach to individual C# method declaration entries.
+    markdown.appendMarkdown(`- ${runtimeVscode.l10n.t('Bound in')} ${escapeMarkdown(source)}: ${escapeMarkdown(reference.eventFieldName)} -> ${escapeMarkdown(target)}\n`);
   }
 
   if (references.length > 12) {

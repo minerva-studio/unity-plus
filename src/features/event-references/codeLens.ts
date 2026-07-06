@@ -13,9 +13,10 @@ export async function createScanStateCodeLenses(
 ): Promise<vscode.CodeLens[]> {
   const anchorRange = await findCodeLensStatusAnchorRange(runtime, document);
   const position = anchorRange.start;
+  const lenses: vscode.CodeLens[] = [];
 
-  return [
-    new runtime.runtimeVscode.CodeLens(anchorRange, {
+  if (await shouldShowSerializedInstanceStatusLens(runtime, document)) {
+    lenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
       title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: marker }),
       command: 'unityPlus.showUnityEventReferenceLocations',
       arguments: [{
@@ -24,28 +25,40 @@ export async function createScanStateCodeLenses(
         serializedInstances: marker === '0' ? [] : undefined,
         position
       } satisfies EventReferenceLocationTarget]
-    }),
-    new runtime.runtimeVscode.CodeLens(anchorRange, {
+    }));
+  }
+
+  const fields = await findFieldsForScanStateLenses(runtime, document);
+  for (const field of fields) {
+    const fieldRange = toVscodeRange(runtime.runtimeVscode, field.range);
+    lenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: marker }),
       command: 'unityPlus.showUnityEventReferenceLocations',
       arguments: [{
-        kind: 'method',
+        kind: 'field',
         scriptPath,
+        symbolName: field.name,
+        typeName: field.typeName,
         eventReferences: marker === '0' ? [] : undefined,
-        position
+        position: fieldRange.start
       } satisfies EventReferenceLocationTarget]
-    }),
-    new runtime.runtimeVscode.CodeLens(anchorRange, {
+    }));
+
+    lenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: marker }),
       command: 'unityPlus.showUnityEventReferenceLocations',
       arguments: [{
         kind: 'fieldTarget',
         scriptPath,
+        symbolName: field.name,
+        typeName: field.typeName,
         eventReferences: marker === '0' ? [] : undefined,
-        position
+        position: fieldRange.start
       } satisfies EventReferenceLocationTarget]
-    })
-  ];
+    }));
+  }
+
+  return lenses;
 }
 
 /** Picks a stable class-level range for scan state and zero-count summary CodeLens entries. */
@@ -86,12 +99,19 @@ export async function createCodeLensesFromIndex(
   const codeLenses: vscode.CodeLens[] = [];
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
   const serializedInstanceAnchor = findSerializedInstanceAnchorType(types, scriptPath);
+  const unityObjectCache = new Map<string, boolean>();
   let serializedInstanceLensCount = 0;
+  let unityObjectTypeCount = 0;
   let methodLensCount = 0;
   let fieldReferenceLensCount = 0;
   let fieldTargetLensCount = 0;
 
   for (const type of types) {
+    if (!await isConfirmedUnityObjectType(runtime, document, type, unityObjectCache)) {
+      continue;
+    }
+
+    unityObjectTypeCount += 1;
     const serializedInstances = filterSerializedInstancesForTypeLens(
       index.getSerializedInstances(scriptPath, type.fullName),
       type.fullName,
@@ -175,7 +195,7 @@ export async function createCodeLensesFromIndex(
     const position = anchorRange.start;
 
     // Keep ready zero-count summaries aligned with the pending "-" status lenses.
-    if (serializedInstanceLensCount === 0) {
+    if (unityObjectTypeCount > 0 && serializedInstanceLensCount === 0) {
       codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
         title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: 0 }),
         command: 'unityPlus.showUnityEventReferenceLocations',
@@ -187,36 +207,68 @@ export async function createCodeLensesFromIndex(
         } satisfies EventReferenceLocationTarget]
       }));
     }
-
-    if (methodLensCount === 0 && fieldReferenceLensCount === 0) {
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: 0 }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'method',
-          scriptPath,
-          eventReferences: [],
-          position
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
-
-    if (fieldTargetLensCount === 0) {
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: 0 }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'fieldTarget',
-          scriptPath,
-          eventReferences: [],
-          position
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
   }
 
   runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
   return codeLenses;
+}
+
+/** Reads UnityEvent fields for scan-state placeholders without hiding all CodeLens on failure. */
+async function findFieldsForScanStateLenses(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument
+): Promise<CSharpFieldSymbolSnapshot[]> {
+  try {
+    return await safeFindUnityEventFields(runtime, document);
+  } catch {
+    return [];
+  }
+}
+
+/** Checks whether scan-state placeholders should include serialized instance feedback. */
+async function shouldShowSerializedInstanceStatusLens(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument
+): Promise<boolean> {
+  let types: CSharpTypeSymbolSnapshot[];
+  try {
+    types = await safeFindTypes(runtime, document);
+  } catch {
+    return false;
+  }
+
+  const cache = new Map<string, boolean>();
+  for (const type of types) {
+    if (await isConfirmedUnityObjectType(runtime, document, type, cache)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Uses C# type hierarchy to avoid showing prefab instance counts on plain C# types. */
+async function isConfirmedUnityObjectType(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument,
+  type: CSharpTypeSymbolSnapshot,
+  cache: Map<string, boolean>
+): Promise<boolean> {
+  const cacheKey = typeKey(type.fullName);
+  const cached = cache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  try {
+    const result = await runtime.csharpLanguageService?.isUnityObjectType(document.uri, type.fullName) ?? false;
+    cache.set(cacheKey, result);
+    return result;
+  } catch (error) {
+    runtime.logger.warn(`UnityEvent CodeLens could not verify UnityEngine.Object inheritance for ${type.fullName}: ${String(error)}`);
+    cache.set(cacheKey, false);
+    return false;
+  }
 }
 
 /** Chooses the single C# type that should receive path-based serialized instance counts. */

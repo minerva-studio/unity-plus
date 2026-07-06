@@ -540,6 +540,75 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
   });
 
+  it('does not show serialized instance CodeLens for non-UnityObject types', async () => {
+    const runtime = createEventReferenceRuntime({ unityObjectTypes: { Gate: false } });
+    const prefabUri = createUri('/Project/Assets/Gate.prefab');
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract() => true;',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [prefabUri],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    assert.deepStrictEqual((await runtime.provideCodeLenses(csharpDocument)).map(lens => lens.command?.title), [
+      '- UnityEvent references',
+      '- UnityEvent targets'
+    ]);
+
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(lenses.some(lens => /Unity serialized instances/.test(lens.command?.title ?? '')), false);
+    assert.strictEqual(lenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget'), true);
+  });
+
+  it('does not show serialized instance CodeLens when type hierarchy is unavailable', async () => {
+    const runtime = createEventReferenceRuntime({ throwTypeHierarchy: true });
+    const prefabUri = createUri('/Project/Assets/Gate.prefab');
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'public class Gate',
+      '{',
+      '  public bool CanInteract() => true;',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [prefabUri],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    await runtime.provideCodeLenses(csharpDocument);
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(lenses.some(lens => /Unity serialized instances/.test(lens.command?.title ?? '')), false);
+  });
+
   it('schedules one background index build after repeated CodeLens requests', async () => {
     let assetScans = 0;
     let releaseBuild: (() => void) | undefined;
@@ -572,11 +641,11 @@ describe('eventReferences', () => {
     const document = createTextDocument('/Project/Assets/Gate.cs', 'public bool CanInteract() => true;');
     assert.deepStrictEqual(
       (await runtime.provideCodeLenses(document)).map(lens => lens.command?.title),
-      ['- Unity serialized instances', '- UnityEvent references', '- UnityEvent targets']
+      []
     );
     assert.deepStrictEqual(
       (await runtime.provideCodeLenses(document)).map(lens => lens.command?.title),
-      ['- Unity serialized instances', '- UnityEvent references', '- UnityEvent targets']
+      []
     );
     assert.strictEqual(assetScans, 0);
 
@@ -659,7 +728,7 @@ describe('eventReferences', () => {
 
     assert.deepStrictEqual(
       (await runtime.provideCodeLenses(createTextDocument('/Project/Assets/Gate.cs', 'public bool CanInteract() => true;'))).map(lens => lens.command?.title),
-      ['- Unity serialized instances', '- UnityEvent references', '- UnityEvent targets']
+      []
     );
     await runtime.waitForCodeLensChange();
 
@@ -919,18 +988,14 @@ describe('eventReferences', () => {
     const document = createTextDocument('/Project/Assets/Unknown.cs', 'public class Unknown {}');
     const pendingLenses = await runtime.provideCodeLenses(document);
     assert.deepStrictEqual(pendingLenses.map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
+      '- Unity serialized instances'
     ]);
     assert.strictEqual(pendingLenses.every(lens => lens.range.start.line === 0 && lens.range.start.character === 13), true);
     await runtime.waitForCodeLensChange();
 
     const readyLenses = await runtime.provideCodeLenses(document);
     assert.deepStrictEqual(readyLenses.map(lens => lens.command?.title), [
-      '0 Unity serialized instances',
-      '0 UnityEvent references',
-      '0 UnityEvent targets'
+      '0 Unity serialized instances'
     ]);
     assert.strictEqual(readyLenses.every(lens => lens.range.start.line === 0 && lens.range.start.character === 13), true);
     assert.strictEqual(candidateSearches, 0);
@@ -964,7 +1029,7 @@ describe('eventReferences', () => {
         createTextDocument('/Project/Assets/Gate.cs', 'public class Gate {}'),
         token as unknown as vscode.CancellationToken
       )).map(lens => lens.command?.title),
-      ['- Unity serialized instances', '- UnityEvent references', '- UnityEvent targets']
+      ['- Unity serialized instances']
     );
   });
 
@@ -990,16 +1055,12 @@ describe('eventReferences', () => {
     });
 
     assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
+      '- Unity serialized instances'
     ]);
     await runtime.waitForCodeLensChange();
 
     assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-      '0 Unity serialized instances',
-      '0 UnityEvent references',
-      '0 UnityEvent targets'
+      '0 Unity serialized instances'
     ]);
   });
 
@@ -1025,18 +1086,10 @@ describe('eventReferences', () => {
       readTextFile: async () => ''
     });
 
-    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
-    ]);
+    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), []);
     await runtime.waitForCodeLensChange();
 
-    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
-    ]);
+    assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), []);
   });
 
   it('reuses one in-flight priority scan for repeated CodeLens requests on the same script', async () => {
@@ -1183,9 +1236,7 @@ describe('eventReferences', () => {
     ].join('\n'));
     const previousChangeCount = runtime.codeLensChangeCount;
     assert.deepStrictEqual((await runtime.provideCodeLenses(ironDoorDocument)).map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
+      '- Unity serialized instances'
     ]);
     await runtime.waitForCodeLensChangeAfter(previousChangeCount);
     const ironDoorLenses = await runtime.provideCodeLenses(ironDoorDocument);
@@ -1223,11 +1274,7 @@ describe('eventReferences', () => {
       cancellationToken as unknown as vscode.CancellationToken
     );
 
-    assert.deepStrictEqual(lenses.map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
-    ]);
+    assert.deepStrictEqual(lenses.map(lens => lens.command?.title), []);
     await waitForTimers();
     assert.strictEqual(assetScans, 0);
   });
@@ -1347,7 +1394,11 @@ describe('eventReferences', () => {
       resolveCSharpType: async typeName => createTypeResolver()(typeName)
     });
 
-    await assertPendingCodeLenses(runtime, csharpDocument);
+    assert.deepStrictEqual((await runtime.provideCodeLenses(csharpDocument)).map(lens => lens.command?.title), [
+      '- Unity serialized instances',
+      '- UnityEvent references',
+      '- UnityEvent targets'
+    ]);
 
     await runtime.waitForCodeLensChange();
     const lenses = await runtime.provideCodeLenses(csharpDocument);
@@ -2002,11 +2053,7 @@ describe('eventReferences', () => {
     });
 
     const lenses = await runtime.provideCodeLenses(createTextDocument('/Project/Assets/Gate.cs', 'public void Missing() {}'));
-    assert.deepStrictEqual(lenses.map(lens => lens.command?.title), [
-      '- Unity serialized instances',
-      '- UnityEvent references',
-      '- UnityEvent targets'
-    ]);
+    assert.deepStrictEqual(lenses.map(lens => lens.command?.title), []);
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', {
       kind: 'method',
@@ -2327,6 +2374,9 @@ interface EventReferenceRuntimeOptions {
   findTextInFiles?: () => Thenable<void>;
   throwDocumentSymbols?: boolean;
   throwOpenTextDocument?: boolean;
+  throwTypeHierarchy?: boolean;
+  emptyTypeHierarchy?: boolean;
+  unityObjectTypes?: Record<string, boolean>;
 }
 
 function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {}): EventReferenceRuntime {
@@ -2367,6 +2417,29 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
           const [uri] = args as [vscode.Uri];
           const document = textDocuments.get(uri.fsPath);
           return document ? createFakeDocumentSymbols(runtime as unknown as typeof vscode, document) : [];
+        }
+
+        if (command === 'vscode.prepareTypeHierarchy') {
+          if (options.throwTypeHierarchy) {
+            throw new Error('type hierarchy unavailable');
+          }
+
+          if (options.emptyTypeHierarchy) {
+            return [];
+          }
+
+          const [uri, position] = args as [vscode.Uri, vscode.Position];
+          const document = textDocuments.get(uri.fsPath);
+          return document ? createFakeTypeHierarchyRoots(runtime as unknown as typeof vscode, document, position, options) : [];
+        }
+
+        if (command === 'vscode.provideSupertypes') {
+          if (options.throwTypeHierarchy) {
+            throw new Error('type hierarchy unavailable');
+          }
+
+          const [item] = args as [vscode.TypeHierarchyItem];
+          return createFakeSupertypes(runtime as unknown as typeof vscode, item);
         }
       }
     },
@@ -3024,6 +3097,67 @@ function createFakeDocumentSymbols(runtimeVscode: typeof vscode, document: vscod
   ];
 }
 
+/** Creates fake type hierarchy root items from the class at the requested position. */
+function createFakeTypeHierarchyRoots(
+  runtimeVscode: typeof vscode,
+  document: vscode.TextDocument,
+  position: vscode.Position,
+  options: EventReferenceRuntimeOptions
+): vscode.TypeHierarchyItem[] {
+  const type = createFakeDocumentSymbols(runtimeVscode, document)
+    .flatMap(symbol => symbol instanceof FakeDocumentSymbol ? flattenFakeDocumentSymbols(symbol) : [])
+    .find(symbol => symbol.kind === runtimeVscode.SymbolKind.Class &&
+      symbol.selectionRange.start.line === position.line &&
+      symbol.selectionRange.start.character === position.character);
+  if (!type) {
+    return [];
+  }
+
+  const isUnityObject = options.unityObjectTypes?.[type.name] ?? options.unityObjectTypes?.[document.uri.fsPath] ?? true;
+  return [createFakeTypeHierarchyItem(runtimeVscode, document.uri, type.name, '', type.selectionRange, isUnityObject)];
+}
+
+/** Flattens fake document symbols for type hierarchy lookup. */
+function flattenFakeDocumentSymbols(symbol: vscode.DocumentSymbol): vscode.DocumentSymbol[] {
+  return [symbol, ...symbol.children.flatMap(child => flattenFakeDocumentSymbols(child))];
+}
+
+/** Returns fake parent hierarchy items that mimic MonoBehaviour inheritance. */
+function createFakeSupertypes(runtimeVscode: typeof vscode, item: vscode.TypeHierarchyItem): vscode.TypeHierarchyItem[] {
+  const metadata = item as vscode.TypeHierarchyItem & { isUnityObject?: boolean };
+  if (item.name === 'UnityEngine.Object' || item.name === 'Object') {
+    return [];
+  }
+
+  if (item.name === 'MonoBehaviour' || item.name === 'ScriptableObject') {
+    return [createFakeTypeHierarchyItem(runtimeVscode, item.uri, 'Object', 'UnityEngine', item.range, true)];
+  }
+
+  return metadata.isUnityObject
+    ? [createFakeTypeHierarchyItem(runtimeVscode, item.uri, 'MonoBehaviour', 'UnityEngine', item.range, true)]
+    : [];
+}
+
+/** Creates the subset of TypeHierarchyItem needed by UnityObject CodeLens tests. */
+function createFakeTypeHierarchyItem(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  name: string,
+  detail: string,
+  range: vscode.Range,
+  isUnityObject: boolean
+): vscode.TypeHierarchyItem {
+  return {
+    name,
+    detail,
+    kind: runtimeVscode.SymbolKind.Class,
+    uri,
+    range,
+    selectionRange: range,
+    isUnityObject
+  } as unknown as vscode.TypeHierarchyItem;
+}
+
 /** Finds top-level fake class symbols and attaches member symbols from their bodies. */
 function findFakeClassSymbols(runtimeVscode: typeof vscode, document: vscode.TextDocument, text: string): vscode.DocumentSymbol[] {
   const symbols: vscode.DocumentSymbol[] = [];
@@ -3158,6 +3292,9 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
     async findTargetMethodPosition() {
       return [];
     },
+    async isUnityObjectType() {
+      return true;
+    },
     async findReferences() {
       return [];
     },
@@ -3172,11 +3309,23 @@ async function assertPendingCodeLenses(
   runtime: EventReferenceRuntime,
   document: vscode.TextDocument
 ): Promise<void> {
-  assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), [
-    '- Unity serialized instances',
-    '- UnityEvent references',
-    '- UnityEvent targets'
-  ]);
+  const expected = createExpectedPendingCodeLensTitles(document.getText());
+  assert.deepStrictEqual((await runtime.provideCodeLenses(document)).map(lens => lens.command?.title), expected);
+}
+
+/** Builds the pending CodeLens titles expected under field-level placeholder rules. */
+function createExpectedPendingCodeLensTitles(source: string): string[] {
+  const titles: string[] = [];
+  if (/\bclass\s+[A-Za-z_][A-Za-z0-9_]*/.test(source)) {
+    titles.push('- Unity serialized instances');
+  }
+
+  const unityEventFieldCount = Array.from(source.matchAll(/\b(?:UnityEngine\.Events\.)?UnityEvent(?:<[^;\n]+>)?\s+[A-Za-z_][A-Za-z0-9_]*\b/g)).length;
+  for (let index = 0; index < unityEventFieldCount; index += 1) {
+    titles.push('- UnityEvent references', '- UnityEvent targets');
+  }
+
+  return titles;
 }
 
 function createDisposable(): vscode.Disposable {
