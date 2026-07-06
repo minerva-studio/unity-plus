@@ -511,7 +511,12 @@ async function refineTypeRangesFromSource(
       matchesCSharpTypeName(candidate.fullName, type.fullName) ||
       matchesCSharpTypeName(candidate.name, type.name)
     );
-    return sourceType ? { ...type, range: sourceType.range } : type;
+    return sourceType ? {
+      ...type,
+      name: sourceType.name,
+      fullName: sourceType.fullName,
+      range: sourceType.range
+    } : type;
   });
 }
 
