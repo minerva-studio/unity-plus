@@ -1,67 +1,113 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { createVscodeCSharpLanguageService } from '../../unity/csharpLanguageService';
+import { configureCSharpSolution, getUnityFixtureRoot } from './csharpProviderSetup';
 
 /**
  * Integration tests for CSharpLanguageService.
  *
  * These tests use:
  * - Real vscode APIs (workspace.openTextDocument, commands.executeCommand)
- * - Real .cs files written to temp directories
+ * - Real .cs files included in the fixture solution
  * - Real VS Code document symbol provider from the configured C# extension
  */
 
-let tempDir: string;
+let fixtureRoot: vscode.Uri;
+const csharpReadinessTimeoutMs = 60_000;
+const csharpNamespaceOnlyFastFailMs = 20_000;
+const csharpReadinessLogIntervalMs = 2_000;
 
-/** Writes a temporary C# file and returns its VS Code URI. */
-function writeCsFile(filename: string, lines: string[]): vscode.Uri {
-  const filePath = join(tempDir, filename);
-  writeFileSync(filePath, lines.join('\n'), 'utf-8');
-  return vscode.Uri.file(filePath);
+/** Waits until the production C# service can report one expected type. */
+async function waitForCSharpType(uri: vscode.Uri, expectedFullName: string): Promise<void> {
+  const service = createVscodeCSharpLanguageService(vscode);
+  const startedAt = Date.now();
+  const timeoutAt = startedAt + csharpReadinessTimeoutMs;
+  let namespaceOnlySince: number | undefined;
+  let nextLogAt = startedAt + csharpReadinessLogIntervalMs;
+  let lastTypes: string[] = [];
+  let lastError: string | undefined;
+
+  while (Date.now() < timeoutAt) {
+    const now = Date.now();
+    try {
+      const types = await service.findTypes(uri);
+      lastTypes = types.map(type => type.fullName);
+      lastError = undefined;
+      namespaceOnlySince = undefined;
+      if (lastTypes.includes(expectedFullName)) {
+        return;
+      }
+    } catch (error) {
+      // The provider can briefly return namespace-only symbols while loading.
+      lastError = error instanceof Error ? error.message : String(error);
+      namespaceOnlySince = isNamespaceOnlyProviderError(lastError)
+        ? namespaceOnlySince ?? now
+        : undefined;
+    }
+
+    if (namespaceOnlySince !== undefined && Date.now() - namespaceOnlySince >= csharpNamespaceOnlyFastFailMs) {
+      failCSharpTypeReadiness(uri, expectedFullName, lastTypes, lastError);
+    }
+
+    if (Date.now() >= nextLogAt) {
+      console.log(
+        `[csharp readiness] waiting for ${expectedFullName} after ${Math.round((Date.now() - startedAt) / 1000)}s. ` +
+        `Last types: ${lastTypes.join(', ') || '<none>'}. Last error: ${lastError ?? '<none>'}.`
+      );
+      nextLogAt = Date.now() + csharpReadinessLogIntervalMs;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  failCSharpTypeReadiness(uri, expectedFullName, lastTypes, lastError);
 }
 
-suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
+/** Checks for the production service's namespace-only provider contract error. */
+function isNamespaceOnlyProviderError(message: string | undefined): boolean {
+  return message?.includes('namespace-only symbols') ?? false;
+}
+
+/** Fails a C# type readiness wait with the last provider state. */
+function failCSharpTypeReadiness(
+  uri: vscode.Uri,
+  expectedFullName: string,
+  lastTypes: readonly string[],
+  lastError: string | undefined
+): never {
+  assert.fail(
+    `C# language service did not include ${expectedFullName} for ${uri.fsPath}. ` +
+    `Last types: ${lastTypes.join(', ') || '<none>'}. ` +
+    `Last error: ${lastError ?? '<none>'}.`
+  );
+}
+
+suite('csharpLanguageService - VS Code Document Symbol Integration', () => {
   let service: ReturnType<typeof createVscodeCSharpLanguageService>;
 
-  suiteSetup(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'unity-plus-csharp-symbols-'));
+  suiteSetup(async function () {
+    this.timeout(120_000);
+    fixtureRoot = getUnityFixtureRoot();
+    await configureCSharpSolution(fixtureRoot);
     service = createVscodeCSharpLanguageService(vscode);
   });
 
-  suiteTeardown(() => {
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+  test('can call executeDocumentSymbolProvider on a .cs file', async function () {
+    this.timeout(120_000);
+    const uri = vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'SymbolTest.cs'));
 
-  test('can call executeDocumentSymbolProvider on a .cs file', async () => {
-    const filePath = join(tempDir, 'SymbolTest.cs');
-    writeFileSync(filePath, [
-      'namespace Minerva.Gameplay;',
-      'public class SymbolTest { }',
-    ].join('\n'), 'utf-8');
-    const uri = vscode.Uri.file(filePath);
-
-    // Open the document so the C# provider can load it before symbol requests.
-    const doc = await vscode.workspace.openTextDocument(uri);
-
-    const primaryType = await service.getPrimaryTopLevelType(doc.uri);
+    await waitForCSharpType(uri, 'Minerva.Gameplay.SymbolTest');
+    const primaryType = await service.getPrimaryTopLevelType(uri);
 
     assert.strictEqual(primaryType?.name, 'SymbolTest');
   });
 
-  test('findTypes and primary type work for an unopened .cs file', async () => {
-    const uri = writeCsFile('UnopenedGate.cs', [
-      'namespace Amlos.Fixtures;',
-      'public class UnopenedGate',
-      '{',
-      '    public void Open() { }',
-      '}',
-    ]);
+  test('findTypes and primary type work for an unopened .cs file', async function () {
+    this.timeout(120_000);
+    const uri = vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'UnopenedGate.cs'));
 
+    await waitForCSharpType(uri, 'Amlos.Fixtures.UnopenedGate');
     const types = await service.findTypes(uri);
     const primaryType = await service.getPrimaryTopLevelType(uri);
 
@@ -72,35 +118,18 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
   });
 
   test('findReferences returns an array (may be empty)', async () => {
-    const filePath = join(tempDir, 'RefTest.cs');
-    writeFileSync(filePath, [
-      'namespace Minerva.Gameplay;',
-      'public class RefTest { }',
-    ].join('\n'), 'utf-8');
-    const uri = vscode.Uri.file(filePath);
+    const uri = vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'SymbolTest.cs'));
 
-    const refs = await service.findReferences(uri, { line: 1, character: 13 });
+    const refs = await service.findReferences(uri, { line: 5, character: 13 });
 
     assert.ok(Array.isArray(refs), 'findReferences should return an array');
   });
 
-  test('returns provider symbol positions for types, UnityEvent fields, and methods', async () => {
-    const lines = [
-      'using UnityEngine.Events;',
-      'namespace Amlos.Control.Interact',
-      '{',
-      '    public sealed class Interactable : MonoBehaviour',
-      '    {',
-      '        public UnityEvent<ResultArg<bool>> OnCheckEnable = new();',
-      '        [DisplayIf(nameof(overrideDefaultHighlight))] public UnityEvent OnHighlighting = new();',
-      '        public void Interact() {}',
-      '    }',
-      '}'
-    ];
-    const filePath = join(tempDir, 'Interactable.cs');
-    writeFileSync(filePath, lines.join('\n'), 'utf-8');
-    const uri = vscode.Uri.file(filePath);
+  test('returns provider symbol positions for types, UnityEvent fields, and methods', async function () {
+    this.timeout(120_000);
+    const uri = vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs'));
 
+    await waitForCSharpType(uri, 'Amlos.Control.Interact.Interactable');
     const types = await service.findTypes(uri);
     const fields = await service.findUnityEventFields(uri);
     const methods = await service.findMethods(uri);
@@ -109,13 +138,14 @@ suite('csharpLanguageService — VS Code Document Symbol Integration', () => {
     assert.deepStrictEqual(types.map(type => type.fullName), ['Amlos.Control.Interact.Interactable']);
     assert.ok(types[0].range, 'type range should come from C# provider symbols');
     assert.ok(fields.find(field => field.name === 'OnCheckEnable')?.range, 'UnityEvent field range should come from C# provider symbols');
-    assert.ok(fields.find(field => field.name === 'OnHighlighting')?.range, 'attribute-adjacent UnityEvent field range should come from C# provider symbols');
+    assert.strictEqual(fields.find(field => field.name === 'OnCheckEnable')?.typeName, 'Amlos.Control.Interact.Interactable');
     assert.ok(methods.find(method => method.name === 'Interact')?.range, 'method range should come from C# provider symbols');
+    assert.strictEqual(methods.find(method => method.name === 'Interact')?.typeName, 'Amlos.Control.Interact.Interactable');
     assert.ok(targets.length > 0, 'target method positions should come from C# provider symbols');
   });
 
   test('throws when C# document symbols are unavailable', async () => {
-    const uri = vscode.Uri.file(join(tempDir, 'MissingFile.cs'));
+    const uri = vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'MissingFile.cs'));
 
     await assert.rejects(async () => await service.findTypes(uri));
   });

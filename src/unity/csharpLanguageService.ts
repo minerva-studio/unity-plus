@@ -70,6 +70,12 @@ interface TopLevelTypeSymbolCandidate {
   range: vscode.Range;
 }
 
+interface TypeHierarchyLookupCandidate {
+  name: string;
+  fullName: string;
+  position: vscode.Position;
+}
+
 export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode): CSharpSymbolLanguageService {
   return {
     async getPrimaryTopLevelType(uri) {
@@ -80,6 +86,13 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const methods: CSharpMethodSymbolSnapshot[] = [];
       collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
+      let workspaceCovered = false;
+      if (methods.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+        const workspaceMethods = await collectWorkspaceMethodSymbols(runtimeVscode, uri, symbols);
+        workspaceCovered = workspaceMethods.covered;
+        methods.push(...workspaceMethods.methods);
+      }
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, methods.length, 'methods', workspaceCovered);
       return methods;
     },
     async findTypes(uri) {
@@ -87,6 +100,13 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const types: CSharpTypeSymbolSnapshot[] = [];
       collectCSharpTypeSymbols(runtimeVscode, symbols, [], types);
+      let workspaceCovered = false;
+      if (types.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+        const workspaceTypes = await collectWorkspaceTypeSymbols(runtimeVscode, uri, symbols);
+        workspaceCovered = workspaceTypes.covered;
+        types.push(...workspaceTypes.types);
+      }
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, types.length, 'types', workspaceCovered);
       return types;
     },
     async findUnityEventFields(uri) {
@@ -94,6 +114,13 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const fields: CSharpFieldSymbolSnapshot[] = [];
       collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
+      let workspaceCovered = false;
+      if (fields.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+        const workspaceFields = await collectWorkspaceUnityEventFieldSymbols(runtimeVscode, uri, symbols);
+        workspaceCovered = workspaceFields.covered;
+        fields.push(...workspaceFields.fields);
+      }
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, fields.length, 'UnityEvent fields', workspaceCovered);
       return fields;
     },
     async findMethodAtPosition(uri, position) {
@@ -106,7 +133,14 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
 
       const positions: CSharpPosition[] = [];
-      collectTargetMethodSymbolPositions(runtimeVscode, symbols, targetTypeName, methodName, positions);
+      collectTargetMethodSymbolPositions(runtimeVscode, symbols, [], targetTypeName, methodName, positions);
+      let workspaceCovered = false;
+      if (positions.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+        const workspacePositions = await collectWorkspaceTargetMethodPositions(runtimeVscode, uri, symbols, targetTypeName, methodName);
+        workspaceCovered = workspacePositions.covered;
+        positions.push(...workspacePositions.positions);
+      }
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, positions.length, `target method ${targetTypeName}.${methodName}`, workspaceCovered);
       return positions;
     },
     async isUnityObjectType(uri, typeName) {
@@ -151,13 +185,10 @@ async function isUnityObjectTypeFromHierarchy(
   typeName: string
 ): Promise<boolean> {
   try {
-    const types = await getDocumentSymbols(runtimeVscode, uri);
-    const candidates: TopLevelTypeSymbolCandidate[] = [];
-    for (const symbol of types) {
-      collectTopLevelTypeSymbols(runtimeVscode, symbol, [], candidates);
-    }
+    const symbols = await getDocumentSymbols(runtimeVscode, uri);
+    const candidates = await collectTypeHierarchyLookupCandidates(runtimeVscode, uri, symbols);
     const type = candidates.find(candidate =>
-      matchesCSharpTypeName(toTopLevelTypeFullName(candidate), typeName) ||
+      matchesCSharpTypeName(candidate.fullName, typeName) ||
       matchesCSharpTypeName(candidate.name, typeName)
     );
     if (!type) {
@@ -179,6 +210,37 @@ async function isUnityObjectTypeFromHierarchy(
   } catch {
     return false;
   }
+}
+
+/** Collects provider-backed type positions that can seed VS Code TypeHierarchy. */
+async function collectTypeHierarchyLookupCandidates(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]
+): Promise<TypeHierarchyLookupCandidate[]> {
+  const candidates: TopLevelTypeSymbolCandidate[] = [];
+  for (const symbol of symbols) {
+    collectTopLevelTypeSymbols(runtimeVscode, symbol, [], candidates);
+  }
+
+  if (candidates.length > 0) {
+    return candidates.map(candidate => ({
+      name: normalizeCSharpSymbolName(candidate.name),
+      fullName: toTopLevelTypeFullName(candidate),
+      position: candidate.position
+    }));
+  }
+
+  if (!containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+    return [];
+  }
+
+  const workspaceTypes = await collectWorkspaceTypeSymbols(runtimeVscode, uri, symbols);
+  return workspaceTypes.types.map(type => ({
+    name: type.name,
+    fullName: type.fullName,
+    position: new runtimeVscode.Position(type.range.start.line, type.range.start.character)
+  }));
 }
 
 /** Walks type hierarchy parents while avoiding cycles from buggy language servers. */
@@ -232,7 +294,7 @@ function matchesTypeHierarchyItemName(item: vscode.TypeHierarchyItem, typeName: 
 
 /** Creates the full C# type name from provider symbol namespace metadata. */
 function toTopLevelTypeFullName(type: TopLevelTypeSymbolCandidate): string {
-  return type.namespace ? `${type.namespace}.${type.name}` : type.name;
+  return joinCSharpName(type.namespace, type.name);
 }
 
 /** Reads C# symbols from the active language server after loading the document in VS Code. */
@@ -241,10 +303,15 @@ async function getDocumentSymbols(
   uri: vscode.Uri
 ): Promise<Array<vscode.DocumentSymbol | vscode.SymbolInformation>> {
   const document = await runtimeVscode.workspace.openTextDocument(uri);
-  return await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation>>(
+  const symbols = await runtimeVscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined>(
     'vscode.executeDocumentSymbolProvider',
     document.uri
-  ) ?? [];
+  );
+  if (!symbols) {
+    throw new Error(`C# document symbol provider returned no result for ${uri.fsPath}.`);
+  }
+
+  return symbols;
 }
 
 /** Collects method symbols and annotates each method with its nearest containing type. */
@@ -259,7 +326,7 @@ function collectCSharpMethodSymbols(
       if (symbol.kind === runtimeVscode.SymbolKind.Method) {
         methods.push({
           name: normalizeCSharpSymbolName(symbol.name),
-          typeName: symbol.containerName,
+          typeName: normalizeCSharpQualifiedName(symbol.containerName),
           range: toCSharpRange(symbol.location.range)
         });
       }
@@ -288,11 +355,10 @@ function collectCSharpTypeSymbols(
   for (const symbol of symbols) {
     if (isSymbolInformation(symbol)) {
       if (getTopLevelTypeKind(runtimeVscode, symbol.kind)) {
+        const name = normalizeCSharpSymbolName(symbol.name);
         types.push({
-          name: normalizeCSharpSymbolName(symbol.name),
-          fullName: symbol.containerName
-            ? `${symbol.containerName}.${normalizeCSharpSymbolName(symbol.name)}`
-            : normalizeCSharpSymbolName(symbol.name),
+          name,
+          fullName: joinCSharpName(normalizeCSharpNamespaceName(symbol.containerName), name),
           range: toCSharpRange(symbol.location.range)
         });
       }
@@ -304,7 +370,7 @@ function collectCSharpTypeSymbols(
       const namespaceName = findNearestNamespace(runtimeVscode, ancestors);
       types.push({
         name,
-        fullName: namespaceName ? `${namespaceName}.${name}` : name,
+        fullName: joinCSharpName(namespaceName, name),
         range: toCSharpRange(symbol.selectionRange)
       });
     }
@@ -343,6 +409,7 @@ function collectUnityEventFieldSymbols(
 function collectTargetMethodSymbolPositions(
   runtimeVscode: typeof vscode,
   symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[],
+  ancestors: readonly vscode.DocumentSymbol[],
   targetTypeName: string,
   methodName: string,
   positions: CSharpPosition[]
@@ -352,18 +419,21 @@ function collectTargetMethodSymbolPositions(
       if (symbol.kind === runtimeVscode.SymbolKind.Method &&
         normalizeCSharpSymbolName(symbol.name) === methodName &&
         symbol.containerName &&
-        matchesCSharpTypeName(symbol.containerName, targetTypeName)) {
+        matchesCSharpTypeName(normalizeCSharpQualifiedName(symbol.containerName) ?? symbol.containerName, targetTypeName)) {
         positions.push(toCSharpPosition(symbol.location.range.start));
       }
       continue;
     }
 
-    if (getTopLevelTypeKind(runtimeVscode, symbol.kind) && matchesCSharpTypeName(symbol.name, targetTypeName)) {
+    const symbolTypeName = getTopLevelTypeKind(runtimeVscode, symbol.kind)
+      ? joinCSharpName(findNearestNamespace(runtimeVscode, ancestors), normalizeCSharpSymbolName(symbol.name))
+      : undefined;
+    if (symbolTypeName && matchesCSharpTypeName(symbolTypeName, targetTypeName)) {
       collectMethodSymbolsInType(runtimeVscode, symbol, methodName, positions);
-      continue; // Found the target type — don't recurse further into other types
+      continue; // Found the target type, so skip recursion into other types.
     }
 
-    collectTargetMethodSymbolPositions(runtimeVscode, symbol.children, targetTypeName, methodName, positions);
+    collectTargetMethodSymbolPositions(runtimeVscode, symbol.children, [...ancestors, symbol], targetTypeName, methodName, positions);
   }
 }
 
@@ -388,6 +458,295 @@ function isUnityEventSymbol(symbol: vscode.DocumentSymbol): boolean {
   return /\bUnityEvent\b/.test(symbol.detail);
 }
 
+/** Collects type snapshots from the C# workspace symbol provider for namespace-only document snapshots. */
+async function collectWorkspaceTypeSymbols(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  documentSymbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]
+): Promise<{ types: CSharpTypeSymbolSnapshot[]; covered: boolean }> {
+  const namespaceName = findDocumentNamespace(runtimeVscode, documentSymbols);
+  const symbols = await getWorkspaceSymbolsForUri(runtimeVscode, uri, [fileStem(uri.fsPath), ...workspaceSymbolProbeQueries()]);
+  const types = uniqueBy(
+    symbols
+      .filter(symbol => getTopLevelTypeKind(runtimeVscode, symbol.kind))
+      .map(symbol => ({
+        name: normalizeCSharpSymbolName(symbol.name),
+        fullName: joinCSharpName(namespaceName, symbol.name),
+        range: toCSharpRange(symbol.location.range)
+      })),
+    type => `${type.fullName}:${type.range.start.line}:${type.range.start.character}`
+  );
+  return { types, covered: symbols.length > 0 };
+}
+
+/** Collects method snapshots from C# workspace symbols when document symbols only expose namespaces. */
+async function collectWorkspaceMethodSymbols(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  documentSymbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]
+): Promise<{ methods: CSharpMethodSymbolSnapshot[]; covered: boolean }> {
+  const namespaceName = findDocumentNamespace(runtimeVscode, documentSymbols);
+  const symbols = await getWorkspaceSymbolsForUri(runtimeVscode, uri, [fileStem(uri.fsPath), ...workspaceSymbolProbeQueries()]);
+  const methods = uniqueBy(
+    symbols
+      .filter(symbol => symbol.kind === runtimeVscode.SymbolKind.Method)
+      .map(symbol => ({
+        name: normalizeCSharpSymbolName(symbol.name),
+        typeName: toWorkspaceMemberTypeName(namespaceName, symbol.containerName),
+        range: toCSharpRange(symbol.location.range)
+      })),
+    method => `${method.name}:${method.range.start.line}:${method.range.start.character}`
+  );
+  return { methods, covered: symbols.length > 0 };
+}
+
+/** Collects UnityEvent fields proved by C# hover data for namespace-only document snapshots. */
+async function collectWorkspaceUnityEventFieldSymbols(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  documentSymbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]
+): Promise<{ fields: CSharpFieldSymbolSnapshot[]; covered: boolean }> {
+  const namespaceName = findDocumentNamespace(runtimeVscode, documentSymbols);
+  const symbols = await getWorkspaceSymbolsForUri(runtimeVscode, uri, [fileStem(uri.fsPath), ...workspaceSymbolProbeQueries()]);
+  const fields: CSharpFieldSymbolSnapshot[] = [];
+
+  for (const symbol of uniqueWorkspaceSymbols(symbols).filter(candidate => candidate.kind === runtimeVscode.SymbolKind.Field)) {
+    if (!await isUnityEventWorkspaceSymbol(runtimeVscode, symbol)) {
+      continue;
+    }
+
+    fields.push({
+      name: normalizeCSharpSymbolName(symbol.name),
+      typeName: toWorkspaceMemberTypeName(namespaceName, symbol.containerName),
+      range: toCSharpRange(symbol.location.range)
+    });
+  }
+
+  return { fields, covered: symbols.length > 0 };
+}
+
+/** Finds target methods by name through the C# workspace symbol provider. */
+async function collectWorkspaceTargetMethodPositions(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  documentSymbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[],
+  targetTypeName: string,
+  methodName: string
+): Promise<{ positions: CSharpPosition[]; covered: boolean }> {
+  const namespaceName = findDocumentNamespace(runtimeVscode, documentSymbols);
+  const symbols = await getWorkspaceSymbolsForUri(runtimeVscode, uri, [methodName]);
+  const positions = uniqueBy(
+    symbols
+      .filter(symbol => symbol.kind === runtimeVscode.SymbolKind.Method)
+      .filter(symbol => normalizeCSharpSymbolName(symbol.name) === methodName)
+      .filter(symbol => {
+        const typeName = toWorkspaceMemberTypeName(namespaceName, symbol.containerName);
+        return typeName ? matchesCSharpTypeName(typeName, targetTypeName) : false;
+      })
+      .map(symbol => toCSharpPosition(symbol.location.range.start)),
+    position => `${position.line}:${position.character}`
+  );
+  return { positions, covered: symbols.length > 0 };
+}
+
+/** Reads workspace symbols from the C# provider and keeps only symbols from the target document. */
+async function getWorkspaceSymbolsForUri(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  queries: readonly string[]
+): Promise<vscode.SymbolInformation[]> {
+  const symbols: vscode.SymbolInformation[] = [];
+
+  for (const query of queries.filter(Boolean)) {
+    const results = await runtimeVscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>(
+      'vscode.executeWorkspaceSymbolProvider',
+      query
+    );
+    symbols.push(...(results ?? []).filter(symbol => isSameCSharpSymbolPath(symbol.location.uri.fsPath, uri.fsPath)));
+  }
+
+  return uniqueWorkspaceSymbols(symbols);
+}
+
+/** Deduplicates workspace symbols returned by multiple fuzzy queries. */
+function uniqueWorkspaceSymbols(symbols: readonly vscode.SymbolInformation[]): vscode.SymbolInformation[] {
+  return uniqueBy(symbols, symbol =>
+    `${symbol.name}:${symbol.kind}:${symbol.containerName ?? ''}:${symbol.location.uri.fsPath}:` +
+    `${symbol.location.range.start.line}:${symbol.location.range.start.character}`
+  );
+}
+
+/** Uses hover text from the C# provider to prove a workspace field is UnityEvent-typed. */
+async function isUnityEventWorkspaceSymbol(runtimeVscode: typeof vscode, symbol: vscode.SymbolInformation): Promise<boolean> {
+  const hovers = await runtimeVscode.commands.executeCommand<vscode.Hover[] | undefined>(
+    'vscode.executeHoverProvider',
+    symbol.location.uri,
+    symbol.location.range.start
+  );
+  return (hovers ?? []).some(hover => hover.contents.some(content => hoverContentText(content).includes('UnityEvent')));
+}
+
+/** Converts VS Code hover content into plain text for provider-type checks. */
+function hoverContentText(content: vscode.MarkdownString | vscode.MarkedString): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  return content.value;
+}
+
+/** Creates a full containing type name from workspace symbol container labels. */
+function toWorkspaceMemberTypeName(namespaceName: string | undefined, containerName: string | undefined): string | undefined {
+  const typeName = normalizeWorkspaceContainerTypeName(containerName);
+  if (!typeName) {
+    return undefined;
+  }
+
+  const normalizedNamespace = normalizeCSharpNamespaceName(namespaceName);
+  if (!normalizedNamespace || typeName.includes('.') || typeName.startsWith(`${normalizedNamespace}.`)) {
+    return typeName;
+  }
+
+  return joinCSharpName(normalizedNamespace, typeName);
+}
+
+/** Extracts the type name from labels such as "in Interactable (project X)". */
+function normalizeWorkspaceContainerTypeName(containerName: string | undefined): string | undefined {
+  const matched = containerName?.match(/^in\s+(.+?)(?:\s+\(|$)/);
+  return normalizeCSharpQualifiedName(matched?.[1] ?? containerName);
+}
+
+/** Finds the namespace supplied by document symbols without reading C# source text. */
+function findDocumentNamespace(
+  runtimeVscode: typeof vscode,
+  symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]
+): string | undefined {
+  for (const symbol of symbols) {
+    if (symbol.kind !== runtimeVscode.SymbolKind.Namespace) {
+      continue;
+    }
+
+    const name = normalizeCSharpNamespaceName(symbol.name);
+    if (name) {
+      return name;
+    }
+  }
+
+  return undefined;
+}
+
+/** Returns fuzzy queries that expose C# workspace method and field symbols without source parsing. */
+function workspaceSymbolProbeQueries(): string[] {
+  return 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_'.split('');
+}
+
+/** Returns a file name without its extension for provider symbol lookup. */
+function fileStem(path: string): string {
+  return path.replace(/^.*[\\/]/, '').replace(/\.[^.]*$/, '');
+}
+
+/** Normalizes file paths for URI equality checks across Windows casing and separators. */
+function normalizeFsPath(path: string): string {
+  return path.replace(/\\/g, '/').toLowerCase();
+}
+
+/** Compares provider paths while tolerating junction and physical workspace prefixes. */
+function isSameCSharpSymbolPath(providerPath: string, targetPath: string): boolean {
+  const normalizedProviderPath = normalizeFsPath(providerPath);
+  const normalizedTargetPath = normalizeFsPath(targetPath);
+  if (normalizedProviderPath === normalizedTargetPath) {
+    return true;
+  }
+
+  const providerAssetPath = assetRelativePath(normalizedProviderPath);
+  const targetAssetPath = assetRelativePath(normalizedTargetPath);
+  return providerAssetPath !== undefined &&
+    targetAssetPath !== undefined &&
+    providerAssetPath === targetAssetPath;
+}
+
+/** Extracts a Unity asset-relative path from an absolute path. */
+function assetRelativePath(path: string): string | undefined {
+  const marker = '/assets/';
+  const index = path.lastIndexOf(marker);
+  return index >= 0 ? path.slice(index + 1) : undefined;
+}
+
+/** Deduplicates values while preserving provider result order. */
+function uniqueBy<T>(values: readonly T[], getKey: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  const unique: T[] = [];
+
+  for (const value of values) {
+    const key = getKey(value);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(value);
+  }
+
+  return unique;
+}
+
+/** Fails when the C# provider reports namespaces but omits semantic children. */
+function throwIfNamespaceOnlyDocumentSymbols(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[],
+  resultCount: number,
+  semanticName: string,
+  providerCovered = false
+): void {
+  if (resultCount > 0 || providerCovered || symbols.length === 0 || !containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+    return;
+  }
+
+  const providerNames = flattenProviderSymbolNames(symbols).join(', ') || '<none>';
+  throw new Error(
+    `C# document symbol provider returned namespace-only symbols for ${semanticName} in ${uri.fsPath}. ` +
+    `Provider symbols: ${providerNames}.`
+  );
+}
+
+/** Checks whether every provider symbol is a namespace container. */
+function containsOnlyNamespaceSymbols(
+  runtimeVscode: typeof vscode,
+  symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]
+): boolean {
+  let sawSymbol = false;
+
+  for (const symbol of symbols) {
+    sawSymbol = true;
+    if (symbol.kind !== runtimeVscode.SymbolKind.Namespace) {
+      return false;
+    }
+
+    if (!isSymbolInformation(symbol) &&
+      symbol.children.length > 0 &&
+      !containsOnlyNamespaceSymbols(runtimeVscode, symbol.children)) {
+      return false;
+    }
+  }
+
+  return sawSymbol;
+}
+
+/** Flattens provider symbols for dependency diagnostics without reading source text. */
+function flattenProviderSymbolNames(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): string[] {
+  const names: string[] = [];
+
+  for (const symbol of symbols) {
+    names.push(normalizeCSharpSymbolName(symbol.name));
+    if (!isSymbolInformation(symbol)) {
+      names.push(...flattenProviderSymbolNames(symbol.children));
+    }
+  }
+
+  return names;
+}
+
 /** Finds the nearest type ancestor for method and field symbols. */
 function findNearestTypeName(runtimeVscode: typeof vscode, ancestors: readonly vscode.DocumentSymbol[]): string | undefined {
   const typeSymbol = [...ancestors]
@@ -398,7 +757,7 @@ function findNearestTypeName(runtimeVscode: typeof vscode, ancestors: readonly v
   }
 
   const namespaceName = findNearestNamespace(runtimeVscode, ancestors);
-  return namespaceName ? `${namespaceName}.${normalizeCSharpSymbolName(typeSymbol.name)}` : normalizeCSharpSymbolName(typeSymbol.name);
+  return joinCSharpName(namespaceName, normalizeCSharpSymbolName(typeSymbol.name));
 }
 
 /** Converts VS Code ranges into the language-service-neutral range shape. */
@@ -426,7 +785,32 @@ function containsCSharpPosition(range: CSharpRange, position: CSharpPosition): b
 
 /** Removes language-server display suffixes such as method parameter lists. */
 function normalizeCSharpSymbolName(name: string): string {
-  return name.replace(/\s*\(.*$/, '');
+  return name.replace(/\s*\(.*$/, '').trim();
+}
+
+/** Normalizes namespace labels from C# providers before creating snapshots. */
+function normalizeCSharpNamespaceName(name: string | undefined): string | undefined {
+  const normalized = name
+    ?.replace(/\s+/g, '')
+    .replace(/\.+$/g, '');
+  return normalized ? normalized : undefined;
+}
+
+/** Normalizes provider-qualified type names without inventing missing type data. */
+function normalizeCSharpQualifiedName(name: string | undefined): string | undefined {
+  const normalized = name
+    ?.split('.')
+    .map(part => normalizeCSharpSymbolName(part))
+    .filter(Boolean)
+    .join('.');
+  return normalizeCSharpNamespaceName(normalized);
+}
+
+/** Joins namespace and symbol names without allowing empty or doubled separators. */
+function joinCSharpName(namespaceName: string | undefined, name: string): string {
+  const normalizedNamespace = normalizeCSharpNamespaceName(namespaceName);
+  const normalizedName = normalizeCSharpSymbolName(name);
+  return normalizedNamespace ? `${normalizedNamespace}.${normalizedName}` : normalizedName;
 }
 
 /** Compares full or short C# type names case-insensitively. */
@@ -442,7 +826,7 @@ function shortCSharpTypeName(typeName: string): string {
 
 /** Normalizes C# symbol names for case-insensitive comparisons. */
 function csharpSymbolKey(value: string): string {
-  return value.toLowerCase();
+  return normalizeCSharpQualifiedName(value)?.toLowerCase() ?? '';
 }
 
 async function getPrimaryTopLevelTypeFromSymbols(
@@ -459,6 +843,22 @@ async function getPrimaryTopLevelTypeFromSymbols(
   for (const symbol of symbols) {
     collectTopLevelTypeSymbols(runtimeVscode, symbol, [], candidates);
   }
+  let workspaceCovered = false;
+  if (candidates.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+    const workspaceTypes = await collectWorkspaceTypeSymbols(runtimeVscode, uri, symbols);
+    workspaceCovered = workspaceTypes.covered;
+    candidates.push(...workspaceTypes.types.map(type => ({
+      name: type.name,
+      kind: 'class' as const,
+      namespace: findDocumentNamespace(runtimeVscode, symbols),
+      position: new runtimeVscode.Position(type.range.start.line, type.range.start.character),
+      range: new runtimeVscode.Range(
+        new runtimeVscode.Position(type.range.start.line, type.range.start.character),
+        new runtimeVscode.Position(type.range.end.line, type.range.end.character)
+      )
+    })));
+  }
+  throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, candidates.length, 'primary top-level type', workspaceCovered);
 
   if (candidates.length !== 1) {
     return undefined;
@@ -469,9 +869,9 @@ async function getPrimaryTopLevelTypeFromSymbols(
 
 function createTypeSnapshot(candidate: TopLevelTypeSymbolCandidate): CSharpTopLevelTypeSnapshot {
   return {
-    name: candidate.name,
+    name: normalizeCSharpSymbolName(candidate.name),
     kind: candidate.kind,
-    namespace: candidate.namespace,
+    namespace: normalizeCSharpNamespaceName(candidate.namespace),
     position: {
       line: candidate.position.line,
       character: candidate.position.character
@@ -498,10 +898,11 @@ function collectTopLevelTypeSymbols(
   if (isSymbolInformation(symbol)) {
     const kind = getTopLevelTypeKind(runtimeVscode, symbol.kind);
     if (kind) {
+      const name = normalizeCSharpSymbolName(symbol.name);
       candidates.push({
-        name: symbol.name,
+        name,
         kind,
-        namespace: symbol.containerName,
+        namespace: normalizeCSharpNamespaceName(symbol.containerName),
         position: symbol.location.range.start,
         range: symbol.location.range
       });
@@ -513,7 +914,7 @@ function collectTopLevelTypeSymbols(
   const kind = getTopLevelTypeKind(runtimeVscode, symbol.kind);
   if (kind && !hasTypeAncestor) {
     candidates.push({
-      name: symbol.name,
+      name: normalizeCSharpSymbolName(symbol.name),
       kind,
       namespace: findNearestNamespace(runtimeVscode, ancestors),
       position: symbol.selectionRange.start,
@@ -551,10 +952,26 @@ function getTopLevelTypeKind(
 }
 
 function findNearestNamespace(runtimeVscode: typeof vscode, ancestors: readonly vscode.DocumentSymbol[]): string | undefined {
-  const namespaceSymbol = [...ancestors]
-    .reverse()
-    .find(ancestor => ancestor.kind === runtimeVscode.SymbolKind.Namespace);
-  return namespaceSymbol?.name;
+  let namespaceName: string | undefined;
+
+  for (const ancestor of ancestors) {
+    if (ancestor.kind !== runtimeVscode.SymbolKind.Namespace) {
+      continue;
+    }
+
+    const nextName = normalizeCSharpNamespaceName(ancestor.name);
+    if (!nextName) {
+      continue;
+    }
+
+    // Some C# providers emit full namespace names at each namespace node;
+    // others emit one segment per nested namespace node.
+    namespaceName = !namespaceName || nextName.startsWith(`${namespaceName}.`)
+      ? nextName
+      : `${namespaceName}.${nextName}`;
+  }
+
+  return namespaceName;
 }
 
 function isSymbolInformation(symbol: vscode.DocumentSymbol | vscode.SymbolInformation): symbol is vscode.SymbolInformation {

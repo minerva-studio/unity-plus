@@ -10,8 +10,12 @@ import { readDefaultTextFile } from '../../features/event-references/utils';
 import { createVscodeCSharpLanguageService } from '../../unity/csharpLanguageService';
 import { createLazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityPlusLogger } from '../../unity/logger';
+import { configureCSharpSolution, getUnityFixtureRoot } from './csharpProviderSetup';
 
 let fixtureRoot: vscode.Uri;
+const csharpReadinessTimeoutMs = 60_000;
+const csharpNamespaceOnlyFastFailMs = 20_000;
+const csharpReadinessLogIntervalMs = 2_000;
 
 suite('eventReferences - Real Unity Project Shape', () => {
   suiteSetup(async function () {
@@ -19,6 +23,7 @@ suite('eventReferences - Real Unity Project Shape', () => {
     fixtureRoot = getUnityFixtureRoot();
     await configureCSharpSolution(fixtureRoot);
     await waitForUnityFixtureDiscovery(fixtureRoot);
+    await vscode.workspace.getConfiguration('unityPlus').update('eventReferences.enabled', false, vscode.ConfigurationTarget.Global);
     await waitForCSharpLanguageServiceDeclarations(
       vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs')),
       ['type:Interactable', 'field:OnCheckEnable']
@@ -112,29 +117,6 @@ suite('eventReferences - Real Unity Project Shape', () => {
   });
 });
 
-/** Returns the Unity project folder opened by the integration test runner. */
-function getUnityFixtureRoot(): vscode.Uri {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  assert.ok(folder, 'integration tests must open the Unity fixture workspace');
-  return folder.uri;
-}
-
-/** Points the real C# extension at the generated solution before symbol queries start. */
-async function configureCSharpSolution(root: vscode.Uri): Promise<void> {
-  const solutionPath = join(root.fsPath, 'UnityEventFixture.sln');
-  await vscode.workspace.getConfiguration('dotnet').update('defaultSolution', solutionPath, vscode.ConfigurationTarget.Global);
-  await vscode.workspace.openTextDocument(vscode.Uri.file(solutionPath));
-  await vscode.extensions.getExtension('ms-dotnettools.csdevkit')?.activate();
-  await vscode.extensions.getExtension('ms-dotnettools.csharp')?.activate();
-
-  try {
-    // The C# extension reads dotnet.defaultSolution when the language server starts.
-    await vscode.commands.executeCommand('dotnet.restartServer');
-  } catch {
-    // Some extension versions only register restart after activation completes.
-  }
-}
-
 /** Normalizes Windows drive casing so URI round-trips do not make assertions flaky. */
 function normalizeFsPath(path: string): string {
   return path.replace(/\\/g, '/').toLowerCase();
@@ -163,41 +145,98 @@ async function waitForUnityFixtureDiscovery(root: vscode.Uri): Promise<void> {
 
 /** Waits until the production C# service can report expected declarations. */
 async function waitForCSharpLanguageServiceDeclarations(uri: vscode.Uri, expectedDeclarations: readonly string[]): Promise<void> {
-  const timeoutAt = Date.now() + 60_000;
+  const startedAt = Date.now();
+  const timeoutAt = startedAt + csharpReadinessTimeoutMs;
   const document = await vscode.workspace.openTextDocument(uri);
   await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
   const csharpLanguageService = createVscodeCSharpLanguageService(vscode);
+  let namespaceOnlySince: number | undefined;
+  let nextLogAt = startedAt + csharpReadinessLogIntervalMs;
   let lastDeclarations: string[] = [];
   let lastProviderNames: string[] = [];
+  let lastError: string | undefined;
 
   while (Date.now() < timeoutAt) {
+    const now = Date.now();
     const symbols = await vscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined>(
       'vscode.executeDocumentSymbolProvider',
       document.uri
     );
     lastProviderNames = flattenSymbolNames(symbols ?? []);
-    const [types, fields, methods] = await Promise.all([
-      csharpLanguageService.findTypes(document.uri),
-      csharpLanguageService.findUnityEventFields(document.uri),
-      csharpLanguageService.findMethods(document.uri)
-    ]);
-    lastDeclarations = [
-      ...types.map(type => `type:${type.name}`),
-      ...fields.map(field => `field:${field.name}`),
-      ...methods.map(method => `method:${method.name}`)
-    ];
-    const declarations = new Set(lastDeclarations);
-    if (expectedDeclarations.every(name => declarations.has(name))) {
-      return;
+    try {
+      const types = await csharpLanguageService.findTypes(document.uri);
+      const needsFields = expectedDeclarations.some(declaration => declaration.startsWith('field:'));
+      const fields = needsFields ? await csharpLanguageService.findUnityEventFields(document.uri) : [];
+      lastDeclarations = [
+        ...types.map(type => `type:${type.name}`),
+        ...fields.map(field => `field:${field.name}`)
+      ];
+      for (const expectedMethod of expectedDeclarations
+        .filter(declaration => declaration.startsWith('method:'))
+        .map(declaration => declaration.slice('method:'.length))) {
+        const targetType = types[0]?.fullName;
+        if (!targetType || lastDeclarations.includes(`method:${expectedMethod}`)) {
+          continue;
+        }
+
+        // Target-method lookup is the product path for UnityEvent YAML calls because the method name is known.
+        const positions = await csharpLanguageService.findTargetMethodPosition(document.uri, targetType, expectedMethod);
+        if (positions.length > 0) {
+          lastDeclarations.push(`method:${expectedMethod}`);
+        }
+      }
+      lastError = undefined;
+      namespaceOnlySince = undefined;
+      const declarations = new Set(lastDeclarations);
+      if (expectedDeclarations.every(name => declarations.has(name))) {
+        return;
+      }
+    } catch (error) {
+      // The provider can briefly return namespace-only symbols while loading.
+      lastError = error instanceof Error ? error.message : String(error);
+      namespaceOnlySince = isNamespaceOnlyProviderError(lastError)
+        ? namespaceOnlySince ?? now
+        : undefined;
+    }
+
+    if (namespaceOnlySince !== undefined && Date.now() - namespaceOnlySince >= csharpNamespaceOnlyFastFailMs) {
+      failCSharpDeclarationReadiness(uri, expectedDeclarations, lastDeclarations, lastProviderNames, lastError);
+    }
+
+    if (Date.now() >= nextLogAt) {
+      console.log(
+        `[csharp readiness] waiting for ${expectedDeclarations.join(', ')} after ${Math.round((Date.now() - startedAt) / 1000)}s. ` +
+        `Last declarations: ${lastDeclarations.join(', ') || '<none>'}. ` +
+        `Last raw provider symbols: ${lastProviderNames.join(', ') || '<none>'}. ` +
+        `Last error: ${lastError ?? '<none>'}.`
+      );
+      nextLogAt = Date.now() + csharpReadinessLogIntervalMs;
     }
 
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
+  failCSharpDeclarationReadiness(uri, expectedDeclarations, lastDeclarations, lastProviderNames, lastError);
+}
+
+/** Checks for the production service's namespace-only provider contract error. */
+function isNamespaceOnlyProviderError(message: string | undefined): boolean {
+  return message?.includes('namespace-only symbols') ?? false;
+}
+
+/** Fails a C# declaration readiness wait with the last provider state. */
+function failCSharpDeclarationReadiness(
+  uri: vscode.Uri,
+  expectedDeclarations: readonly string[],
+  lastDeclarations: readonly string[],
+  lastProviderNames: readonly string[],
+  lastError: string | undefined
+): never {
   assert.fail(
     `C# language service did not include ${expectedDeclarations.join(', ')} for ${uri.fsPath}. ` +
     `Last declarations: ${lastDeclarations.join(', ') || '<none>'}. ` +
-    `Last raw provider symbols: ${lastProviderNames.join(', ') || '<none>'}.`
+    `Last raw provider symbols: ${lastProviderNames.join(', ') || '<none>'}. ` +
+    `Last error: ${lastError ?? '<none>'}.`
   );
 }
 

@@ -51,12 +51,30 @@ function createSyncPlan(): ScriptFilenameSyncPlan {
   };
 }
 
+/** Creates a real test file and its parent directory when needed. */
 function createFile(filePath: string, content = '// test'): void {
   const dir = join(filePath, '..');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
   writeFileSync(filePath, content, 'utf-8');
+}
+
+/** Removes a VS Code-backed temp directory after file watchers release handles. */
+async function removeTempDirWithRetries(directory: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      if (existsSync(directory)) {
+        rmSync(directory, { recursive: true, force: true });
+      }
+      return;
+    } catch (error) {
+      if (attempt === 4) {
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
 }
 
 let tempDir: string;
@@ -159,43 +177,16 @@ suite('renameSync — Pure Functions', () => {
 suite('renameSync — Real Filesystem Operations', () => {
   let plan: ScriptFilenameSyncPlan;
 
-  suiteSetup(() => {
+  setup(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'unity-plus-rename-'));
     assetsDir = join(tempDir, 'Assets');
     mkdirSync(assetsDir, { recursive: true });
-  });
-
-  suiteTeardown(() => {
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
-
-  setup(() => {
     plan = createSyncPlanInTemp();
   });
 
-  teardown(() => {
-    // Clean up files between tests
-    for (const p of [plan.oldFilePath, plan.newFilePath, plan.oldMetaPath, plan.newMetaPath]) {
-      try {
-        if (existsSync(p)) rmSync(p, { force: true });
-      } catch { /* ignore */ }
-    }
-    // Also clean temp-level files used by asset rename tests
-    const extraFiles = [
-      join(tempDir, 'Assets', 'Texture.png'),
-      join(tempDir, 'Assets', 'Texture.png.meta'),
-      join(tempDir, 'Assets', 'Texture-Renamed.png'),
-      join(tempDir, 'Assets', 'Texture-Renamed.png.meta'),
-      join(tempDir, 'Assets', 'Missing.png'),
-      join(tempDir, 'Assets', 'Missing.png.meta'),
-      join(tempDir, 'Assets', 'Missing-Renamed.png'),
-      join(tempDir, 'Assets', 'Missing-Renamed.png.meta'),
-    ];
-    for (const p of extraFiles) {
-      try { if (existsSync(p)) rmSync(p, { force: true }); } catch { /* ignore */ }
-    }
+  teardown(async () => {
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    await removeTempDirWithRetries(tempDir);
   });
 
   test('builds script and Unity meta rename operations when both files exist', async () => {
