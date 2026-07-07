@@ -4,13 +4,13 @@ This file mirrors the initial GitHub issue plan while the repository is private 
 
 ## Status snapshot
 
-Updated: 2026-07-04
+Updated: 2026-07-07
 
 Source: GitHub issue state from `minerva-studio/unity-plus`, plus local code and test inspection.
 
-Validation note: `npm run compile` and `npm test` pass locally. `npm run lint` passes with one warning in test code: `src/test/renameSync.test.ts` defines unused helper `ordinaryTopLevelTypeAt`.
+Validation note: `npm run compile` and `npm test` pass locally. `npm run lint` passes cleanly with no warnings.
 
-Local assessment counts: Complete 17, Partial 3, Not started 2, Not planned 1.
+Local assessment counts: Complete 21, Not started 1, Not planned 1.
 
 | Issue | GitHub state | Local assessment | Notes |
 | --- | --- | --- | --- |
@@ -25,17 +25,17 @@ Local assessment counts: Complete 17, Partial 3, Not started 2, Not planned 1.
 | #9 | Closed | Complete | Class-to-file rename path is implemented and tested. |
 | #10 | Closed | Not planned | File-rename-event-to-class-update is no longer planned; rename sync stays class-to-file. |
 | #11 | Closed | Complete | Rename sync now supports matching primary top-level C# type/file pairs, including `ScriptableObject`, while preserving namespaces. |
-| #12 | Open | Complete | Explicit safety preview shows affected class, script file, and Unity meta file before applying the rename. |
-| #13 | Open | Partial | `unityPlus.refreshProjectFiles` now scans root `.csproj` files and removes stale script includes; Unity regeneration bridge remains out of scope. |
+| #12 | Closed | Complete | Explicit safety preview shows affected class, script file, and Unity meta file before applying the rename. |
+| #13 | Closed | Complete | `unityPlus.refreshProjectFiles` scans root `.csproj` files, removes stale script includes, and reports scanned/updated counts; Unity regeneration bridge remains out of scope. |
 | #14 | Closed | Complete | Watches C# create/delete/rename, creates missing script `.meta` files, and directly updates asmdef-backed `.csproj` compile includes. |
 | #15 | Closed | Complete | Missing compile entries are added for asmdef-backed scripts and default `Assembly-CSharp`/`Assembly-CSharp-Editor` fallback projects; missing fallback projects show actionable warnings. |
 | #16 | Closed | Complete | Scene/prefab scanner is implemented and covered by passing event-reference tests. |
 | #17 | Closed | Complete | CodeLens provider is implemented, respects `unityPlus.eventReferences.enabled`, and is covered by passing tests. |
 | #18 | Closed | Complete | Hover details include scene/prefab path, GameObject, component, and event field information in passing tests. |
 | #19 | Closed | Complete | Prefab scanning resolves target scripts through metadata/type lookup and appears in CodeLens/hover output. |
-| #20 | Open | Partial | Rescan command rebuilds metadata and invalidates the event-reference cache version; rescan summary counts are not fully logged. |
-| #21 | Open | Not started | Tests use inline fixtures; no small fixture Unity project was found. |
-| #22 | Open | Partial | Rename unit coverage is broad, but fixture-backed integration tests are not complete. |
+| #20 | Closed | Complete | `unityPlus.rescanUnityProject` rebuilds metadata (logging GUID/error counts), invalidates the event-reference cache version, and triggers a fresh background scan that logs resolved reference count and elapsed time. |
+| #21 | Closed | Complete | `test-fixtures/` contains a real fixture Unity project with `Assets/Prefabs/Gate.prefab`, `Assets/Scripts/*.cs` with `.meta` files, `ProjectSettings/ProjectVersion.txt`, and `Packages/manifest.json`. Integration tests in `src/test/suite/` use `getUnityFixtureRoot()` to resolve the fixture workspace. |
+| #22 | Closed | Complete | `src/test/suite/renameSync.test.ts` provides rename coverage across pure functions, real filesystem operations, real VS Code command registration, and real C# provider routing with the fixture project. |
 | #23 | Open | Not started | No private-to-public checklist document was found. |
 
 ## 1. [infra] Scaffold Unity Plus VS Code extension
@@ -154,6 +154,8 @@ Acceptance criteria:
 
 Provide a manual project file refresh command.
 
+Status: Complete. `unityPlus.refreshProjectFiles` scans Unity root `.csproj` files, removes stale script includes for missing `.cs` files, logs scanned/updated project counts, and warns on read/update failures. Unity regeneration and C# server refresh remain out of scope for this issue.
+
 Acceptance criteria:
 - `unityPlus.refreshProjectFiles` scans Unity root `.csproj` files.
 - Removes stale `<Compile Include>` entries that point to missing `.cs` files.
@@ -221,6 +223,8 @@ Acceptance criteria:
 
 Keep Unity indices fresh.
 
+Status: Complete. `unityPlus.rescanUnityProject` rebuilds the metadata index (logging found/parsed/malformed GUID counts and read errors), invalidates the event-reference cache version, and triggers a fresh background scan. The background scan logs resolved reference count and elapsed time to the output channel and updates the status bar.
+
 Acceptance criteria:
 - `unityPlus.rescanUnityProject` rebuilds caches.
 - Watchers invalidate affected entries.
@@ -230,6 +234,8 @@ Acceptance criteria:
 
 Add a small Unity-like fixture for repeatable tests.
 
+Status: Complete. `test-fixtures/` contains a real fixture Unity project with `Assets/Prefabs/Gate.prefab` (Unity YAML with persistent calls), `Assets/Scripts/*.cs` with `.meta` files, `ProjectSettings/ProjectVersion.txt`, `Packages/manifest.json`, and `UnityEventFixture.sln`. Integration tests in `src/test/suite/` resolve the fixture root via `getUnityFixtureRoot()`.
+
 Acceptance criteria:
 - Fixture includes scripts, metadata, scene YAML, and prefab YAML.
 - Fixture is small enough for source control.
@@ -237,6 +243,8 @@ Acceptance criteria:
 ## 22. [test] Add integration tests for rename flows
 
 Cover rename behavior end to end.
+
+Status: Complete. `src/test/suite/renameSync.test.ts` covers pure function logic (plan, invert), real filesystem operations (temp directories), real VS Code command registration, and real C# provider routing using the fixture project. All rename tests pass against real VS Code APIs — no mock-based C# semantics.
 
 Acceptance criteria:
 - Tests class-to-file rename.
@@ -251,3 +259,12 @@ Acceptance criteria:
 - Checklist includes README review.
 - Checklist includes CI status.
 - Checklist includes at least one working core feature.
+
+---
+
+## Beyond the original backlog
+
+The following features have been implemented since the initial 23-issue plan but are not yet tracked as individual GitHub issues:
+
+- **Serialized Instances** (`src/features/serialized-instances/`): CodeLens, diagnostics, and reference locations for `MonoBehaviour` / `ScriptableObject` serialized instances in Unity YAML assets. Resolves instance scripts through GUID metadata and editor class identifier text search.
+- **Unity YAML CodeLens** (`src/features/unity-yaml-code-lens/`): CodeLens provider that shows the associated C# MonoBehaviour script directly in `.unity`, `.prefab`, and `.asset` YAML files, with a command to open the script (`unityPlus.openUnityYamlMonoBehaviourScript`).
