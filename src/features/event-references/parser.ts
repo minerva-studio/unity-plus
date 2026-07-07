@@ -148,20 +148,21 @@ async function parseUnityEventReferencesCore(
       if (!resolvedTargetTypeName) {
         diagnostics.skippedMissingTargetTypeNameCount += 1;
       } else if (!isUnityBuiltInTargetTypeName(resolvedTargetTypeName)) {
-        scriptPath = await resolveCSharpType(resolvedTargetTypeName);
-        resolvedByTargetTypeName = scriptPath !== undefined;
-      }
+        if (target) {
+          // Prefer the target component's MonoScript GUID because it is already
+          // present in Unity YAML and avoids waking the C# server for every call.
+          scriptPath = (await resolveSerializedObjectScriptIdentity(target, metadataIndex, resolveCSharpType)).scriptPath;
+        }
 
-      if (!scriptPath && target && !isUnityBuiltInTargetTypeName(resolvedTargetTypeName)) {
-        // Unity stores the concrete target component in m_Target.  When the
-        // managed type index misses the assembly type name, the target object's
-        // MonoScript GUID is still a reliable way to keep the C# target lens.
-        scriptPath = (await resolveSerializedObjectScriptIdentity(target, metadataIndex, resolveCSharpType)).scriptPath;
+        if (!scriptPath) {
+          scriptPath = await resolveCSharpType(resolvedTargetTypeName);
+          resolvedByTargetTypeName = scriptPath !== undefined;
+        }
       }
 
       if (resolvedByTargetTypeName) {
         diagnostics.resolvedByTargetTypeNameCount += 1;
-      } else if (resolvedTargetTypeName) {
+      } else if (resolvedTargetTypeName && !scriptPath) {
         diagnostics.skippedUnresolvedTargetTypeNameCount += 1;
       }
 

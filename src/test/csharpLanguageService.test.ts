@@ -189,41 +189,4 @@ describe('csharpLanguageService', () => {
     );
   });
 
-  it('normalizes namespace-only DocumentSymbols with C# workspace provider symbols', async () => {
-    const documentSymbols = [
-      fakeDocumentSymbol('Amlos.Control.Interact.', symbolKind.Namespace, fakeRange(1, 0, 24))
-    ];
-    const workspaceSymbols = [
-      fakeSymbolInformation('Interactable', symbolKind.Class, 'project UnityEventFixture', fakeRange(3, 24, 36)),
-      fakeSymbolInformation('Interact', symbolKind.Method, 'in Amlos.Control.Interact.Interactable (project UnityEventFixture)', fakeRange(7, 20, 28)),
-      fakeSymbolInformation('OnCheckEnable', symbolKind.Field, 'Amlos.Control.Interact.Interactable.', fakeRange(5, 26, 39))
-    ];
-    const service = createServiceWithSymbols(documentSymbols, workspaceSymbols, {
-      OnCheckEnable: 'public UnityEngine.Events.UnityEvent Interactable.OnCheckEnable'
-    });
-    const uri = { fsPath: '/Project/Assets/Scripts/Interactable.cs' } as vscode.Uri;
-
-    const types = await service.findTypes(uri);
-    const methods = await service.findMethods(uri);
-    const fields = await service.findUnityEventFields(uri);
-    const targets = await service.findTargetMethodPosition(uri, 'Amlos.Control.Interact.Interactable', 'Interact');
-
-    assert.deepStrictEqual(types.map(type => type.fullName), ['Amlos.Control.Interact.Interactable']);
-    assert.strictEqual(methods[0]?.typeName, 'Amlos.Control.Interact.Interactable');
-    assert.strictEqual(fields[0]?.typeName, 'Amlos.Control.Interact.Interactable');
-    assert.deepStrictEqual(targets, [{ line: 7, character: 20 }]);
-  });
-
-  it('proves Unity object hierarchy from workspace type positions when document symbols are namespace-only', async () => {
-    const documentSymbols = [
-      fakeDocumentSymbol('Amlos.Control.Interact.', symbolKind.Namespace, fakeRange(1, 0, 24))
-    ];
-    const workspaceSymbols = [
-      fakeSymbolInformation('Interactable', symbolKind.Class, 'project UnityEventFixture', fakeRange(3, 24, 36))
-    ];
-    const service = createServiceWithSymbols(documentSymbols, workspaceSymbols);
-    const uri = { fsPath: '/Project/Assets/Scripts/Interactable.cs' } as vscode.Uri;
-
-    assert.strictEqual(await service.isUnityObjectType(uri, 'Amlos.Control.Interact.Interactable'), true);
-  });
 });

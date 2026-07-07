@@ -60,6 +60,10 @@ export function createReferenceIndex(
 
     if (location.scriptTypeName) {
       appendMapValue(serializedInstancesByScriptTypeName, typeKey(location.scriptTypeName), location);
+      const shortKey = typeKey(shortTypeName(location.scriptTypeName));
+      if (shortKey !== typeKey(location.scriptTypeName)) {
+        appendMapValue(serializedInstancesByScriptTypeName, shortKey, location);
+      }
     }
   }
 
@@ -259,4 +263,9 @@ export function pathReferenceKey(scriptPath: string): string {
 /** Normalizes managed type names for case-insensitive lookups. */
 export function typeKey(typeName: string): string {
   return typeName.toLowerCase();
+}
+
+/** Returns the final segment of a namespace-qualified type name. */
+function shortTypeName(typeName: string): string {
+  return typeName.split('.').at(-1) ?? typeName;
 }

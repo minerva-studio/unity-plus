@@ -1,9 +1,8 @@
 import type * as vscode from 'vscode';
 import { isCSharpFile } from './assetDiscovery';
-import { createCodeLensesFromIndex, createScanStateCodeLenses } from './codeLens';
-import { buildPriorityReferenceIndex } from './priorityScan';
+import { createCodeLensesFromIndex } from './codeLens';
 import { createHoverMarkdown, showReferenceLocations } from './referenceLocations';
-import type { EventReferenceLocationTarget, EventReferenceRuntime, PriorityScanState, UnityEventReferenceIndexController } from './runtime';
+import type { EventReferenceLocationTarget, EventReferenceRuntime, UnityEventReferenceIndexController } from './runtime';
 import { isEventReferenceAutoScanEnabled } from './settings';
 import { errorMessage, isCancellationRequested, toProjectPath } from './utils';
 
@@ -13,8 +12,6 @@ export function createEventReferenceProvider(
   controller: UnityEventReferenceIndexController,
   isEnabled: () => boolean
 ): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
-  let priorityScan: PriorityScanState | undefined;
-
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
     async provideCodeLenses(document, token) {
@@ -33,62 +30,12 @@ export function createEventReferenceProvider(
 
           if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
             controller.scheduleBuild();
-            return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
           }
 
-          if (isCancellationRequested(token)) {
-            return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
-          }
-
-          const priorityKey = `${runtime.getCacheVersion()}:${scriptPath}`;
-          if (!priorityScan || priorityScan.key !== priorityKey) {
-            const state: PriorityScanState = {
-              key: priorityKey,
-              status: 'pending'
-            };
-            const promise = buildPriorityReferenceIndex(runtime, document, token)
-              .then(result => {
-                if (priorityScan === state) {
-                  state.status = 'ready';
-                  state.result = result;
-                  controller.notifyCodeLensesChanged();
-                }
-
-                return result;
-              })
-              .catch(error => {
-                if (priorityScan === state) {
-                  state.status = 'failed';
-                  state.result = undefined;
-                  runtime.scanStatus?.finish('failed', undefined, {
-                    label: 'Unity refs: current',
-                    phase: 'Current script scan failed',
-                    scriptPath,
-                    referenceCount: 0,
-                    instanceCount: 0
-                  });
-                  controller.notifyCodeLensesChanged();
-                }
-
-                runtime.logger.warn(`UnityEvent priority scan failed for ${scriptPath}: ${errorMessage(error)}`);
-                return undefined;
-              });
-            state.promise = promise;
-            priorityScan = state;
-          }
-
-          if (priorityScan.status === 'ready' && priorityScan.result) {
-            return await createCodeLensesFromIndex(runtime, document, priorityScan.result.index, {
-              embedReferences: true,
-              includeZeroSummaryLenses: true
-            });
-          }
-
-          if (priorityScan.status === 'failed') {
-            throw new Error(`UnityEvent priority scan failed for ${scriptPath}.`);
-          }
-
-          return await createScanStateCodeLenses(runtime, document, scriptPath, '-');
+          // CodeLens requests must stay cheap while the serialized-asset index
+          // is unavailable. Returning no UnityEvent lenses keeps other providers
+          // responsive and avoids waking the C# server before it is ready.
+          return [];
         }
 
         return await createCodeLensesFromIndex(runtime, document, index, {

@@ -1,7 +1,6 @@
 import type * as vscode from 'vscode';
-import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpRange, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
-import type { UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
-import { typeKey } from './referenceIndex';
+import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot } from '../../unity/csharpLanguageService';
+import type { UnitySerializedAssetReferenceIndex } from './model';
 import type { CodeLensRenderOptions, EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
 import { toProjectPath } from './utils';
 
@@ -11,74 +10,13 @@ export async function createScanStateCodeLenses(
   scriptPath: string,
   marker: '-' | '0'
 ): Promise<vscode.CodeLens[]> {
-  const anchorRange = await findCodeLensStatusAnchorRange(runtime, document);
-  const position = anchorRange.start;
-  const lenses: vscode.CodeLens[] = [];
-
-  if (await shouldShowSerializedInstanceStatusLens(runtime, document)) {
-    lenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
-      title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: marker }),
-      command: 'unityPlus.showUnityEventReferenceLocations',
-      arguments: [{
-        kind: 'serializedInstance',
-        scriptPath,
-        serializedInstances: marker === '0' ? [] : undefined,
-        position
-      } satisfies EventReferenceLocationTarget]
-    }));
-  }
-
-  const fields = await findFieldsForScanStateLenses(runtime, document);
-  for (const field of fields) {
-    const fieldRange = toVscodeRange(runtime.runtimeVscode, field.range);
-    lenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
-      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: marker }),
-      command: 'unityPlus.showUnityEventReferenceLocations',
-      arguments: [{
-        kind: 'field',
-        scriptPath,
-        symbolName: field.name,
-        typeName: field.typeName,
-        eventReferences: marker === '0' ? [] : undefined,
-        position: fieldRange.start
-      } satisfies EventReferenceLocationTarget]
-    }));
-
-    lenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
-      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: marker }),
-      command: 'unityPlus.showUnityEventReferenceLocations',
-      arguments: [{
-        kind: 'fieldTarget',
-        scriptPath,
-        symbolName: field.name,
-        typeName: field.typeName,
-        eventReferences: marker === '0' ? [] : undefined,
-        position: fieldRange.start
-      } satisfies EventReferenceLocationTarget]
-    }));
-  }
-
-  return lenses;
-}
-
-/** Picks a stable class-level range for scan state and zero-count summary CodeLens entries. */
-async function findCodeLensStatusAnchorRange(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument
-): Promise<vscode.Range> {
-  const primaryType = await safeGetPrimaryTopLevelTypeRange(runtime, document);
-  if (primaryType) {
-    return toVscodeRange(runtime.runtimeVscode, primaryType);
-  }
-
-  try {
-    const types = await safeFindTypes(runtime, document);
-    return types[0] ? toVscodeRange(runtime.runtimeVscode, types[0].range) :
-      new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
-  } catch {
-    // Placeholder lenses must remain visible even when no class-level anchor can be resolved.
-    return new runtime.runtimeVscode.Range(new runtime.runtimeVscode.Position(0, 0), new runtime.runtimeVscode.Position(0, 0));
-  }
+  void runtime;
+  void document;
+  void scriptPath;
+  void marker;
+  // Scan-state lenses used to query C# symbols before the YAML index was ready.
+  // Keeping this helper inert prevents future call sites from blocking CodeLens.
+  return [];
 }
 
 /** Converts a reference index into CodeLens entries for one C# document. */
@@ -88,53 +26,41 @@ export async function createCodeLensesFromIndex(
   index: UnitySerializedAssetReferenceIndex,
   options: CodeLensRenderOptions
 ): Promise<vscode.CodeLens[]> {
-  const csharpLanguageService = runtime.csharpLanguageService;
-  if (!csharpLanguageService) {
-    return [];
-  }
-
-  const methods = await safeFindMethods(runtime, document);
-  const fields = await safeFindUnityEventFields(runtime, document);
-  const types = await safeFindTypes(runtime, document);
   const codeLenses: vscode.CodeLens[] = [];
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-  const serializedInstanceAnchor = findSerializedInstanceAnchorType(types, scriptPath);
-  const unityObjectCache = new Map<string, boolean>();
+  const serializedInstances = index.getSerializedInstances(scriptPath, getScriptTypeNameFromPath(scriptPath));
   let serializedInstanceLensCount = 0;
-  let unityObjectTypeCount = 0;
   let methodLensCount = 0;
   let fieldReferenceLensCount = 0;
   let fieldTargetLensCount = 0;
 
-  for (const type of types) {
-    if (!await isConfirmedUnityObjectType(runtime, document, type, unityObjectCache)) {
-      continue;
-    }
-
-    unityObjectTypeCount += 1;
-    const serializedInstances = filterSerializedInstancesForTypeLens(
-      index.getSerializedInstances(scriptPath, type.fullName),
-      type.fullName,
-      type === serializedInstanceAnchor
-    );
-
-    if (serializedInstances.length > 0) {
-      const typeRange = toVscodeRange(runtime.runtimeVscode, type.range);
-      serializedInstanceLensCount += 1;
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(typeRange, {
-        title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
-          count: serializedInstances.length
-        }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'serializedInstance',
-          scriptPath,
-          typeName: type.fullName,
-          ...(options.embedReferences || type !== serializedInstanceAnchor ? { serializedInstances } : {}),
+  if (serializedInstances.length > 0) {
+    const typeRange = findSerializedInstanceCodeLensRange(runtime.runtimeVscode, document, scriptPath);
+    serializedInstanceLensCount += 1;
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(typeRange, {
+      title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
+        count: serializedInstances.length
+      }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'serializedInstance',
+        scriptPath,
+        ...(options.embedReferences ? { serializedInstances } : {}),
         position: typeRange.start
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
+      } satisfies EventReferenceLocationTarget]
+    }));
+  }
+
+  let methods: CSharpMethodSymbolSnapshot[];
+  let fields: CSharpFieldSymbolSnapshot[];
+  try {
+    [methods, fields] = await Promise.all([
+      safeFindMethods(runtime, document),
+      safeFindUnityEventFields(runtime, document)
+    ]);
+  } catch (error) {
+    runtime.logger.warn(`UnityEvent method/field CodeLens skipped for ${scriptPath}: ${String(error)}`);
+    return codeLenses;
   }
 
   for (const method of methods) {
@@ -191,98 +117,12 @@ export async function createCodeLensesFromIndex(
   }
 
   if (options.includeZeroSummaryLenses) {
-    const anchorRange = await findCodeLensStatusAnchorRange(runtime, document);
-    const position = anchorRange.start;
-
-    // Keep ready zero-count summaries aligned with the pending "-" status lenses.
-    if (unityObjectTypeCount > 0 && serializedInstanceLensCount === 0) {
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(anchorRange, {
-        title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count: 0 }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'serializedInstance',
-          scriptPath,
-          serializedInstances: [],
-          position
-        } satisfies EventReferenceLocationTarget]
-      }));
-    }
+    // Instance CodeLens is intentionally omitted at zero because proving that a
+    // C# file is a UnityEngine.Object type belongs to semantic providers.
   }
 
-  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${types.length} type(s), ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
+  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
   return codeLenses;
-}
-
-/** Reads UnityEvent fields for scan-state placeholders without hiding all CodeLens on failure. */
-async function findFieldsForScanStateLenses(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument
-): Promise<CSharpFieldSymbolSnapshot[]> {
-  try {
-    return await safeFindUnityEventFields(runtime, document);
-  } catch {
-    return [];
-  }
-}
-
-/** Checks whether scan-state placeholders should include serialized instance feedback. */
-async function shouldShowSerializedInstanceStatusLens(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument
-): Promise<boolean> {
-  let types: CSharpTypeSymbolSnapshot[];
-  try {
-    types = await safeFindTypes(runtime, document);
-  } catch {
-    return false;
-  }
-
-  const cache = new Map<string, boolean>();
-  for (const type of types) {
-    if (await isConfirmedUnityObjectType(runtime, document, type, cache)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/** Uses C# type hierarchy to avoid showing prefab instance counts on plain C# types. */
-async function isConfirmedUnityObjectType(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument,
-  type: CSharpTypeSymbolSnapshot,
-  cache: Map<string, boolean>
-): Promise<boolean> {
-  const cacheKey = typeKey(type.fullName);
-  const cached = cache.get(cacheKey);
-  if (cached !== undefined) {
-    return cached;
-  }
-
-  try {
-    const result = await runtime.csharpLanguageService?.isUnityObjectType(document.uri, type.fullName) ?? false;
-    cache.set(cacheKey, result);
-    return result;
-  } catch (error) {
-    runtime.logger.warn(`UnityEvent CodeLens could not verify UnityEngine.Object inheritance for ${type.fullName}: ${String(error)}`);
-    cache.set(cacheKey, false);
-    return false;
-  }
-}
-
-/** Chooses the single C# type that should receive path-based serialized instance counts. */
-function findSerializedInstanceAnchorType(
-  types: readonly CSharpTypeSymbolSnapshot[],
-  scriptPath: string
-): CSharpTypeSymbolSnapshot | undefined {
-  if (types.length <= 1) {
-    return types[0];
-  }
-
-  const fileName = scriptPath.split(/[\\/]/).pop() ?? '';
-  const typeNameFromFile = fileName.replace(/\.cs$/i, '').toLowerCase();
-  return types.find(type => type.name.toLowerCase() === typeNameFromFile) ?? types[0];
 }
 
 /** Converts language-service ranges back into VS Code ranges for CodeLens rendering. */
@@ -291,6 +131,49 @@ function toVscodeRange(runtimeVscode: typeof vscode, range: { start: { line: num
     new runtimeVscode.Position(range.start.line, range.start.character),
     new runtimeVscode.Position(range.end.line, range.end.character)
   );
+}
+
+/** Finds a cheap visual anchor for serialized-instance CodeLens without C# server calls. */
+function findSerializedInstanceCodeLensRange(
+  runtimeVscode: typeof vscode,
+  document: vscode.TextDocument,
+  scriptPath: string
+): vscode.Range {
+  const typeNameFromFile = (scriptPath.split(/[\\/]/).pop() ?? '').replace(/\.cs$/i, '');
+  const escapedTypeName = escapeRegExp(typeNameFromFile);
+  const declarationPattern = new RegExp(`\\b(?:class|struct|record)\\s+(${escapedTypeName || '[A-Za-z_][A-Za-z0-9_]*'})\\b`);
+
+  const lines = getDocumentLines(document);
+  for (let line = 0; line < lines.length; line += 1) {
+    const text = lines[line] ?? '';
+    const match = declarationPattern.exec(text);
+    if (!match?.[1]) {
+      continue;
+    }
+
+    const character = text.indexOf(match[1], match.index);
+    const start = new runtimeVscode.Position(line, Math.max(0, character));
+    const end = new runtimeVscode.Position(line, Math.max(0, character) + match[1].length);
+    return new runtimeVscode.Range(start, end);
+  }
+
+  return new runtimeVscode.Range(new runtimeVscode.Position(0, 0), new runtimeVscode.Position(0, 0));
+}
+
+/** Uses the script file name as a non-semantic fallback for YAML type-only hits. */
+function getScriptTypeNameFromPath(scriptPath: string): string | undefined {
+  const typeName = (scriptPath.split(/[\\/]/).pop() ?? '').replace(/\.cs$/i, '');
+  return typeName || undefined;
+}
+
+/** Escapes a literal C# type name for the display-anchor regexp. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Reads document lines without requiring VS Code-only TextDocument helpers in unit tests. */
+function getDocumentLines(document: vscode.TextDocument): string[] {
+  return document.getText().split(/\r?\n/);
 }
 
 /** Reads method symbols without allowing language-server failures to hide all CodeLens entries. */
@@ -317,48 +200,4 @@ async function safeFindUnityEventFields(
     runtime.logger.warn(`UnityEvent CodeLens could not read UnityEvent fields in ${document.uri.fsPath}: ${String(error)}`);
     throw error;
   }
-}
-
-/** Reads type symbols without allowing anchor lookup failures to hide placeholder CodeLens entries. */
-async function safeFindTypes(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument
-): Promise<CSharpTypeSymbolSnapshot[]> {
-  try {
-    return await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
-  } catch (error) {
-    runtime.logger.warn(`UnityEvent CodeLens could not read C# types in ${document.uri.fsPath}: ${String(error)}`);
-    throw error;
-  }
-}
-
-/** Reads the primary top-level type range for class-level placeholder CodeLens anchors. */
-async function safeGetPrimaryTopLevelTypeRange(
-  runtime: EventReferenceRuntime,
-  document: vscode.TextDocument
-): Promise<CSharpRange | undefined> {
-  try {
-    const type = await runtime.csharpLanguageService?.getPrimaryTopLevelType(document.uri);
-    return type?.nameRange;
-  } catch (error) {
-    runtime.logger.warn(`UnityEvent CodeLens could not read the primary C# type in ${document.uri.fsPath}: ${String(error)}`);
-    return undefined;
-  }
-}
-
-/** Filters type-only fallback instances while keeping path hits on the selected anchor type. */
-function filterSerializedInstancesForTypeLens(
-  locations: readonly UnitySerializedInstanceLocation[],
-  typeName: string,
-  includePathInstances: boolean
-): readonly UnitySerializedInstanceLocation[] {
-  if (includePathInstances) {
-    return locations;
-  }
-
-  return locations.filter(location =>
-    !location.scriptPath &&
-    location.scriptTypeName !== undefined &&
-    typeKey(location.scriptTypeName) === typeKey(typeName)
-  );
 }

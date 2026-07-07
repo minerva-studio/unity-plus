@@ -86,13 +86,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const methods: CSharpMethodSymbolSnapshot[] = [];
       collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
-      let workspaceCovered = false;
-      if (methods.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
-        const workspaceMethods = await collectWorkspaceMethodSymbols(runtimeVscode, uri, symbols);
-        workspaceCovered = workspaceMethods.covered;
-        methods.push(...workspaceMethods.methods);
-      }
-      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, methods.length, 'methods', workspaceCovered);
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, methods.length, 'methods');
       return methods;
     },
     async findTypes(uri) {
@@ -100,13 +94,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const types: CSharpTypeSymbolSnapshot[] = [];
       collectCSharpTypeSymbols(runtimeVscode, symbols, [], types);
-      let workspaceCovered = false;
-      if (types.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
-        const workspaceTypes = await collectWorkspaceTypeSymbols(runtimeVscode, uri, symbols);
-        workspaceCovered = workspaceTypes.covered;
-        types.push(...workspaceTypes.types);
-      }
-      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, types.length, 'types', workspaceCovered);
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, types.length, 'types');
       return types;
     },
     async findUnityEventFields(uri) {
@@ -114,13 +102,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const fields: CSharpFieldSymbolSnapshot[] = [];
       collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
-      let workspaceCovered = false;
-      if (fields.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
-        const workspaceFields = await collectWorkspaceUnityEventFieldSymbols(runtimeVscode, uri, symbols);
-        workspaceCovered = workspaceFields.covered;
-        fields.push(...workspaceFields.fields);
-      }
-      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, fields.length, 'UnityEvent fields', workspaceCovered);
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, fields.length, 'UnityEvent fields');
       return fields;
     },
     async findMethodAtPosition(uri, position) {
@@ -134,13 +116,7 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const positions: CSharpPosition[] = [];
       collectTargetMethodSymbolPositions(runtimeVscode, symbols, [], targetTypeName, methodName, positions);
-      let workspaceCovered = false;
-      if (positions.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
-        const workspacePositions = await collectWorkspaceTargetMethodPositions(runtimeVscode, uri, symbols, targetTypeName, methodName);
-        workspaceCovered = workspacePositions.covered;
-        positions.push(...workspacePositions.positions);
-      }
-      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, positions.length, `target method ${targetTypeName}.${methodName}`, workspaceCovered);
+      throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, positions.length, `target method ${targetTypeName}.${methodName}`);
       return positions;
     },
     async isUnityObjectType(uri, typeName) {
@@ -222,24 +198,10 @@ async function collectTypeHierarchyLookupCandidates(
   for (const symbol of symbols) {
     collectTopLevelTypeSymbols(runtimeVscode, symbol, [], candidates);
   }
-
-  if (candidates.length > 0) {
-    return candidates.map(candidate => ({
-      name: normalizeCSharpSymbolName(candidate.name),
-      fullName: toTopLevelTypeFullName(candidate),
-      position: candidate.position
-    }));
-  }
-
-  if (!containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
-    return [];
-  }
-
-  const workspaceTypes = await collectWorkspaceTypeSymbols(runtimeVscode, uri, symbols);
-  return workspaceTypes.types.map(type => ({
-    name: type.name,
-    fullName: type.fullName,
-    position: new runtimeVscode.Position(type.range.start.line, type.range.start.character)
+  return candidates.map(candidate => ({
+    name: normalizeCSharpSymbolName(candidate.name),
+    fullName: toTopLevelTypeFullName(candidate),
+    position: candidate.position
   }));
 }
 
@@ -843,22 +805,7 @@ async function getPrimaryTopLevelTypeFromSymbols(
   for (const symbol of symbols) {
     collectTopLevelTypeSymbols(runtimeVscode, symbol, [], candidates);
   }
-  let workspaceCovered = false;
-  if (candidates.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
-    const workspaceTypes = await collectWorkspaceTypeSymbols(runtimeVscode, uri, symbols);
-    workspaceCovered = workspaceTypes.covered;
-    candidates.push(...workspaceTypes.types.map(type => ({
-      name: type.name,
-      kind: 'class' as const,
-      namespace: findDocumentNamespace(runtimeVscode, symbols),
-      position: new runtimeVscode.Position(type.range.start.line, type.range.start.character),
-      range: new runtimeVscode.Range(
-        new runtimeVscode.Position(type.range.start.line, type.range.start.character),
-        new runtimeVscode.Position(type.range.end.line, type.range.end.character)
-      )
-    })));
-  }
-  throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, candidates.length, 'primary top-level type', workspaceCovered);
+  throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, candidates.length, 'primary top-level type');
 
   if (candidates.length !== 1) {
     return undefined;
