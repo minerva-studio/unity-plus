@@ -5,12 +5,11 @@ import {
   getUnityYamlDocumentScriptReference,
   getUnityYamlPersistentCalls,
   getUnityYamlPrefabOverridePersistentCalls,
-  getUnityYamlSerializedScriptDocuments,
   parseUnityYamlAsset
 } from '../../unity/unityYaml';
-import type { UnityYamlDocument, UnityYamlPersistentCall, UnityYamlSerializedScriptDocument } from '../../unity/unityYaml';
+import type { UnityYamlDocument, UnityYamlPersistentCall } from '../../unity/unityYaml';
 import { createEmptyDiagnostics } from './diagnostics';
-import type { UnityEventReference, UnityEventReferenceDiagnostics, UnitySerializedAssetKind, UnitySerializedInstanceLocation } from './model';
+import type { UnityEventReference, UnityEventReferenceDiagnostics, UnitySerializedAssetKind } from './model';
 import { gameObjectClassId, monoBehaviourClassId } from './runtime';
 import { isUnityBuiltInTargetTypeName, simplifyAssemblyTypeName } from './targetTypes';
 
@@ -56,7 +55,6 @@ export async function parseUnityEventReferencesWithDiagnostics(
   resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
 ): Promise<{
   references: UnityEventReference[];
-  serializedInstances: UnitySerializedInstanceLocation[];
   diagnostics: UnityEventReferenceDiagnostics;
 }> {
   return await parseUnityEventReferencesCore(content, assetPath, assetKind, metadataIndex, resolveCSharpType);
@@ -71,21 +69,12 @@ async function parseUnityEventReferencesCore(
   resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
 ): Promise<{
   references: UnityEventReference[];
-  serializedInstances: UnitySerializedInstanceLocation[];
   diagnostics: UnityEventReferenceDiagnostics;
 }> {
   const diagnostics = createEmptyDiagnostics();
   const documents = parseUnityYamlAsset(content, { profile: 'eventReferences' }).documents;
   const objects = new Map<string, SerializedObjectRecord>();
   const callsByDocument = new Map<string, PersistentCallSnapshot[]>();
-  const serializedInstances = await collectSerializedInstancesFromDocuments(
-    documents,
-    assetPath,
-    assetKind,
-    metadataIndex,
-    resolveCSharpType,
-    diagnostics
-  );
   const shouldParseUnityEventCalls = needsHeavyUnityEventParsing(content);
 
   diagnostics.parsedYamlAssetCount += 1;
@@ -189,8 +178,7 @@ async function parseUnityEventReferencesCore(
   }
 
   diagnostics.resolvedReferenceCount = references.length;
-  diagnostics.serializedInstanceCount = serializedInstances.length;
-  return { references, serializedInstances, diagnostics };
+  return { references, diagnostics };
 }
 
 
@@ -213,130 +201,10 @@ function parseSerializedObject(document: UnityYamlDocument): SerializedObjectRec
   };
 }
 
-/** Collects serialized script instances from vendored parser AST documents. */
-async function collectSerializedInstancesFromDocuments(
-  documents: readonly UnityYamlDocument[],
-  assetPath: string,
-  assetKind: UnitySerializedAssetKind,
-  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
-  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>,
-  diagnostics: UnityEventReferenceDiagnostics,
-  targetGuid?: string
-): Promise<UnitySerializedInstanceLocation[]> {
-  const locations: UnitySerializedInstanceLocation[] = [];
-  const seen = new Set<string>();
-  const objects = new Map<string, SerializedObjectRecord>();
-
-  for (const document of documents) {
-    const object = parseSerializedObject(document);
-    objects.set(document.fileId, object);
-    if (object.classId === gameObjectClassId && object.name) {
-      objects.set(document.fileId, object);
-    }
-  }
-
-  for (const candidate of getUnityYamlSerializedScriptDocuments(documents)) {
-    const guid = candidate.scriptReference?.guid;
-    if (targetGuid && guid?.toLowerCase() !== targetGuid.toLowerCase()) {
-      continue;
-    }
-
-    if (guid) {
-      diagnostics.serializedInstanceScriptTextHitCount += 1;
-    }
-
-    const identity = await resolveSerializedDocumentScriptIdentity(candidate, metadataIndex, resolveCSharpType);
-
-    if (guid && identity.scriptPath) {
-      diagnostics.serializedInstanceScriptResolvedTextHitCount += 1;
-    } else if (guid) {
-      diagnostics.serializedInstanceScriptUnresolvedTextHitCount += 1;
-    }
-
-    trackSerializedDocumentScriptIdentity(diagnostics, candidate, identity);
-
-    if (!identity.scriptPath && !identity.typeName) {
-      continue;
-    }
-
-    const dedupeKey = `${assetPath}#${candidate.document.fileId}#${identity.scriptPath ?? identity.typeName ?? ''}`;
-    if (seen.has(dedupeKey)) {
-      diagnostics.serializedInstanceScriptDedupedTextHitCount += 1;
-      continue;
-    }
-
-    seen.add(dedupeKey);
-    locations.push({
-      assetPath,
-      assetKind,
-      line: candidate.scriptReference?.line ?? 0,
-      character: candidate.scriptReference?.character ?? 0,
-      fileId: candidate.document.fileId,
-      scriptPath: identity.scriptPath,
-      scriptTypeName: identity.typeName,
-      name: candidate.name,
-      gameObjectName: getGameObjectName(objects, candidate.gameObjectFileId)
-    });
-  }
-
-  return locations;
-}
-
 /** Checks whether an asset may contain UnityEvent call data before extracting call helpers. */
 function needsHeavyUnityEventParsing(content: string): boolean {
   return content.includes('m_PersistentCalls') ||
     (content.includes('propertyPath:') && content.includes('.m_PersistentCalls.'));
-}
-
-/** Checks whether an asset can affect serialized instances or UnityEvent references before AST parsing. */
-function isUnityEventReferenceCandidateContent(content: string): boolean {
-  return content.includes('m_Script') ||
-    content.includes('m_PersistentCalls') ||
-    content.includes('.m_PersistentCalls.');
-}
-
-/** Resolves a serialized document to a script path first, then an editor-class type fallback. */
-async function resolveSerializedDocumentScriptIdentity(
-  candidate: UnityYamlSerializedScriptDocument,
-  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
-  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
-): Promise<SerializedObjectScriptIdentity> {
-  if (candidate.scriptReference) {
-    const scriptPath = metadataIndex.getAssetPath(candidate.scriptReference.guid);
-    if (scriptPath) {
-      return {
-        scriptPath,
-        typeName: candidate.editorTypeName,
-        source: 'guid'
-      };
-    }
-  }
-
-  if (!candidate.editorTypeName) {
-    return {};
-  }
-
-  // m_EditorClassIdentifier remains a fallback when the MonoScript GUID is not indexed.
-  return {
-    scriptPath: await resolveCSharpType(candidate.editorTypeName),
-    typeName: candidate.editorTypeName,
-    source: 'editorClassIdentifier'
-  };
-}
-
-/** Records how a serialized script document identity was resolved for diagnostics. */
-function trackSerializedDocumentScriptIdentity(
-  diagnostics: UnityEventReferenceDiagnostics,
-  candidate: UnityYamlSerializedScriptDocument,
-  identity: SerializedObjectScriptIdentity
-): void {
-  if (identity.source === 'guid') {
-    diagnostics.resolvedSerializedInstanceScriptGuidCount += 1;
-  } else if (identity.source === 'editorClassIdentifier') {
-    diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount += 1;
-  } else if (candidate.scriptReference || candidate.editorTypeName) {
-    diagnostics.unresolvedSerializedInstanceScriptCount += 1;
-  }
 }
 
 /** Resolves a serialized owner object to a script path or editor-class type fallback. */

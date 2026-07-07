@@ -1,15 +1,21 @@
-import type { UnityEventReferenceBuildContext, UnitySerializedAssetReferenceIndex } from './model';
-import { backgroundBuildDebounceMilliseconds, type EventReferenceRuntime, type UnityEventReferenceIndexController, type UnityEventReferenceIndexStatus } from './runtime';
-import { buildUnityEventReferenceIndex } from './scanner';
-import { errorMessage, isCancellationError } from './utils';
+import type { UnityMetadataIndex } from '../../unity/metadataIndex';
+import type { UnitySerializedInstanceBuildContext, UnitySerializedInstanceIndex } from './model';
+import {
+  backgroundBuildDebounceMilliseconds,
+  type SerializedInstanceIndexController,
+  type SerializedInstanceIndexStatus,
+  type SerializedInstancesRuntime
+} from './runtime';
+import { buildSerializedInstanceIndex } from './scanner';
+import { errorMessage, isCancellationError } from '../serialized-assets/utils';
 
-/** Coordinates cached background and interactive UnityEvent reference index builds. */
-export function createEventReferenceIndexController(runtime: EventReferenceRuntime): UnityEventReferenceIndexController {
+/** Coordinates cached background and interactive serialized instance index builds. */
+export function createSerializedInstanceIndexController(runtime: SerializedInstancesRuntime): SerializedInstanceIndexController {
   const codeLensEvents = new runtime.runtimeVscode.EventEmitter<void>();
-  let status: UnityEventReferenceIndexStatus = 'idle';
+  let status: SerializedInstanceIndexStatus = 'idle';
   let cachedVersion: number | undefined;
-  let index: UnitySerializedAssetReferenceIndex | undefined;
-  let buildPromise: Promise<UnitySerializedAssetReferenceIndex | undefined> | undefined;
+  let index: UnitySerializedInstanceIndex | undefined;
+  let buildPromise: Promise<UnitySerializedInstanceIndex | undefined> | undefined;
   let scheduledBuild = false;
 
   function refreshVersion(): void {
@@ -19,9 +25,6 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     }
 
     if (status === 'building' && buildPromise) {
-      // Keep the in-flight build as the single owner of cancellation. Clearing
-      // buildPromise here would allow file watcher churn to start parallel full
-      // project scans before the current build can observe the version change.
       cachedVersion = version;
       return;
     }
@@ -33,7 +36,10 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     scheduledBuild = false;
   }
 
-  async function forceBuild(context: UnityEventReferenceBuildContext = { mode: 'background' }): Promise<UnitySerializedAssetReferenceIndex | undefined> {
+  async function forceBuild(
+    context: UnitySerializedInstanceBuildContext = { mode: 'background' },
+    metadata?: UnityMetadataIndex
+  ): Promise<UnitySerializedInstanceIndex | undefined> {
     refreshVersion();
 
     if (status === 'building' && buildPromise) {
@@ -45,25 +51,25 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     const scanStatus = context.mode === 'background' ? runtime.scanStatus : undefined;
     const buildContext = scanStatus ? { ...context, scanStatus } : context;
     status = 'building';
-    scanStatus?.start('Preparing UnityEvent reference scan', 'Unity refs: project');
-    runtime.logger.info(`UnityEvent ${context.mode} reference scan started.`);
-    buildPromise = buildUnityEventReferenceIndex(runtime, undefined, buildContext)
+    scanStatus?.start('Preparing Unity serialized instance scan', 'Unity inst: project');
+    runtime.logger.info(`Unity serialized instance ${context.mode} scan started.`);
+    buildPromise = buildSerializedInstanceIndex(runtime, metadata, buildContext)
       .then(builtIndex => {
         if (buildVersion !== runtime.getCacheVersion()) {
           status = 'idle';
-          scanStatus?.finish('canceled', undefined, { label: 'Unity refs: project', phase: 'Canceled' });
+          scanStatus?.finish('canceled', undefined, { label: 'Unity inst: project', phase: 'Canceled' });
           return undefined;
         }
 
         index = builtIndex;
         status = 'ready';
-        runtime.logger.info(`UnityEvent ${context.mode} reference scan completed: ${builtIndex.getDiagnostics().resolvedReferenceCount} reference(s), ${builtIndex.getDiagnostics().elapsedMilliseconds}ms.`);
+        runtime.logger.info(`Unity serialized instance ${context.mode} scan completed: ${builtIndex.getDiagnostics().serializedInstanceCount} instance(s), ${builtIndex.getDiagnostics().elapsedMilliseconds}ms.`);
         scanStatus?.finish('completed', builtIndex.getDiagnostics(), {
-          label: 'Unity refs: project',
+          label: 'Unity inst: project',
           phase: 'Project scan complete',
           candidateCount: builtIndex.getDiagnostics().candidateAssetCount,
           scannedCount: builtIndex.getDiagnostics().prefabCount + builtIndex.getDiagnostics().sceneCount + builtIndex.getDiagnostics().assetCount,
-          referenceCount: builtIndex.getDiagnostics().resolvedReferenceCount,
+          instanceCount: builtIndex.getDiagnostics().serializedInstanceCount,
           elapsedMilliseconds: builtIndex.getDiagnostics().elapsedMilliseconds
         });
         codeLensEvents.fire();
@@ -72,15 +78,15 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
       .catch(error => {
         if (isCancellationError(error)) {
           status = previousIndex ? 'ready' : 'idle';
-          scanStatus?.finish('canceled', undefined, { label: 'Unity refs: project', phase: 'Canceled' });
-          runtime.logger.info('UnityEvent reference index build canceled.');
+          scanStatus?.finish('canceled', undefined, { label: 'Unity inst: project', phase: 'Canceled' });
+          runtime.logger.info('Unity serialized instance index build canceled.');
           codeLensEvents.fire();
           return undefined;
         }
 
         status = 'failed';
-        scanStatus?.finish('failed', undefined, { label: 'Unity refs: project', phase: 'Failed' });
-        runtime.logger.warn(`Could not build UnityEvent reference index: ${errorMessage(error)}`);
+        scanStatus?.finish('failed', undefined, { label: 'Unity inst: project', phase: 'Failed' });
+        runtime.logger.error(`Could not build Unity serialized instance index: ${errorMessage(error)}`);
         codeLensEvents.fire();
         return undefined;
       })
@@ -98,7 +104,7 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     }
 
     scheduledBuild = true;
-    runtime.logger.debug('UnityEvent background reference scan scheduled.');
+    runtime.logger.debug('Unity serialized instance background scan scheduled.');
     setTimeout(() => {
       scheduledBuild = false;
       refreshVersion();

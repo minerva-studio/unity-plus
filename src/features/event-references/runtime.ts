@@ -8,9 +8,9 @@ import type {
   UnityEventReferenceBuildContext,
   UnityEventReferenceDiagnostics,
   UnityEventReferenceScanStatusReporter,
-  UnitySerializedAssetReferenceIndex,
-  UnitySerializedInstanceLocation
+  UnitySerializedAssetReferenceIndex
 } from './model';
+import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot } from '../../unity/csharpLanguageService';
 
 export interface EventReferenceFeatureOptions {
   metadataIndex?: LazyUnityMetadataIndex;
@@ -67,11 +67,10 @@ export type CSharpTypeIndexBuilder = (
 ) => Promise<CSharpTypeIndex>;
 
 export interface EventReferenceLocationTarget {
-  kind: 'method' | 'field' | 'fieldTarget' | 'serializedInstance';
+  kind: 'method' | 'field' | 'fieldTarget';
   scriptPath: string;
   symbolName?: string;
   typeName?: string;
-  serializedInstances?: readonly UnitySerializedInstanceLocation[];
   eventReferences?: readonly UnityEventReference[];
   position: vscode.Position;
 }
@@ -108,10 +107,14 @@ export interface CodeLensRenderOptions {
   skipCSharpMethods?: boolean;
   /** When true, render without UnityEvent field lenses while field symbol retry backoff is active. */
   skipCSharpFields?: boolean;
+  /** Last provider-backed methods used only to keep error placeholders anchored. */
+  fallbackMethods?: readonly CSharpMethodSymbolSnapshot[];
+  /** Last provider-backed fields used only to keep error placeholders anchored. */
+  fallbackFields?: readonly CSharpFieldSymbolSnapshot[];
   /** Called when one C# symbol category is not ready, so the provider can retry later. */
-  onCSharpSymbolsUnavailable?: (kind: 'methods' | 'fields', error: unknown) => void;
+  onCSharpSymbolsUnavailable?: (kind: 'methods' | 'fields', error: unknown, canPlacePlaceholder: boolean) => void;
   /** Called after one C# symbol category is read successfully, so retry state can reset. */
-  onCSharpSymbolsReady?: (kind: 'methods' | 'fields') => void;
+  onCSharpSymbolsReady?: (kind: 'methods' | 'fields', symbols: readonly CSharpMethodSymbolSnapshot[] | readonly CSharpFieldSymbolSnapshot[]) => void;
 }
 
 export interface RunWithConcurrencyOptions {

@@ -1,7 +1,8 @@
 import type * as vscode from 'vscode';
 import type { UnityTextSearchBackend } from '../../unity/textSearch';
+import type { UnitySerializedAssetKind } from '../serialized-assets/model';
 
-export type UnitySerializedAssetKind = 'prefab' | 'scene' | 'asset';
+export type { UnitySerializedAssetKind } from '../serialized-assets/model';
 
 export type UnityEventCandidateSearchBackend = UnityTextSearchBackend | 'injectedTextSearch' | 'none';
 
@@ -21,18 +22,6 @@ export interface UnityEventReference {
   scriptTypeName?: string;
 }
 
-export interface UnitySerializedInstanceLocation {
-  assetPath: string;
-  assetKind: UnitySerializedAssetKind;
-  line: number;
-  character: number;
-  fileId: string;
-  scriptPath?: string;
-  scriptTypeName?: string;
-  name?: string;
-  gameObjectName?: string;
-}
-
 export interface UnitySerializedAssetReferenceIndex {
   getReferences(scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[];
   getReferenceCount(scriptPath: string, methodName: string, typeName?: string): number;
@@ -40,8 +29,6 @@ export interface UnitySerializedAssetReferenceIndex {
   getFieldReferenceCount(scriptPath: string, fieldName: string, typeName?: string): number;
   getFieldTargets(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];
   getFieldTargetCount(scriptPath: string, fieldName: string, typeName?: string): number;
-  getSerializedInstances(scriptPath: string, typeName?: string): readonly UnitySerializedInstanceLocation[];
-  getSerializedInstanceCount(scriptPath: string, typeName?: string): number;
   getAllReferences(): readonly UnityEventReference[];
   getDiagnostics(): UnityEventReferenceDiagnostics;
 }
@@ -61,19 +48,11 @@ export interface UnityEventReferenceDiagnostics {
   parsedUnityEventAssetCount: number;
   skippedUnityEventAssetCount: number;
   persistentCallCount: number;
-  serializedInstanceCount: number;
   resolvedReferenceCount: number;
   resolvedByTargetTypeNameCount: number;
   resolvedOwnerScriptGuidCount: number;
   resolvedOwnerEditorClassIdentifierCount: number;
   unresolvedOwnerScriptCount: number;
-  resolvedSerializedInstanceScriptGuidCount: number;
-  resolvedSerializedInstanceEditorClassIdentifierCount: number;
-  unresolvedSerializedInstanceScriptCount: number;
-  serializedInstanceScriptTextHitCount: number;
-  serializedInstanceScriptResolvedTextHitCount: number;
-  serializedInstanceScriptUnresolvedTextHitCount: number;
-  serializedInstanceScriptDedupedTextHitCount: number;
   skippedDisabledCallCount: number;
   skippedMissingTargetTypeNameCount: number;
   skippedUnresolvedTargetTypeNameCount: number;
@@ -111,6 +90,5 @@ export interface UnityEventReferenceScanStatus {
   scannedCount?: number;
   totalCount?: number;
   referenceCount?: number;
-  instanceCount?: number;
   elapsedMilliseconds?: number;
 }

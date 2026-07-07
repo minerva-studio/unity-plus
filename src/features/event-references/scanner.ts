@@ -2,7 +2,7 @@ import type * as vscode from 'vscode';
 import type { UnityMetadataIndex } from '../../unity/metadataIndex';
 import { eventReferenceCandidateTexts, getAssetKind } from './assetDiscovery';
 import { countUnfinishedAssets, createEmptyDiagnostics, incrementAssetCount, mergeDiagnostics } from './diagnostics';
-import type { UnityEventCandidateSearchBackend, UnityEventReference, UnityEventReferenceBuildContext, UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
+import type { UnityEventCandidateSearchBackend, UnityEventReference, UnityEventReferenceBuildContext, UnitySerializedAssetReferenceIndex } from './model';
 import { createReferenceIndex } from './referenceIndex';
 import { parseUnityEventReferencesWithDiagnostics } from './parser';
 import { buildDefaultCSharpTypeIndex } from './typeIndex';
@@ -22,7 +22,6 @@ export async function buildUnityEventReferenceIndex(
 ): Promise<UnitySerializedAssetReferenceIndex> {
   const startedAt = Date.now();
   const references: UnityEventReference[] = [];
-  const serializedInstances: UnitySerializedInstanceLocation[] = [];
   const diagnostics = createEmptyDiagnostics();
 
   throwIfCancellationRequested(context.cancellationToken);
@@ -53,7 +52,6 @@ export async function buildUnityEventReferenceIndex(
     scannedCount: 0,
     totalCount: assetFiles.length,
     referenceCount: 0,
-    instanceCount: 0,
     elapsedMilliseconds: Date.now() - startedAt
   });
 
@@ -84,7 +82,6 @@ export async function buildUnityEventReferenceIndex(
 
       mergeDiagnostics(diagnostics, parsed.diagnostics);
       references.push(...parsed.references);
-      serializedInstances.push(...parsed.serializedInstances);
     } catch (error) {
       if (isCancellationError(error)) {
         throw error;
@@ -105,7 +102,6 @@ export async function buildUnityEventReferenceIndex(
         scannedCount: completedCount,
         totalCount,
         referenceCount: references.length,
-        instanceCount: serializedInstances.length,
         elapsedMilliseconds: Date.now() - startedAt
       });
 
@@ -132,9 +128,8 @@ export async function buildUnityEventReferenceIndex(
   }
 
   diagnostics.resolvedReferenceCount = references.length;
-  diagnostics.serializedInstanceCount = serializedInstances.length;
   diagnostics.elapsedMilliseconds = Date.now() - startedAt;
-  return createReferenceIndex(references, serializedInstances, diagnostics);
+  return createReferenceIndex(references, diagnostics);
 }
 
 /** Creates a resolver that reuses one C# type index for the duration of a scan. */
@@ -227,10 +222,9 @@ async function findBuildSettingsSceneFiles(runtime: EventReferenceRuntime): Prom
   }
 }
 
-/** Checks whether an asset can affect serialized instances or UnityEvent references before AST parsing. */
+/** Checks whether an asset can affect UnityEvent references before AST parsing. */
 function isUnityEventReferenceCandidateContent(content: string): boolean {
-  return content.includes('m_Script') ||
-    content.includes('m_PersistentCalls') ||
+  return content.includes('m_PersistentCalls') ||
     content.includes('.m_PersistentCalls.');
 }
 

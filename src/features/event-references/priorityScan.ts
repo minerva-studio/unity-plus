@@ -3,7 +3,7 @@ import type { CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService
 import { parseUnityMetaGuid, type UnityMetadataIndex } from '../../unity/metadataIndex';
 import { getAssetKind } from './assetDiscovery';
 import { createEmptyDiagnostics, mergeDiagnostics } from './diagnostics';
-import type { UnityEventReference, UnitySerializedInstanceLocation } from './model';
+import type { UnityEventReference } from './model';
 import { parseUnityEventReferencesWithDiagnostics } from './parser';
 import { createReferenceIndex, pathReferenceKey, typeKey } from './referenceIndex';
 import type { EventReferenceRuntime, PriorityScanResult } from './runtime';
@@ -40,11 +40,10 @@ export async function buildPriorityReferenceIndex(
       scriptPath,
       metadataGuidCount,
       referenceCount: 0,
-      instanceCount: 0,
       elapsedMilliseconds: diagnostics.elapsedMilliseconds
     });
     return {
-      index: createReferenceIndex([], [], diagnostics),
+      index: createReferenceIndex([], diagnostics),
       diagnostics,
       reason
     };
@@ -59,7 +58,6 @@ export async function buildPriorityReferenceIndex(
       scriptPath,
       metadataGuidCount,
       referenceCount: 0,
-      instanceCount: 0,
       elapsedMilliseconds: diagnostics.elapsedMilliseconds
     });
     // Without a GUID the priority scan cannot prove that zero references exist.
@@ -77,7 +75,6 @@ export async function buildPriorityReferenceIndex(
   const discovery = await findCurrentScriptCandidateAssetFiles(runtime, scriptGuid, token);
   const candidateUris = discovery.files;
   const references: UnityEventReference[] = [];
-  const serializedInstances: UnitySerializedInstanceLocation[] = [];
   const currentTypes = await runtime.csharpLanguageService?.findTypes(document.uri) ?? [];
   const resolveCSharpType = createCurrentDocumentTypeResolver(currentTypes, scriptPath, token);
   const metadata = createPriorityMetadataIndex(scriptPath, scriptGuid, currentScriptMetadata.metadata);
@@ -96,7 +93,6 @@ export async function buildPriorityReferenceIndex(
     scannedCount: 0,
     totalCount: candidateUris.length,
     referenceCount: 0,
-    instanceCount: 0,
     elapsedMilliseconds: Date.now() - startedAt
   });
 
@@ -112,7 +108,6 @@ export async function buildPriorityReferenceIndex(
         scannedCount: index,
         totalCount: candidateUris.length,
         referenceCount: references.length,
-        instanceCount: serializedInstances.length,
         elapsedMilliseconds: diagnostics.elapsedMilliseconds
       });
       throw new UnityEventReferenceScanCanceledError();
@@ -136,7 +131,6 @@ export async function buildPriorityReferenceIndex(
         scannedCount: index + 1,
         totalCount: candidateUris.length,
         referenceCount: references.length,
-        instanceCount: serializedInstances.length,
         elapsedMilliseconds: Date.now() - startedAt
       });
       await yieldToEventLoop();
@@ -145,18 +139,12 @@ export async function buildPriorityReferenceIndex(
 
     const assetPath = toProjectPath(runtime.metadataIndex.root, uri);
     const parsed = await parseUnityEventReferencesWithDiagnostics(content, assetPath, assetKind, metadata, resolveCSharpType);
-    const locations = parsed.serializedInstances.filter(location =>
-      location.scriptPath
-        ? pathReferenceKey(location.scriptPath) === pathReferenceKey(scriptPath)
-        : location.scriptTypeName !== undefined && isCurrentDocumentType(currentTypes, location.scriptTypeName)
-    );
     const currentReferences = parsed.references.filter(reference =>
       isCurrentScriptReference(scriptPath, currentTypes, reference)
     );
 
     mergeDiagnostics(diagnostics, parsed.diagnostics);
     references.push(...currentReferences);
-    serializedInstances.push(...locations);
     runtime.scanStatus?.update({
       label: 'Unity refs: current',
       phase: 'Parsing current script candidates',
@@ -167,16 +155,14 @@ export async function buildPriorityReferenceIndex(
       scannedCount: index + 1,
       totalCount: candidateUris.length,
       referenceCount: references.length,
-      instanceCount: serializedInstances.length,
       elapsedMilliseconds: Date.now() - startedAt
     });
     await yieldToEventLoop();
   }
 
   diagnostics.resolvedReferenceCount = references.length;
-  diagnostics.serializedInstanceCount = serializedInstances.length;
   diagnostics.elapsedMilliseconds = Date.now() - startedAt;
-  const index = createReferenceIndex(references, serializedInstances, diagnostics);
+  const index = createReferenceIndex(references, diagnostics);
   runtime.scanStatus?.finish('completed', diagnostics, {
     label: 'Unity refs: current',
     phase: 'Current script scan complete',
@@ -187,10 +173,9 @@ export async function buildPriorityReferenceIndex(
     scannedCount: candidateUris.length,
     totalCount: candidateUris.length,
     referenceCount: references.length,
-    instanceCount: serializedInstances.length,
     elapsedMilliseconds: diagnostics.elapsedMilliseconds
   });
-  runtime.logger.debug(`UnityEvent priority scan for ${scriptPath}: ${candidateUris.length} candidate asset(s), ${references.length} reference(s), ${serializedInstances.length} instance(s).`);
+  runtime.logger.debug(`UnityEvent priority scan for ${scriptPath}: ${candidateUris.length} candidate asset(s), ${references.length} reference(s).`);
   return { index, diagnostics, scriptGuid };
 }
 

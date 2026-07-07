@@ -1,5 +1,5 @@
 import type * as vscode from 'vscode';
-import type { UnityEventReference, UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
+import type { UnityEventReference, UnitySerializedAssetReferenceIndex } from './model';
 import type { EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
 import { escapeMarkdown, toWorkspaceUri } from './utils';
 
@@ -32,15 +32,7 @@ export function createHoverMarkdown(
 function getReferencesForLocationTarget(
   index: UnitySerializedAssetReferenceIndex,
   target: EventReferenceLocationTarget
-): readonly (UnityEventReference | UnitySerializedInstanceLocation)[] {
-  if (target.kind === 'serializedInstance') {
-    if (target.serializedInstances) {
-      return target.serializedInstances;
-    }
-
-    return index.getSerializedInstances(target.scriptPath, target.typeName);
-  }
-
+): readonly UnityEventReference[] {
   if (!target.symbolName) {
     return [];
   }
@@ -90,17 +82,7 @@ function toReferenceLocation(
   return new runtimeVscode.Location(toWorkspaceUri(runtimeVscode, root, reference.assetPath), position);
 }
 
-/** Converts a serialized script instance into a VS Code peek location. */
-function toSerializedInstanceLocation(
-  runtimeVscode: typeof vscode,
-  root: vscode.Uri,
-  reference: UnitySerializedInstanceLocation
-): vscode.Location {
-  const position = new runtimeVscode.Position(reference.line, reference.character);
-  return new runtimeVscode.Location(toWorkspaceUri(runtimeVscode, root, reference.assetPath), position);
-}
-
-/** Shows references or serialized instances for a CodeLens command target. */
+/** Shows UnityEvent references for a CodeLens command target. */
 export async function showReferenceLocations(
   runtime: EventReferenceRuntime,
   index: UnitySerializedAssetReferenceIndex | undefined,
@@ -113,23 +95,7 @@ export async function showReferenceLocations(
     return;
   }
 
-  if (!index && target.kind === 'serializedInstance' && target.serializedInstances) {
-    const serializedReferences = target.serializedInstances;
-    if (serializedReferences.length === 0) {
-      runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no Unity serialized instances found for this script.'));
-      return;
-    }
-
-    await runtime.runtimeVscode.commands.executeCommand(
-      'editor.action.showReferences',
-      toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
-      target.position,
-      serializedReferences.map(reference => toSerializedInstanceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
-    );
-    return;
-  }
-
-  if (!index && target.kind !== 'serializedInstance' && target.eventReferences) {
+  if (!index && target.eventReferences) {
     const eventReferences = target.eventReferences;
     if (eventReferences.length === 0) {
       runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
@@ -161,32 +127,14 @@ export async function showReferenceLocations(
   const references = getReferencesForLocationTarget(index, target);
 
   if (references.length === 0) {
-    if (target.kind === 'serializedInstance') {
-      runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: no Unity serialized instances found for this script.'));
-      return;
-    }
-
     runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
     return;
   }
 
-  if (target.kind === 'serializedInstance') {
-    const serializedReferences = references as readonly UnitySerializedInstanceLocation[];
-    await runtime.runtimeVscode.commands.executeCommand(
-      'editor.action.showReferences',
-      toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
-      target.position,
-      serializedReferences.map(reference => toSerializedInstanceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
-    );
-    return;
-  }
-
-  const eventReferences = references as readonly UnityEventReference[];
-
   if (target.kind === 'fieldTarget') {
     // Field-target CodeLens answers where serialized Unity YAML binds this
     // event field, not where a possible C# target method is declared.
-    await showIndexedYamlLocations(runtime, target, eventReferences);
+    await showIndexedYamlLocations(runtime, target, references);
     return;
   }
 
@@ -194,6 +142,6 @@ export async function showReferenceLocations(
     'editor.action.showReferences',
     toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
     target.position,
-    eventReferences.map(reference => toReferenceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
+    references.map(reference => toReferenceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
   );
 }

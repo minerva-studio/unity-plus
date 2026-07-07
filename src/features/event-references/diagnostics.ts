@@ -18,19 +18,11 @@ export function createEmptyDiagnostics(): UnityEventReferenceDiagnostics {
     parsedUnityEventAssetCount: 0,
     skippedUnityEventAssetCount: 0,
     persistentCallCount: 0,
-    serializedInstanceCount: 0,
     resolvedReferenceCount: 0,
     resolvedByTargetTypeNameCount: 0,
     resolvedOwnerScriptGuidCount: 0,
     resolvedOwnerEditorClassIdentifierCount: 0,
     unresolvedOwnerScriptCount: 0,
-    resolvedSerializedInstanceScriptGuidCount: 0,
-    resolvedSerializedInstanceEditorClassIdentifierCount: 0,
-    unresolvedSerializedInstanceScriptCount: 0,
-    serializedInstanceScriptTextHitCount: 0,
-    serializedInstanceScriptResolvedTextHitCount: 0,
-    serializedInstanceScriptUnresolvedTextHitCount: 0,
-    serializedInstanceScriptDedupedTextHitCount: 0,
     skippedDisabledCallCount: 0,
     skippedMissingTargetTypeNameCount: 0,
     skippedUnresolvedTargetTypeNameCount: 0,
@@ -68,19 +60,11 @@ export function mergeDiagnostics(target: UnityEventReferenceDiagnostics, source:
   target.parsedUnityEventAssetCount += source.parsedUnityEventAssetCount;
   target.skippedUnityEventAssetCount += source.skippedUnityEventAssetCount;
   target.persistentCallCount += source.persistentCallCount;
-  target.serializedInstanceCount += source.serializedInstanceCount;
   target.resolvedReferenceCount += source.resolvedReferenceCount;
   target.resolvedByTargetTypeNameCount += source.resolvedByTargetTypeNameCount;
   target.resolvedOwnerScriptGuidCount += source.resolvedOwnerScriptGuidCount;
   target.resolvedOwnerEditorClassIdentifierCount += source.resolvedOwnerEditorClassIdentifierCount;
   target.unresolvedOwnerScriptCount += source.unresolvedOwnerScriptCount;
-  target.resolvedSerializedInstanceScriptGuidCount += source.resolvedSerializedInstanceScriptGuidCount;
-  target.resolvedSerializedInstanceEditorClassIdentifierCount += source.resolvedSerializedInstanceEditorClassIdentifierCount;
-  target.unresolvedSerializedInstanceScriptCount += source.unresolvedSerializedInstanceScriptCount;
-  target.serializedInstanceScriptTextHitCount += source.serializedInstanceScriptTextHitCount;
-  target.serializedInstanceScriptResolvedTextHitCount += source.serializedInstanceScriptResolvedTextHitCount;
-  target.serializedInstanceScriptUnresolvedTextHitCount += source.serializedInstanceScriptUnresolvedTextHitCount;
-  target.serializedInstanceScriptDedupedTextHitCount += source.serializedInstanceScriptDedupedTextHitCount;
   target.skippedDisabledCallCount += source.skippedDisabledCallCount;
   target.skippedMissingTargetTypeNameCount += source.skippedMissingTargetTypeNameCount;
   target.skippedUnresolvedTargetTypeNameCount += source.skippedUnresolvedTargetTypeNameCount;
@@ -113,9 +97,6 @@ export function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: Uni
     runtimeVscode.l10n.t('found {count} persistent call(s)', {
       count: diagnostics.persistentCallCount
     }),
-    runtimeVscode.l10n.t('found {count} serialized instance(s)', {
-      count: diagnostics.serializedInstanceCount
-    }),
     runtimeVscode.l10n.t('YAML parser paths: {assetCount} asset parse(s), {unityEventCount} UnityEvent parse(s), {skippedUnityEventCount} UnityEvent parse(s) skipped', {
       assetCount: diagnostics.parsedYamlAssetCount,
       unityEventCount: diagnostics.parsedUnityEventAssetCount,
@@ -131,17 +112,6 @@ export function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: Uni
       guidCount: diagnostics.resolvedOwnerScriptGuidCount,
       editorCount: diagnostics.resolvedOwnerEditorClassIdentifierCount,
       unresolvedCount: diagnostics.unresolvedOwnerScriptCount
-    }),
-    runtimeVscode.l10n.t('serialized instance scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved', {
-      guidCount: diagnostics.resolvedSerializedInstanceScriptGuidCount,
-      editorCount: diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount,
-      unresolvedCount: diagnostics.unresolvedSerializedInstanceScriptCount
-    }),
-    runtimeVscode.l10n.t('serialized instance text hits: {hitCount} found, {resolvedCount} metadata-resolved, {unresolvedCount} unresolved, {dedupedCount} deduped', {
-      hitCount: diagnostics.serializedInstanceScriptTextHitCount,
-      resolvedCount: diagnostics.serializedInstanceScriptResolvedTextHitCount,
-      unresolvedCount: diagnostics.serializedInstanceScriptUnresolvedTextHitCount,
-      dedupedCount: diagnostics.serializedInstanceScriptDedupedTextHitCount
     }),
     runtimeVscode.l10n.t('skipped {callCount} call(s) and {assetCount} asset(s)', {
       callCount: skippedCallCount,

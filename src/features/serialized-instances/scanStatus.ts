@@ -1,26 +1,25 @@
 import type * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
-import type { UnityEventReferenceDiagnostics, UnityEventReferenceScanStatus, UnityEventReferenceScanStatusReporter } from './model';
+import type { UnitySerializedInstanceDiagnostics, UnitySerializedInstanceScanStatus, UnitySerializedInstanceScanStatusReporter } from './model';
 
-/** Creates a status bar reporter for silent background UnityEvent scans. */
-export function createUnityEventReferenceScanStatus(
+/** Creates a persistent status bar reporter for background serialized instance scans. */
+export function createSerializedInstanceScanStatus(
   runtimeVscode: typeof vscode,
   logger: UnityPlusLogger,
-  formatDiagnostics: (runtimeVscode: typeof vscode, diagnostics: UnityEventReferenceDiagnostics) => string
-): UnityEventReferenceScanStatusReporter {
+  formatDiagnostics: (runtimeVscode: typeof vscode, diagnostics: UnitySerializedInstanceDiagnostics) => string
+): UnitySerializedInstanceScanStatusReporter {
   void formatDiagnostics;
   const window = runtimeVscode.window as typeof runtimeVscode.window & {
     createStatusBarItem?: (alignment?: vscode.StatusBarAlignment, priority?: number) => vscode.StatusBarItem;
   };
   const item = typeof window.createStatusBarItem === 'function'
-    ? window.createStatusBarItem(runtimeVscode.StatusBarAlignment?.Left, 100)
+    ? window.createStatusBarItem(runtimeVscode.StatusBarAlignment?.Left, 99)
     : undefined;
   let startedAt = 0;
 
   return {
-    start(phase, label = 'Unity refs') {
+    start(phase, label = 'Unity inst') {
       startedAt = Date.now();
-
       if (!item) {
         return;
       }
@@ -36,7 +35,7 @@ export function createUnityEventReferenceScanStatus(
 
       const scannedCount = status.scannedCount ?? 0;
       const totalCount = status.totalCount ?? status.candidateCount;
-      const label = status.label ?? 'Unity refs';
+      const label = status.label ?? 'Unity inst';
       const progressText = status.metadataGuidCount !== undefined
         ? `${status.metadataGuidCount} GUIDs`
         : `${scannedCount}/${totalCount ?? '?'}`;
@@ -49,21 +48,21 @@ export function createUnityEventReferenceScanStatus(
     },
     finish(result, diagnostics, status) {
       if (item) {
-        const label = status?.label ?? 'Unity refs';
+        const label = status?.label ?? 'Unity inst';
         const icon = result === 'completed'
           ? '$(check)'
           : result === 'canceled'
             ? '$(circle-slash)'
             : '$(warning)';
-        const references = status?.referenceCount ?? diagnostics?.resolvedReferenceCount ?? 0;
-        item.text = `${icon} ${label}: ${references} refs`;
+        const instances = status?.instanceCount ?? diagnostics?.serializedInstanceCount ?? 0;
+        item.text = `${icon} ${label}: ${instances} inst`;
         item.tooltip = formatScanStatusTooltip({
           label,
           phase: status?.phase ?? result,
           candidateCount: status?.candidateCount ?? diagnostics?.candidateAssetCount,
           scannedCount: status?.scannedCount,
           totalCount: status?.totalCount,
-          referenceCount: references,
+          instanceCount: instances,
           metadataGuidCount: status?.metadataGuidCount,
           scriptPath: status?.scriptPath,
           scriptGuid: status?.scriptGuid,
@@ -73,9 +72,9 @@ export function createUnityEventReferenceScanStatus(
       }
 
       if (diagnostics) {
-        logger.info(`UnityEvent background reference scan ${result}: ${formatDiagnosticsForLog(diagnostics)}.`);
+        logger.info(`Unity serialized instance background scan ${result}: ${formatDiagnosticsForLog(diagnostics)}.`);
       } else {
-        logger.info(`UnityEvent background reference scan ${result}.`);
+        logger.info(`Unity serialized instance background scan ${result}.`);
       }
     },
     dispose() {
@@ -85,30 +84,29 @@ export function createUnityEventReferenceScanStatus(
 }
 
 /** Formats scan diagnostics for logs without localized UI text or encoding risk. */
-function formatDiagnosticsForLog(diagnostics: UnityEventReferenceDiagnostics): string {
+function formatDiagnosticsForLog(diagnostics: UnitySerializedInstanceDiagnostics): string {
   return [
     `${diagnostics.candidateAssetCount} candidate asset(s)`,
     `${diagnostics.assetReadCount} read`,
     `${diagnostics.prefabCount} prefab(s)`,
     `${diagnostics.sceneCount} scene(s)`,
     `${diagnostics.assetCount} asset file(s)`,
-    `${diagnostics.resolvedReferenceCount} UnityEvent reference(s)`,
-    `${diagnostics.resolvedByTargetTypeNameCount} target method(s) resolved by type name`,
+    `${diagnostics.serializedInstanceCount} serialized instance(s)`,
     `${diagnostics.elapsedMilliseconds}ms`
   ].join(', ');
 }
 
-/** Formats the status bar tooltip without allocating parser-side state. */
-function formatScanStatusTooltip(status: UnityEventReferenceScanStatus): string {
+/** Formats the persistent status bar tooltip. */
+function formatScanStatusTooltip(status: UnitySerializedInstanceScanStatus): string {
   const lines = [
-    `Scope: ${status.label ?? 'Unity refs'}`,
+    `Scope: ${status.label ?? 'Unity inst'}`,
     `Phase: ${status.phase}`,
     `Script: ${status.scriptPath ?? '-'}`,
     `Script GUID: ${status.scriptGuid ?? '-'}`,
     `Metadata GUIDs: ${status.metadataGuidCount ?? '?'}`,
     `Candidates: ${status.candidateCount ?? '?'}`,
     `Scanned: ${status.scannedCount ?? 0}/${status.totalCount ?? status.candidateCount ?? '?'}`,
-    `References: ${status.referenceCount ?? 0}`,
+    `Instances: ${status.instanceCount ?? 0}`,
     `Elapsed: ${status.elapsedMilliseconds ?? 0}ms`
   ];
   return lines.join('\n');

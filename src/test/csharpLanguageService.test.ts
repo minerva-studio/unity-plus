@@ -58,9 +58,7 @@ function fakeSymbolInformation(
 
 /** Creates a C# service backed by fixed fake document symbols. */
 function createServiceWithSymbols(
-  symbols: Array<vscode.DocumentSymbol | vscode.SymbolInformation>,
-  workspaceSymbols: vscode.SymbolInformation[] = [],
-  hoverTextByName: Record<string, string> = {}
+  symbols: Array<vscode.DocumentSymbol | vscode.SymbolInformation>
 ) {
   return createVscodeCSharpLanguageService({
     SymbolKind: symbolKind,
@@ -80,48 +78,6 @@ function createServiceWithSymbols(
       executeCommand: async (command: string, ...args: unknown[]) => {
         if (command === 'vscode.executeDocumentSymbolProvider') {
           return symbols;
-        }
-
-        if (command === 'vscode.executeWorkspaceSymbolProvider') {
-          const [query] = args as [string];
-          return workspaceSymbols.filter(symbol => symbol.name.toLowerCase().includes(query.toLowerCase()));
-        }
-
-        if (command === 'vscode.executeHoverProvider') {
-          const [uri, position] = args as [vscode.Uri, vscode.Position];
-          const symbol = workspaceSymbols.find(candidate =>
-            candidate.location.uri.fsPath === uri.fsPath &&
-            candidate.location.range.start.line === position.line &&
-            candidate.location.range.start.character === position.character
-          );
-          const value = symbol ? hoverTextByName[symbol.name] : undefined;
-          return value ? [{ contents: [{ value }] }] : [];
-        }
-
-        if (command === 'vscode.prepareTypeHierarchy') {
-          const [, position] = args as [vscode.Uri, vscode.Position];
-          const symbol = workspaceSymbols.find(candidate =>
-            candidate.location.range.start.line === position.line &&
-            candidate.location.range.start.character === position.character
-          );
-          return symbol ? [{
-            name: symbol.name,
-            detail: 'Amlos.Control.Interact',
-            uri: symbol.location.uri,
-            range: symbol.location.range,
-            selectionRange: symbol.location.range
-          }] : [];
-        }
-
-        if (command === 'vscode.provideSupertypes') {
-          const [item] = args as [vscode.TypeHierarchyItem];
-          return item.name === 'Interactable' ? [{
-            name: 'Object',
-            detail: 'UnityEngine',
-            uri: item.uri,
-            range: item.range,
-            selectionRange: item.selectionRange
-          }] : [];
         }
 
         assert.fail(`Unexpected VS Code command: ${command}`);

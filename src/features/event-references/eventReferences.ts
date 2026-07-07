@@ -19,8 +19,7 @@ export type {
   UnityEventReferenceBuildMode,
   UnityEventReferenceDiagnostics,
   UnitySerializedAssetKind,
-  UnitySerializedAssetReferenceIndex,
-  UnitySerializedInstanceLocation
+  UnitySerializedAssetReferenceIndex
 } from './model';
 export type { CSharpTypeIndex, CSharpTypeIndexBuilder, CSharpTypeResolver, EventReferenceFeatureOptions } from './runtime';
 export { buildUnityEventReferenceIndex } from './scanner';

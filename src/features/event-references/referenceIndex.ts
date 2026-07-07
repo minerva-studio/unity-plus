@@ -2,15 +2,13 @@ import { createEmptyDiagnostics } from './diagnostics';
 import type {
   UnityEventReference,
   UnityEventReferenceDiagnostics,
-  UnitySerializedAssetReferenceIndex,
-  UnitySerializedInstanceLocation
+  UnitySerializedAssetReferenceIndex
 } from './model';
 import { isUnityBuiltInTargetTypeName } from './targetTypes';
 
-/** Builds an in-memory lookup index for UnityEvent references and serialized instances. */
+/** Builds an in-memory lookup index for UnityEvent references. */
 export function createReferenceIndex(
   references: readonly UnityEventReference[],
-  serializedInstances: readonly UnitySerializedInstanceLocation[] = [],
   diagnostics: UnityEventReferenceDiagnostics = createEmptyDiagnostics()
 ): UnitySerializedAssetReferenceIndex {
   const referencesByKey = new Map<string, UnityEventReference[]>();
@@ -21,8 +19,6 @@ export function createReferenceIndex(
   const targetReferencesByFieldTypeKey = new Map<string, UnityEventReference[]>();
   const targetReferenceKeysByFieldKey = new Map<string, Set<string>>();
   const targetReferenceKeysByFieldTypeKey = new Map<string, Set<string>>();
-  const serializedInstancesByScriptPath = new Map<string, UnitySerializedInstanceLocation[]>();
-  const serializedInstancesByScriptTypeName = new Map<string, UnitySerializedInstanceLocation[]>();
 
   for (const reference of references) {
     if (reference.scriptPath) {
@@ -53,20 +49,6 @@ export function createReferenceIndex(
     }
   }
 
-  for (const location of serializedInstances) {
-    if (location.scriptPath) {
-      appendMapValue(serializedInstancesByScriptPath, pathReferenceKey(location.scriptPath), location);
-    }
-
-    if (location.scriptTypeName) {
-      appendMapValue(serializedInstancesByScriptTypeName, typeKey(location.scriptTypeName), location);
-      const shortKey = typeKey(shortTypeName(location.scriptTypeName));
-      if (shortKey !== typeKey(location.scriptTypeName)) {
-        appendMapValue(serializedInstancesByScriptTypeName, shortKey, location);
-      }
-    }
-  }
-
   // Keep query functions close to the maps they read so each fallback path is easy to audit.
   const getReferences = (scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[] =>
     mergeUniqueReferences(
@@ -82,11 +64,6 @@ export function createReferenceIndex(
     mergeUniqueReferences(
       filterByType(targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
       typeName ? targetReferencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
-    );
-  const getSerializedInstances = (scriptPath: string, typeName?: string): readonly UnitySerializedInstanceLocation[] =>
-    mergeUniqueReferences(
-      scriptPath ? serializedInstancesByScriptPath.get(pathReferenceKey(scriptPath)) : undefined,
-      typeName ? serializedInstancesByScriptTypeName.get(typeKey(typeName)) : undefined
     );
 
   return {
@@ -113,14 +90,6 @@ export function createReferenceIndex(
     /** Counts distinct project method targets declared by a UnityEvent field. */
     getFieldTargetCount(scriptPath, fieldName, typeName) {
       return getFieldTargets(scriptPath, fieldName, typeName).length;
-    },
-    /** Returns serialized MonoBehaviour instances by script path with type-name fallback. */
-    getSerializedInstances(scriptPath, typeName) {
-      return getSerializedInstances(scriptPath, typeName);
-    },
-    /** Counts serialized MonoBehaviour instances by script path with type-name fallback. */
-    getSerializedInstanceCount(scriptPath, typeName) {
-      return getSerializedInstances(scriptPath, typeName).length;
     },
     /** Returns the original reference list for broad operations such as location filtering. */
     getAllReferences() {
@@ -263,9 +232,4 @@ export function pathReferenceKey(scriptPath: string): string {
 /** Normalizes managed type names for case-insensitive lookups. */
 export function typeKey(typeName: string): string {
   return typeName.toLowerCase();
-}
-
-/** Returns the final segment of a namespace-qualified type name. */
-function shortTypeName(typeName: string): string {
-  return typeName.split('.').at(-1) ?? typeName;
 }

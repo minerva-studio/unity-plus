@@ -1,4 +1,5 @@
 import type * as vscode from 'vscode';
+import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot } from '../../unity/csharpLanguageService';
 import { isCSharpFile } from './assetDiscovery';
 import { createCodeLensesFromIndex } from './codeLens';
 import { createHoverMarkdown, showReferenceLocations } from './referenceLocations';
@@ -25,6 +26,8 @@ export function createEventReferenceProvider(
     delayMilliseconds: number;
     logCount: number;
   }>();
+  const lastMethodSymbolsByScriptPath = new Map<string, readonly CSharpMethodSymbolSnapshot[]>();
+  const lastFieldSymbolsByScriptPath = new Map<string, readonly CSharpFieldSymbolSnapshot[]>();
 
   /** Creates a retry key so one script or symbol kind cannot block another. */
   function csharpRetryKey(scriptPath: string, kind: CSharpCodeLensSymbolKind): string {
@@ -52,7 +55,7 @@ export function createEventReferenceProvider(
   }
 
   /** Queues a bounded CodeLens refresh while the C# server is still warming up. */
-  function scheduleCSharpCodeLensRetry(scriptPath: string, kind: CSharpCodeLensSymbolKind, error: unknown): void {
+  function scheduleCSharpCodeLensRetry(scriptPath: string, kind: CSharpCodeLensSymbolKind, error: unknown, canPlacePlaceholder: boolean): void {
     const key = csharpRetryKey(scriptPath, kind);
     const existingState = csharpRetryStates.get(key);
     if (existingState) {
@@ -62,10 +65,10 @@ export function createEventReferenceProvider(
     const previousLogCount = getCSharpRetryLogCount(scriptPath, kind);
     const logCount = previousLogCount + 1;
     const message = errorMessage(error);
-    if (logCount === 1 || logCount % 10 === 0) {
-      runtime.logger.info(`UnityEvent CodeLens is waiting for C# ${kind} before showing matching hints for ${scriptPath}: ${message}`);
+    if (isExpectedCSharpUnavailableError(error)) {
+      runtime.logger.info(`UnityEvent CodeLens C# ${kind} unavailable for ${scriptPath}; placeholder=${canPlacePlaceholder}: ${message}`);
     } else {
-      runtime.logger.debug(`UnityEvent CodeLens C# ${kind} retry for ${scriptPath}: ${message}`);
+      runtime.logger.error(`UnityEvent CodeLens C# ${kind} unexpected provider failure for ${scriptPath}; placeholder=${canPlacePlaceholder}; occurrence=${logCount}: ${message}`);
     }
 
     const delayMilliseconds = getCSharpRetryDelay(scriptPath, kind);
@@ -92,6 +95,20 @@ export function createEventReferenceProvider(
     }
 
     resetCSharpRetry(scriptPath, kind);
+  }
+
+  /** Stores the last successful symbols so unexpected failures can keep visible placeholders anchored. */
+  function rememberCSharpSymbols(
+    scriptPath: string,
+    kind: CSharpCodeLensSymbolKind,
+    symbols: readonly CSharpMethodSymbolSnapshot[] | readonly CSharpFieldSymbolSnapshot[]
+  ): void {
+    if (kind === 'methods') {
+      lastMethodSymbolsByScriptPath.set(scriptPath, symbols as readonly CSharpMethodSymbolSnapshot[]);
+      return;
+    }
+
+    lastFieldSymbolsByScriptPath.set(scriptPath, symbols as readonly CSharpFieldSymbolSnapshot[]);
   }
 
   /** Checks whether a script and symbol category is currently in retry backoff. */
@@ -129,8 +146,13 @@ export function createEventReferenceProvider(
           includeZeroSummaryLenses: true,
           skipCSharpMethods: isCSharpRetryBackoffActive(scriptPath, 'methods'),
           skipCSharpFields: isCSharpRetryBackoffActive(scriptPath, 'fields'),
-          onCSharpSymbolsUnavailable: (kind, error) => scheduleCSharpCodeLensRetry(scriptPath, kind, error),
-          onCSharpSymbolsReady: kind => markCSharpCodeLensReady(scriptPath, kind)
+          fallbackMethods: lastMethodSymbolsByScriptPath.get(scriptPath),
+          fallbackFields: lastFieldSymbolsByScriptPath.get(scriptPath),
+          onCSharpSymbolsUnavailable: (kind, error, canPlacePlaceholder) => scheduleCSharpCodeLensRetry(scriptPath, kind, error, canPlacePlaceholder),
+          onCSharpSymbolsReady: (kind, symbols) => {
+            rememberCSharpSymbols(scriptPath, kind, symbols);
+            markCSharpCodeLensReady(scriptPath, kind);
+          }
         });
       } catch (error) {
         runtime.logger.warn(`UnityEvent CodeLens failed for ${scriptPath}: ${errorMessage(error)}`);
@@ -181,6 +203,16 @@ export function createEventReferenceProvider(
       );
     }
   };
+}
+
+/** Treats namespace-only and empty provider results as unavailable rather than unexpected provider crashes. */
+function isExpectedCSharpUnavailableError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return message.includes('namespace-only') ||
+    message.includes('not ready') ||
+    message.includes('unavailable') ||
+    message.includes('canceled') ||
+    message.includes('cancelled');
 }
 
 /** Converts language-service ranges back into VS Code ranges for hover rendering. */
