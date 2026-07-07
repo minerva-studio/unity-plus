@@ -472,7 +472,69 @@ describe('eventReferences', () => {
     assert.strictEqual(lenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget'), false);
   });
 
-  it('keeps retry backoff scoped to one script and C# symbol kind', async () => {
+  it('does not query methods when the current script only owns UnityEvent fields', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/GateController.cs', [
+      'using UnityEngine.Events;',
+      'public class GateController',
+      '{',
+      '  public UnityEvent OpenGate;',
+      '  public UnityEvent CloseGate;',
+      '}'
+    ].join('\n'));
+    let methodReads = 0;
+    let fieldReads = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/GateController.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createGateControllerYaml(2),
+      resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? ironDoorScriptPath : createTypeResolver()(typeName),
+      csharpLanguageService: {
+        ...createFakeCSharpSymbolLanguageService({}),
+        async findMethods() {
+          methodReads += 1;
+          return [];
+        },
+        async findUnityEventFields() {
+          fieldReads += 1;
+          return [{
+            name: 'OpenGate',
+            typeName: 'GateController',
+            range: {
+              start: { line: 3, character: 20 },
+              end: { line: 3, character: 28 }
+            }
+          }, {
+            name: 'CloseGate',
+            typeName: 'GateController',
+            range: {
+              start: { line: 4, character: 20 },
+              end: { line: 4, character: 29 }
+            }
+          }];
+        }
+      }
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(methodReads, 0);
+    assert.strictEqual(fieldReads, 1);
+    assert.strictEqual(lenses.filter(lens => lens.command?.arguments?.[0]?.kind === 'field').length, 2);
+    assert.strictEqual(lenses.filter(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget').length, 2);
+  });
+
+  it('skips C# field queries for scripts without indexed UnityEvent bindings', async () => {
     const runtime = createEventReferenceRuntime();
     const gateDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -535,8 +597,8 @@ describe('eventReferences', () => {
     const otherLenses = await runtime.provideCodeLenses(otherDocument);
 
     assert.strictEqual(gateLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
-    assert.strictEqual(otherFieldReads, 1);
-    assert.strictEqual(otherLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
+    assert.strictEqual(otherFieldReads, 0);
+    assert.strictEqual(otherLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), false);
   });
 
   it('schedules one background index build after repeated CodeLens requests', async () => {

@@ -67,6 +67,20 @@ export function createReferenceIndex(
     );
 
   return {
+    /** Checks whether this script has any YAML target-method references. */
+    hasMethodReferences(scriptPath) {
+      const scriptTypeName = scriptTypeNameFromPath(scriptPath);
+      return hasAnyKeyForPath(referencesByKey, scriptPath) ||
+        (scriptTypeName ? hasAnyKeyForType(referencesByTypeKey, scriptTypeName) : false);
+    },
+    /** Checks whether this script has any UnityEvent field references or targets. */
+    hasFieldReferences(scriptPath) {
+      const scriptTypeName = scriptTypeNameFromPath(scriptPath);
+      return hasAnyKeyForPath(referencesByFieldKey, scriptPath) ||
+        hasAnyKeyForPath(targetReferencesByFieldKey, scriptPath) ||
+        (scriptTypeName ? hasAnyKeyForType(referencesByFieldTypeKey, scriptTypeName) : false) ||
+        (scriptTypeName ? hasAnyKeyForType(targetReferencesByFieldTypeKey, scriptTypeName) : false);
+    },
     /** Returns references to a target method by script path with type-name fallback. */
     getReferences(scriptPath, methodName, typeName) {
       return getReferences(scriptPath, methodName, typeName);
@@ -212,6 +226,39 @@ function filterByType<T>(
 /** Creates a script-path and member-name lookup key. */
 function referenceKey(scriptPath: string, methodName: string): string {
   return `${pathReferenceKey(scriptPath)}#${methodName}`;
+}
+
+/** Checks whether a path-keyed lookup has any entry for the requested script. */
+function hasAnyKeyForPath(map: ReadonlyMap<string, readonly UnityEventReference[]>, scriptPath: string): boolean {
+  const prefix = `${pathReferenceKey(scriptPath)}#`;
+  for (const key of map.keys()) {
+    if (key.startsWith(prefix)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Checks whether a type-keyed lookup has an entry for a full or short type name. */
+function hasAnyKeyForType(map: ReadonlyMap<string, readonly UnityEventReference[]>, typeName: string): boolean {
+  const requestedType = typeKey(typeName);
+  for (const [key, references] of map.entries()) {
+    const keyType = key.slice(0, key.indexOf('#'));
+    if (references.length > 0 &&
+      (keyType === requestedType || keyType.endsWith(`.${requestedType}`))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Uses the script file name as a cheap prefilter before provider symbols supply full type names. */
+function scriptTypeNameFromPath(scriptPath: string): string | undefined {
+  const fileName = scriptPath.split(/[\\/]/).pop() ?? '';
+  const typeName = fileName.replace(/\.cs$/i, '');
+  return typeName || undefined;
 }
 
 /** Creates a type-name and method-name lookup key. */

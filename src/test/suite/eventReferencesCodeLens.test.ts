@@ -2,14 +2,12 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { join } from 'node:path';
 import { buildUnityEventReferenceIndex } from '../../features/event-references/eventReferences';
-import { buildSerializedInstanceIndex } from '../../features/serialized-instances/serializedInstances';
 import { findDefaultAssetFiles, findDefaultCSharpFiles } from '../../features/event-references/assetDiscovery';
 import { createEventReferenceProvider } from '../../features/event-references/provider';
 import type { EventReferenceRuntime, UnityEventReferenceIndexController } from '../../features/event-references/runtime';
 import type { UnitySerializedAssetReferenceIndex } from '../../features/event-references/model';
 import { createSerializedInstanceProvider } from '../../features/serialized-instances/provider';
-import type { SerializedInstanceIndexController, SerializedInstancesRuntime } from '../../features/serialized-instances/runtime';
-import type { UnitySerializedInstanceIndex } from '../../features/serialized-instances/model';
+import type { SerializedInstancesRuntime } from '../../features/serialized-instances/runtime';
 import { readDefaultTextFile } from '../../features/event-references/utils';
 import { createSharedUnityYamlAssetHandler } from '../../features/unity-yaml-assets/handler';
 import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
@@ -33,11 +31,9 @@ suite('eventReferences - VS Code CodeLens Provider', () => {
       const instanceRuntime = createSerializedFixtureRuntime(runtime);
       const metadata = await metadataIndex.getOrBuild();
       const eventIndex = await buildUnityEventReferenceIndex(runtime, metadata, { mode: 'interactive' });
-      const instanceIndex = await buildSerializedInstanceIndex(instanceRuntime, metadata, { mode: 'interactive' });
       const eventController = createReadyEventIndexController(eventIndex, vscode);
-      const instanceController = createReadyInstanceIndexController(instanceIndex, vscode);
       const eventProvider = createEventReferenceProvider(runtime, eventController, () => true);
-      const instanceProvider = createSerializedInstanceProvider(instanceRuntime, instanceController, () => true);
+      const instanceProvider = createSerializedInstanceProvider(instanceRuntime, () => true);
       const disposable = vscode.Disposable.from(
         vscode.languages.registerCodeLensProvider({ language: 'csharp' }, instanceProvider),
         vscode.languages.registerCodeLensProvider({ language: 'csharp' }, eventProvider)
@@ -101,7 +97,7 @@ function createSerializedFixtureRuntime(runtime: EventReferenceRuntime): Seriali
   };
 }
 
-/** Waits long enough for the provider retry timer to fire once. */
+/** Waits past the initial C# provider cooldown before asking CodeLens again. */
 async function waitForCodeLensRetry(): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, 1200));
 }
@@ -145,22 +141,6 @@ function createReadyEventIndexController(
   index: UnitySerializedAssetReferenceIndex,
   runtimeVscode: typeof vscode
 ): UnityEventReferenceIndexController {
-  const emitter = new runtimeVscode.EventEmitter<void>();
-  return {
-    onDidChangeCodeLenses: emitter.event,
-    getStatus: () => 'ready',
-    getReadyIndex: () => index,
-    scheduleBuild: () => undefined,
-    forceBuild: async () => index,
-    notifyCodeLensesChanged: () => emitter.fire()
-  };
-}
-
-/** Creates a serialized instance controller whose index is already built for deterministic CodeLens tests. */
-function createReadyInstanceIndexController(
-  index: UnitySerializedInstanceIndex,
-  runtimeVscode: typeof vscode
-): SerializedInstanceIndexController {
   const emitter = new runtimeVscode.EventEmitter<void>();
   return {
     onDidChangeCodeLenses: emitter.event,

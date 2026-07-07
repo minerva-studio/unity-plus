@@ -1,39 +1,5 @@
 import type * as vscode from 'vscode';
 import type { SerializedInstanceLocationTarget, SerializedInstancesRuntime } from './runtime';
-import type { UnitySerializedInstanceIndex } from './model';
-import { toProjectPath } from '../serialized-assets/utils';
-
-/** Converts a serialized instance index into class-level CodeLens entries. */
-export function createSerializedInstanceCodeLensesFromIndex(
-  runtime: SerializedInstancesRuntime,
-  document: vscode.TextDocument,
-  index: UnitySerializedInstanceIndex,
-  embedReferences: boolean
-): vscode.CodeLens[] {
-  const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-  const typeName = getScriptTypeNameFromPath(scriptPath);
-  const serializedInstances = index.getSerializedInstances(scriptPath, typeName);
-  if (serializedInstances.length === 0) {
-    return [];
-  }
-
-  const typeRange = findSerializedInstanceCodeLensRange(runtime.runtimeVscode, document, scriptPath);
-  return [
-    new runtime.runtimeVscode.CodeLens(typeRange, {
-      title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', {
-        count: serializedInstances.length
-      }),
-      command: 'unityPlus.showUnitySerializedInstanceLocations',
-      arguments: [{
-        kind: 'serializedInstance',
-        scriptPath,
-        typeName,
-        ...(embedReferences ? { serializedInstances } : {}),
-        position: typeRange.start
-      } satisfies SerializedInstanceLocationTarget]
-    })
-  ];
-}
 
 /** Converts a MonoScript GUID occurrence count into one class-level CodeLens entry. */
 export function createSerializedInstanceCodeLensFromGuidCount(

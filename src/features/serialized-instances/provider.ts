@@ -4,16 +4,20 @@ import { isCSharpFile } from '../serialized-assets/assetDiscovery';
 import { errorDetails, toProjectPath, toWorkspaceUri } from '../serialized-assets/utils';
 import { createSerializedInstanceCodeLensFromGuidCount } from './codeLens';
 import { showSerializedInstanceLocations } from './referenceLocations';
-import type { SerializedInstanceIndexController, SerializedInstanceLocationTarget, SerializedInstancesRuntime } from './runtime';
+import type { SerializedInstanceLocationTarget, SerializedInstancesRuntime } from './runtime';
 
 /** Creates the VS Code provider facade for serialized instance CodeLens. */
 export function createSerializedInstanceProvider(
   runtime: SerializedInstancesRuntime,
-  controller: SerializedInstanceIndexController,
   isEnabled: () => boolean
-): vscode.CodeLensProvider & { showSerializedInstanceLocations(target: SerializedInstanceLocationTarget): Promise<void> } {
+): vscode.CodeLensProvider & {
+  showSerializedInstanceLocations(target: SerializedInstanceLocationTarget): Promise<void>;
+  notifyCodeLensesChanged(): void;
+} {
+  const codeLensEvents = new runtime.runtimeVscode.EventEmitter<void>();
+
   return {
-    onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
+    onDidChangeCodeLenses: codeLensEvents.event,
     async provideCodeLenses(document) {
       if (!isEnabled() || !isCSharpFile(document.uri)) {
         return [];
@@ -43,11 +47,12 @@ export function createSerializedInstanceProvider(
     async showSerializedInstanceLocations(target) {
       await showSerializedInstanceLocations(
         runtime,
-        controller.getReadyIndex(),
         target,
-        () => controller.scheduleBuild(),
         isEnabled
       );
+    },
+    notifyCodeLensesChanged() {
+      codeLensEvents.fire();
     }
   };
 }

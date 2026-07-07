@@ -1,6 +1,6 @@
 import type * as vscode from 'vscode';
 import type { SerializedInstanceLocationTarget, SerializedInstancesRuntime } from './runtime';
-import type { UnitySerializedInstanceIndex, UnitySerializedInstanceLocation } from './model';
+import type { UnitySerializedInstanceLocation } from './model';
 import { toWorkspaceUri } from '../serialized-assets/utils';
 import { createEmptySerializedInstanceDiagnostics } from './diagnostics';
 import { collectSerializedInstancesFromParsedDocuments } from './parser';
@@ -8,9 +8,7 @@ import { collectSerializedInstancesFromParsedDocuments } from './parser';
 /** Shows serialized Unity object instance locations for a class-level CodeLens target. */
 export async function showSerializedInstanceLocations(
   runtime: SerializedInstancesRuntime,
-  index: UnitySerializedInstanceIndex | undefined,
   target: SerializedInstanceLocationTarget,
-  scheduleBuild: () => void,
   isEnabled: () => boolean
 ): Promise<void> {
   if (!isEnabled()) {
@@ -24,19 +22,7 @@ export async function showSerializedInstanceLocations(
     return;
   }
 
-  if (!index && target.serializedInstances) {
-    await showSerializedReferences(runtime, target, target.serializedInstances);
-    return;
-  }
-
-  if (!index) {
-    scheduleBuild();
-    runtime.runtimeVscode.window.showInformationMessage(runtime.runtimeVscode.l10n.t('Unity Plus: Unity serialized instance index is still building.'));
-    return;
-  }
-
-  const references = index.getSerializedInstances(target.scriptPath, target.typeName);
-  await showSerializedReferences(runtime, target, references);
+  await showSerializedReferences(runtime, target, target.serializedInstances ?? []);
 }
 
 /** Resolves precise serialized instance locations from GUID text hits on demand. */

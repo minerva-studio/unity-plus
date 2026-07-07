@@ -8,12 +8,7 @@ import {
 } from '../serialized-assets/assetDiscovery';
 import { readDefaultTextFile } from '../serialized-assets/utils';
 import { createSharedUnityYamlAssetHandler } from '../unity-yaml-assets/handler';
-import {
-  formatSerializedInstanceDiagnostics
-} from './diagnostics';
-import { createSerializedInstanceIndexController } from './indexController';
 import { createSerializedInstanceProvider } from './provider';
-import { createSerializedInstanceScanStatus } from './scanStatus';
 import type { SerializedInstancesFeatureOptions, SerializedInstancesRuntime } from './runtime';
 
 export type {
@@ -23,10 +18,8 @@ export type {
 } from './runtime';
 export type {
   UnitySerializedInstanceDiagnostics,
-  UnitySerializedInstanceIndex,
   UnitySerializedInstanceLocation
 } from './model';
-export { buildSerializedInstanceIndex } from './scanner';
 export { parseSerializedInstancesWithDiagnostics } from './parser';
 
 /** Registers serialized instance commands, CodeLens provider, and cache invalidation hooks. */
@@ -42,7 +35,6 @@ export function registerSerializedInstancesFeature(
   let serializedAssetCacheVersion = 0;
 
   if (options.metadataIndex) {
-    const scanStatus = createSerializedInstanceScanStatus(runtimeVscode, logger, formatSerializedInstanceDiagnostics);
     const yamlAssets = createSharedUnityYamlAssetHandler({
       root: options.metadataIndex.root,
       runtimeVscode,
@@ -59,19 +51,16 @@ export function registerSerializedInstancesFeature(
       searchAssetFilesContainingText: options.findAssetFilesContainingText ?? findDefaultAssetFilesContainingText,
       readTextFile: options.readTextFile ?? readDefaultTextFile,
       yamlAssets,
-      getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion,
-      scanStatus
+      getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion
     };
-    const controller = createSerializedInstanceIndexController(featureRuntime);
-    const provider = createSerializedInstanceProvider(featureRuntime, controller, isEnabled);
+    const provider = createSerializedInstanceProvider(featureRuntime, isEnabled);
 
     disposables.push(
-      scanStatus,
       watchUnitySerializedAssetFiles(runtimeVscode, options.metadataIndex.root, uri => {
         serializedAssetCacheVersion += 1;
         yamlAssets.invalidate(uri);
         logger.debug(`Unity serialized instance cache invalidated by serialized asset change: ${uri.fsPath}`);
-        controller.notifyCodeLensesChanged();
+        provider.notifyCodeLensesChanged();
       }),
       runtimeVscode.languages.registerCodeLensProvider({ language: 'csharp' }, provider),
       runtimeVscode.commands.registerCommand('unityPlus.showUnitySerializedInstanceLocations', async target => {

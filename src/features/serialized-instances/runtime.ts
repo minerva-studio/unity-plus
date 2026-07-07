@@ -1,12 +1,7 @@
 import type * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
-import type { LazyUnityMetadataIndex, UnityMetadataIndex } from '../../unity/metadataIndex';
+import type { LazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityAssetTextSearchResult, UnityYamlAssetHandler } from '../unity-yaml-assets/handler';
-import type {
-  UnitySerializedInstanceBuildContext,
-  UnitySerializedInstanceIndex,
-  UnitySerializedInstanceScanStatusReporter
-} from './model';
 
 export interface SerializedInstancesFeatureOptions {
   metadataIndex?: LazyUnityMetadataIndex;
@@ -27,7 +22,6 @@ export interface SerializedInstancesRuntime {
   readTextFile: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
   yamlAssets?: UnityYamlAssetHandler;
   getCacheVersion: () => number;
-  scanStatus?: UnitySerializedInstanceScanStatusReporter;
 }
 
 export type UnityAssetTextSearch = (
@@ -44,17 +38,6 @@ export interface SerializedInstanceLocationTarget {
   typeName?: string;
   serializedInstances?: readonly import('./model').UnitySerializedInstanceLocation[];
   position: vscode.Position;
-}
-
-export type SerializedInstanceIndexStatus = 'idle' | 'building' | 'ready' | 'failed';
-
-export interface SerializedInstanceIndexController {
-  readonly onDidChangeCodeLenses: vscode.Event<void>;
-  getStatus(): SerializedInstanceIndexStatus;
-  getReadyIndex(): UnitySerializedInstanceIndex | undefined;
-  scheduleBuild(): void;
-  forceBuild(context?: UnitySerializedInstanceBuildContext, metadata?: UnityMetadataIndex): Promise<UnitySerializedInstanceIndex | undefined>;
-  notifyCodeLensesChanged(): void;
 }
 
 export interface RunWithConcurrencyOptions {

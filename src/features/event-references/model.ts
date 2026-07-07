@@ -23,6 +23,8 @@ export interface UnityEventReference {
 }
 
 export interface UnitySerializedAssetReferenceIndex {
+  hasMethodReferences(scriptPath: string): boolean;
+  hasFieldReferences(scriptPath: string): boolean;
   getReferences(scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[];
   getReferenceCount(scriptPath: string, methodName: string, typeName?: string): number;
   getFieldReferences(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];

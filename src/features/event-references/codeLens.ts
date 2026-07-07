@@ -29,57 +29,108 @@ export async function createCodeLensesFromIndex(
   const codeLenses: vscode.CodeLens[] = [];
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
   let methodLensCount = 0;
+  let methodPlaceholderCount = 0;
   let fieldReferenceLensCount = 0;
   let fieldTargetLensCount = 0;
-
-  if (options.skipCSharpMethods) {
-    // Method symbol retry is scoped separately so UnityEvent field lenses can
-    // still render when only method symbols are warming up.
-    runtime.logger.debug(`UnityEvent CodeLens skipped C# methods during retry backoff for ${scriptPath}.`);
-  } else {
-    try {
-      const methods = await safeFindMethods(runtime, document);
-      options.onCSharpSymbolsReady?.('methods', methods);
-      methodLensCount = appendMethodCodeLenses(runtime, codeLenses, index, scriptPath, methods, options);
-    } catch (error) {
-      const placeholderCount = appendMethodPlaceholderCodeLenses(runtime, codeLenses, scriptPath, options.fallbackMethods ?? []);
-      runtime.logger.error(`UnityEvent method CodeLens failed for ${scriptPath}; placeholders=${placeholderCount}: ${formatErrorDetails(error)}`);
-      options.onCSharpSymbolsUnavailable?.('methods', error, placeholderCount > 0);
-    }
-  }
-
   let fieldCount = 0;
-  if (options.skipCSharpFields) {
-    // Field symbol retry is scoped separately so method and YAML instance lenses
-    // can stay visible while UnityEvent field symbols are unavailable.
-    runtime.logger.debug(`UnityEvent CodeLens skipped C# UnityEvent fields during retry backoff for ${scriptPath}.`);
-  } else {
-    try {
-      const fields = await safeFindUnityEventFields(runtime, document);
-      options.onCSharpSymbolsReady?.('fields', fields);
-      fieldCount = fields.length;
-      const fieldLensCounts = appendFieldCodeLenses(runtime, codeLenses, index, scriptPath, fields, options);
-      fieldReferenceLensCount = fieldLensCounts.referenceLensCount;
-      fieldTargetLensCount = fieldLensCounts.targetLensCount;
-    } catch (error) {
-      const fieldLensCounts = appendFieldPlaceholderCodeLenses(runtime, codeLenses, scriptPath, options.fallbackFields ?? []);
-      fieldReferenceLensCount += fieldLensCounts.referenceLensCount;
-      fieldTargetLensCount += fieldLensCounts.targetLensCount;
-      runtime.logger.error(`UnityEvent field CodeLens failed for ${scriptPath}; placeholders=${fieldLensCounts.referenceLensCount + fieldLensCounts.targetLensCount}: ${formatErrorDetails(error)}`);
-      if (fieldLensCounts.referenceLensCount + fieldLensCounts.targetLensCount === 0) {
-        runtime.logger.error(`UnityEvent field symbols unavailable, cannot place field placeholder for ${scriptPath}.`);
-      }
-      options.onCSharpSymbolsUnavailable?.('fields', error, fieldLensCounts.referenceLensCount + fieldLensCounts.targetLensCount > 0);
-    }
-  }
+
+  const [methodResult, fieldResult] = await Promise.all([
+    resolveMethodLenses(runtime, document, index, scriptPath, options),
+    resolveFieldLenses(runtime, document, index, scriptPath, options)
+  ]);
+  codeLenses.push(...methodResult.lenses, ...fieldResult.lenses);
+  methodLensCount = methodResult.lensCount;
+  methodPlaceholderCount = methodResult.placeholderCount;
+  fieldCount = fieldResult.fieldCount;
+  fieldReferenceLensCount = fieldResult.referenceLensCount;
+  fieldTargetLensCount = fieldResult.targetLensCount;
 
   if (options.includeZeroSummaryLenses) {
     // Instance CodeLens is intentionally omitted at zero because proving that a
     // C# file is a UnityEngine.Object type belongs to semantic providers.
   }
 
-  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fieldCount} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es).`);
+  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fieldCount} UnityEvent field(s), ${methodLensCount} method lens(es), ${methodPlaceholderCount} method placeholder(s), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es).`);
   return codeLenses;
+}
+
+/** Resolves method CodeLens entries without blocking field lenses. */
+async function resolveMethodLenses(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument,
+  index: UnitySerializedAssetReferenceIndex,
+  scriptPath: string,
+  options: CodeLensRenderOptions
+): Promise<{ lenses: vscode.CodeLens[]; lensCount: number; placeholderCount: number }> {
+  const lenses: vscode.CodeLens[] = [];
+  if (!index.hasMethodReferences(scriptPath)) {
+    return { lenses, lensCount: 0, placeholderCount: 0 };
+  }
+
+  if (options.skipCSharpMethods) {
+    runtime.logger.debug(`UnityEvent CodeLens skipped C# methods during retry backoff for ${scriptPath}.`);
+    return { lenses, lensCount: 0, placeholderCount: 0 };
+  }
+
+  try {
+    const methods = await safeFindMethods(runtime, document);
+    options.onCSharpSymbolsReady?.('methods', methods);
+    return {
+      lenses,
+      lensCount: appendMethodCodeLenses(runtime, lenses, index, scriptPath, methods, options),
+      placeholderCount: 0
+    };
+  } catch (error) {
+    const placeholderCount = appendMethodPlaceholderCodeLenses(runtime, lenses, scriptPath, options.fallbackMethods ?? []);
+    runtime.logger.error(`UnityEvent method CodeLens failed for ${scriptPath}; placeholders=${placeholderCount}: ${formatErrorDetails(error)}`);
+    options.onCSharpSymbolsUnavailable?.('methods', error, placeholderCount > 0);
+    return { lenses, lensCount: 0, placeholderCount };
+  }
+}
+
+/** Resolves field CodeLens entries without waiting for method symbols. */
+async function resolveFieldLenses(
+  runtime: EventReferenceRuntime,
+  document: vscode.TextDocument,
+  index: UnitySerializedAssetReferenceIndex,
+  scriptPath: string,
+  options: CodeLensRenderOptions
+): Promise<{ lenses: vscode.CodeLens[]; fieldCount: number; referenceLensCount: number; targetLensCount: number }> {
+  const lenses: vscode.CodeLens[] = [];
+  if (!index.hasFieldReferences(scriptPath)) {
+    return { lenses, fieldCount: 0, referenceLensCount: 0, targetLensCount: 0 };
+  }
+
+  if (options.skipCSharpFields) {
+    runtime.logger.debug(`UnityEvent CodeLens skipped C# UnityEvent fields during retry backoff for ${scriptPath}.`);
+    return { lenses, fieldCount: 0, referenceLensCount: 0, targetLensCount: 0 };
+  }
+
+  try {
+    const fields = await safeFindUnityEventFields(runtime, document);
+    options.onCSharpSymbolsReady?.('fields', fields);
+    const fieldLensCounts = appendFieldCodeLenses(runtime, lenses, index, scriptPath, fields, options);
+    return {
+      lenses,
+      fieldCount: fields.length,
+      referenceLensCount: fieldLensCounts.referenceLensCount,
+      targetLensCount: fieldLensCounts.targetLensCount
+    };
+  } catch (error) {
+    const fieldLensCounts = appendFieldPlaceholderCodeLenses(runtime, lenses, scriptPath, options.fallbackFields ?? []);
+    const placeholderCount = fieldLensCounts.referenceLensCount + fieldLensCounts.targetLensCount;
+    runtime.logger.error(`UnityEvent field CodeLens failed for ${scriptPath}; placeholders=${placeholderCount}: ${formatErrorDetails(error)}`);
+    if (placeholderCount === 0) {
+      runtime.logger.error(`UnityEvent field symbols unavailable, cannot place field placeholder for ${scriptPath}.`);
+    }
+    options.onCSharpSymbolsUnavailable?.('fields', error, placeholderCount > 0);
+    return {
+      lenses,
+      fieldCount: 0,
+      referenceLensCount: fieldLensCounts.referenceLensCount,
+      targetLensCount: fieldLensCounts.targetLensCount
+    };
+  }
 }
 
 /** Appends method CodeLens entries from provider-backed C# method symbols. */
