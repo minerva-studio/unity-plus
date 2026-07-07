@@ -6,3 +6,4 @@ out/
 .vscode-test/
 *.vsix
 *.log
+test-fixtures/obj
