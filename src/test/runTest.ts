@@ -15,7 +15,6 @@ const JUNCTION_PATH = 'C:\\unity-plus-test';
 const WINDOWS_VSCODE_TEST_CACHE_PATH = 'C:\\unity-plus-vscode-test';
 const PROJECT_ROOT = resolve(__dirname, '../..');
 const EXTENSION_DEPENDENCIES = [
-  'VisualStudioToolsForUnity.vstuc',
   'ms-dotnettools.csdevkit',
   'ms-dotnettools.csharp'
 ];

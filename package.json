@@ -17,7 +17,6 @@
     "Other"
   ],
   "extensionDependencies": [
-    "VisualStudioToolsForUnity.vstuc",
     "ms-dotnettools.csdevkit",
     "ms-dotnettools.csharp"
   ],

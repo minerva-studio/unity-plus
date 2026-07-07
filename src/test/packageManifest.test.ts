@@ -25,7 +25,6 @@ describe('package manifest', () => {
     const manifest = readPackageManifest();
 
     assert.deepStrictEqual(manifest.extensionDependencies, [
-      'VisualStudioToolsForUnity.vstuc',
       'ms-dotnettools.csdevkit',
       'ms-dotnettools.csharp'
     ]);

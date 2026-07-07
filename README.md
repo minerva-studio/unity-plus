@@ -13,7 +13,7 @@ Unity Plus exists because this should not be every Unity developer's private mai
 ## Features
 
 ### Rename Sync
-- Auto rename `.cs` file when a `MonoBehaviour` or `ScriptableObject` class is renamed.
+- Auto rename `.cs` file when a top-level C# type (`class`, `struct`, `enum`, `interface`, `record`) is renamed — including `MonoBehaviour` and `ScriptableObject`.
 - Safety preview shows the affected class, script file, and `.meta` file before applying the rename.
 - Supports `class`, `struct`, `enum`, `interface`, and `record` top-level types.
 - Preserves namespaces; avoids unsafe multi-primary-class file changes.
@@ -55,13 +55,13 @@ Unity Plus exists because this should not be every Unity developer's private mai
 
 ## Requirements
 
-- Install the VS Code extensions declared by Unity Plus: Microsoft's official Unity extension for VS Code (`VisualStudioToolsForUnity.vstuc`), C# Dev Kit (`ms-dotnettools.csdevkit`), and C# (`ms-dotnettools.csharp`).
+- Install the VS Code extensions required by Unity Plus: C# Dev Kit (`ms-dotnettools.csdevkit`) and C# (`ms-dotnettools.csharp`). Installing Microsoft's official Unity extension for VS Code (`VisualStudioToolsForUnity.vstuc`) is recommended for a more complete Unity-VS Code integration experience, but Unity Plus does not require it as a hard dependency.
 - Enable Unity's official Visual Studio Editor package (`com.unity.ide.visualstudio`) in each Unity project. Unity Plus relies on that Editor-side package for project-file generation and Unity IDE messaging.
 
 ## Roadmap
 
 - `v0.1 Foundation`: VS Code extension scaffold, Unity workspace detection, logging, and CI. ✅
-- `v0.2 Rename Safety`: class/file sync for `MonoBehaviour` and `ScriptableObject`. ✅
+- `v0.2 Rename Safety`: class/file sync for top-level C# types (`class`, `struct`, `enum`, `interface`, `record`). ✅
 - `v0.3 Project Sync`: manual and automatic Unity project file refresh. ✅
 - `v0.4 Event References`: scene and prefab UnityEvent CodeLens, hover, serialized instances, and Unity YAML CodeLens. ✅
 
@@ -70,11 +70,11 @@ Unity Plus exists because this should not be every Unity developer's private mai
 - Unity Plus starts as a VS Code extension only.
 - A Unity Editor companion package is intentionally out of scope for the first private prototype.
 - Rider and Visual Studio workflows are not targeted by this extension.
-- Unity Plus depends on Microsoft's official Unity extension for VS Code, plus the Microsoft C# and C# Dev Kit extensions for language-service features. Unity projects also need the Unity `Visual Studio Editor` package enabled on the Editor side for project-file generation and Unity IDE messaging.
+- Unity Plus depends on the Microsoft C# and C# Dev Kit extensions for language-service features. Unity projects also need the Unity `Visual Studio Editor` package enabled on the Editor side for project-file generation and Unity IDE messaging.
 
 ## Contributing
 
-This repository starts private while the first working prototype is built. The issue tracker is the source of truth for planned work.
+Issues and pull requests are welcome. The issue tracker is the source of truth for planned work.
 
 ## Local Packaging
 

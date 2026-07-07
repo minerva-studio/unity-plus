@@ -15,7 +15,7 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 ## 功能特性
 
 ### 重命名同步
-- 当 `MonoBehaviour` 或 `ScriptableObject` 类被重命名时，自动同步重命名 `.cs` 文件。
+- 当顶层 C# 类型（`class`、`struct`、`enum`、`interface`、`record`）被重命名时，自动同步重命名 `.cs` 文件 —— 包括 `MonoBehaviour` 和 `ScriptableObject`。
 - 安全预览：应用重命名前显示受影响的类、脚本文件和 `.meta` 文件。
 - 支持 `class`、`struct`、`enum`、`interface` 和 `record` 顶层类型。
 - 保留命名空间；避免对包含多个主类的文件进行不安全修改。
@@ -57,13 +57,13 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 
 ## 环境要求
 
-- 安装 Unity Plus 声明的 VS Code 扩展依赖：Microsoft 官方 Unity VS Code 扩展 (`VisualStudioToolsForUnity.vstuc`)、C# Dev Kit (`ms-dotnettools.csdevkit`) 和 C# (`ms-dotnettools.csharp`)。
+- 安装 Unity Plus 的 VS Code 扩展依赖：C# Dev Kit (`ms-dotnettools.csdevkit`) 和 C# (`ms-dotnettools.csharp`)。建议同时安装 Microsoft 官方 Unity VS Code 扩展 (`VisualStudioToolsForUnity.vstuc`) 以获得更完整的 Unity-VS Code 集成体验，但 Unity Plus 不将其作为强制依赖。
 - 在每个 Unity 项目中启用 Unity 官方 Visual Studio Editor 包 (`com.unity.ide.visualstudio`)。Unity Plus 依赖该编辑器端包进行项目文件生成和 Unity IDE 消息通信。
 
 ## 路线图
 
 - `v0.1 基础`：VS Code 扩展脚手架、Unity 工作区检测、日志和 CI。✅
-- `v0.2 重命名安全`：`MonoBehaviour` 和 `ScriptableObject` 的类/文件同步。✅
+- `v0.2 重命名安全`：顶层 C# 类型（`class`、`struct`、`enum`、`interface`、`record`）的类/文件同步。✅
 - `v0.3 项目同步`：手动和自动 Unity 项目文件刷新。✅
 - `v0.4 事件引用`：场景和预制体 UnityEvent CodeLens、悬停、序列化实例和 Unity YAML CodeLens。✅
 
@@ -72,11 +72,11 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 - Unity Plus 目前仅作为 VS Code 扩展运行。
 - 首个私有原型阶段不包含 Unity Editor 配套包。
 - 不针对 Rider 和 Visual Studio 工作流。
-- Unity Plus 依赖 Microsoft 官方 Unity VS Code 扩展，以及 Microsoft C# 和 C# Dev Kit 扩展提供语言服务功能。Unity 项目还需要在编辑器端启用 `Visual Studio Editor` 包以进行项目文件生成和 Unity IDE 消息通信。
+- Unity Plus 依赖 Microsoft C# 和 C# Dev Kit 扩展提供语言服务功能。Unity 项目还需要在编辑器端启用 `Visual Studio Editor` 包以进行项目文件生成和 Unity IDE 消息通信。
 
 ## 参与贡献
 
-本仓库在首个工作原型构建期间保持私有。Issue 跟踪器是计划工作的唯一真实来源。
+欢迎提交 Issue 和 Pull Request。Issue 跟踪器是计划工作的唯一真实来源。
 
 ## 本地打包
 
