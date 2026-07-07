@@ -68,7 +68,7 @@ export type CSharpTypeIndexBuilder = (
 ) => Promise<CSharpTypeIndex>;
 
 export interface EventReferenceLocationTarget {
-  kind: 'method' | 'field' | 'fieldTarget';
+  kind: 'method' | 'methodInvokerField' | 'field' | 'fieldTarget';
   scriptPath: string;
   symbolName?: string;
   typeName?: string;

@@ -11,6 +11,7 @@
   "command.openMetaFile.title": "打开 Meta 文件",
   "command.openInUnity.title": "在 Unity 中打开",
   "command.rescanUnityProject.title": "重新扫描 Unity 项目",
+  "command.openUnityYamlMonoBehaviourScript.title": "打开 Unity YAML MonoBehaviour 脚本",
   "configuration.title": "Unity Plus",
   "configuration.rename.overrideF2.description": "控制在 C# 文件中按 F2 时，是否先使用 Unity Plus 的类/脚本重命名，再回退到 VS Code 的重命名符号。",
   "configuration.rename.classFileSyncMode.description": "控制 C# 顶层类型和文件名的自动同步。使用 on 为安全的单类型 C# 文件启用同步，使用 off 禁用同步。",

@@ -76,6 +76,7 @@ suite('eventReferences - Real Unity Project Shape', () => {
         cachedMethods: plainMethods
       });
       const methodLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+      const invokerLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'methodInvokerField');
       const fieldReferenceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
       const fieldTargetLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
@@ -83,6 +84,7 @@ suite('eventReferences - Real Unity Project Shape', () => {
       assert.strictEqual(fieldReferences.length, 1);
       assert.strictEqual(fieldTargets.length, 1);
       assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
+      assert.strictEqual(invokerLens?.command?.title, '1 UnityEvent invokers');
       assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
       assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
       assert.strictEqual(interactableLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method'), false);
@@ -104,12 +106,22 @@ suite('eventReferences - Real Unity Project Shape', () => {
         () => undefined,
         () => true
       );
+      await showReferenceLocations(
+        { ...runtime, runtimeVscode: commandRecorder.runtimeVscode },
+        index,
+        invokerLens?.command?.arguments?.[0] as EventReferenceLocationTarget,
+        () => undefined,
+        () => true
+      );
 
-      assert.strictEqual(commandRecorder.calls.length, 2);
+      assert.strictEqual(commandRecorder.calls.length, 3);
       assert.strictEqual(normalizeFsPath(commandRecorder.calls[0].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Prefabs', 'Gate.prefab')));
       assert.strictEqual(normalizeFsPath(commandRecorder.calls[1].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
       assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.line, 6);
       assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.character, 16);
+      assert.strictEqual(normalizeFsPath(commandRecorder.calls[2].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs')));
+      assert.strictEqual(commandRecorder.calls[2].locations[0].range.start.line, 7);
+      assert.strictEqual(commandRecorder.calls[2].locations[0].range.start.character, 26);
     } finally {
       metadataIndex.dispose();
     }

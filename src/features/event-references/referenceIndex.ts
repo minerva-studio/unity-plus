@@ -55,6 +55,8 @@ export function createReferenceIndex(
       referencesByKey.get(referenceKey(scriptPath, methodName)),
       typeName ? getTypeKeyReferences(referencesByTypeKey, typeName, methodName) : undefined
     );
+  const getMethodInvokerFields = (scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[] =>
+    dedupeInvokerFieldReferences(getReferences(scriptPath, methodName, typeName));
   const getFieldReferences = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
     mergeUniqueReferences(
       referencesByFieldKey.get(referenceKey(scriptPath, fieldName)),
@@ -89,6 +91,14 @@ export function createReferenceIndex(
     getReferenceCount(scriptPath, methodName, typeName) {
       return getReferences(scriptPath, methodName, typeName).length;
     },
+    /** Returns distinct UnityEvent fields that can invoke a target method. */
+    getMethodInvokerFields(scriptPath, methodName, typeName) {
+      return getMethodInvokerFields(scriptPath, methodName, typeName);
+    },
+    /** Counts distinct UnityEvent fields that can invoke a target method. */
+    getMethodInvokerFieldCount(scriptPath, methodName, typeName) {
+      return getMethodInvokerFields(scriptPath, methodName, typeName).length;
+    },
     /** Returns persistent calls owned by a UnityEvent field. */
     getFieldReferences(scriptPath, fieldName, typeName) {
       return getFieldReferences(scriptPath, fieldName, typeName);
@@ -114,6 +124,28 @@ export function createReferenceIndex(
       return diagnostics;
     }
   };
+}
+
+/** Deduplicates references to the same UnityEvent field before showing C# invoker lenses. */
+function dedupeInvokerFieldReferences(references: readonly UnityEventReference[]): readonly UnityEventReference[] {
+  const seen = new Set<string>();
+  const invokers: UnityEventReference[] = [];
+  for (const reference of references) {
+    const ownerIdentity = reference.eventOwnerTypeName || reference.eventScriptPath;
+    if (!ownerIdentity || !reference.eventFieldName) {
+      continue;
+    }
+
+    const key = `${typeKey(ownerIdentity)}#${reference.eventFieldName}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    invokers.push(reference);
+  }
+
+  return invokers;
 }
 
 /** Appends one value into a multi-value lookup bucket. */

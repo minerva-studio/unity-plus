@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { buildUnityEventReferenceIndex } from '../../features/event-references/eventReferences';
 import { findDefaultAssetFiles, findDefaultCSharpFiles } from '../../features/event-references/assetDiscovery';
 import { createEventReferenceProvider } from '../../features/event-references/provider';
+import { createUnityYamlCodeLensProvider } from '../../features/unity-yaml-code-lens/provider';
 import type { EventReferenceRuntime, UnityEventReferenceIndexController } from '../../features/event-references/runtime';
 import type { UnitySerializedAssetReferenceIndex } from '../../features/event-references/model';
 import { createSerializedInstanceProvider } from '../../features/serialized-instances/provider';
@@ -94,14 +95,16 @@ suite('eventReferences - VS Code CodeLens Provider', () => {
         const interactableUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs'));
         const cannonUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Cannon.cs'));
         const interactableLenses = await waitForUnityEventCodeLenses(interactableUri, { method: false, field: true, fieldTarget: true });
-        const cannonLenses = await waitForUnityEventCodeLenses(cannonUri, { method: true, field: false, fieldTarget: false });
+        const cannonLenses = await waitForUnityEventCodeLenses(cannonUri, { method: true, methodInvokerField: true, field: false, fieldTarget: false });
         const instanceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance');
         const methodLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+        const invokerLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'methodInvokerField');
         const fieldReferenceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
         const fieldTargetLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
 
         assert.strictEqual(instanceLens?.command?.title, '1 Unity serialized instances');
         assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
+        assert.strictEqual(invokerLens?.command?.title, '1 UnityEvent invokers');
         assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
         assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
         assert.strictEqual(fieldReferenceLens?.range.start.line, 7);
@@ -110,10 +113,55 @@ suite('eventReferences - VS Code CodeLens Provider', () => {
         assert.strictEqual(fieldTargetLens?.range.start.character, 26);
         assert.strictEqual(methodLens?.range.start.line, 6);
         assert.strictEqual(methodLens?.range.start.character, 16);
+        assert.strictEqual(invokerLens?.range.start.line, 6);
+        assert.strictEqual(invokerLens?.range.start.character, 16);
       } finally {
         disposable.dispose();
       }
     } finally {
+      metadataIndex.dispose();
+    }
+  });
+
+  test('shows MonoBehaviour C# script CodeLens in real Unity YAML assets', async function () {
+    this.timeout(60_000);
+
+    const root = getUnityFixtureRoot();
+    const prefabUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Prefabs', 'Gate.prefab'));
+    const metadataIndex = createLazyUnityMetadataIndex({
+      root,
+      logger: createMemoryLogger()
+    });
+    const cancellation = new vscode.CancellationTokenSource();
+
+    try {
+      const provider = createUnityYamlCodeLensProvider({
+        runtimeVscode: vscode,
+        logger: createMemoryLogger(),
+        metadataIndex
+      });
+      const document = await vscode.workspace.openTextDocument(prefabUri);
+      const lenses = await provider.provideCodeLenses?.(document, cancellation.token) ?? [];
+      const scriptLens = lenses.find(lens => lens.command?.command === 'unityPlus.openUnityYamlMonoBehaviourScript' &&
+        lens.command.title === 'C# script: Interactable');
+
+      assert.ok(scriptLens, `Expected MonoBehaviour script CodeLens. Lenses: ${lenses.map(lens => lens.command?.title ?? '<none>').join(', ')}`);
+      const scriptCommand = scriptLens.command;
+      assert.ok(scriptCommand, 'Expected MonoBehaviour script CodeLens command.');
+      assert.strictEqual(scriptLens.range.start.line, 6);
+      assert.strictEqual(scriptLens.range.start.character, 0);
+      const scriptFsPath = toFsPathFromCommandArgument(scriptCommand.arguments?.[0]);
+      assert.strictEqual(scriptCommand.command, 'unityPlus.openUnityYamlMonoBehaviourScript');
+      assert.strictEqual(
+        normalizeFsPath(scriptFsPath),
+        normalizeFsPath(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs'))
+      );
+      const openedStat = await withStep('stat MonoBehaviour script target', async () =>
+        await vscode.workspace.fs.stat(vscode.Uri.file(scriptFsPath))
+      );
+      assert.strictEqual(openedStat.type, vscode.FileType.File);
+    } finally {
+      cancellation.dispose();
       metadataIndex.dispose();
     }
   });
@@ -157,7 +205,7 @@ async function executeCodeLensProvider(uri: vscode.Uri): Promise<vscode.CodeLens
 /** Waits for the async C# symbol refresh behind the real CodeLens provider to publish UnityEvent lenses. */
 async function waitForUnityEventCodeLenses(
   uri: vscode.Uri,
-  expected: { method: boolean; field: boolean; fieldTarget: boolean }
+  expected: { method: boolean; methodInvokerField?: boolean; field: boolean; fieldTarget: boolean }
 ): Promise<vscode.CodeLens[]> {
   const timeoutAt = Date.now() + 30_000;
   let lastLenses: vscode.CodeLens[] = [];
@@ -165,9 +213,11 @@ async function waitForUnityEventCodeLenses(
   while (Date.now() < timeoutAt) {
     lastLenses = await executeCodeLensProvider(uri);
     const hasMethodLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method');
+    const hasMethodInvokerLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'methodInvokerField');
     const hasFieldLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field');
     const hasFieldTargetLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
     if ((!expected.method || hasMethodLens) &&
+      (!expected.methodInvokerField || hasMethodInvokerLens) &&
       (!expected.field || hasFieldLens) &&
       (!expected.fieldTarget || hasFieldTargetLens)) {
       return lastLenses;
@@ -181,6 +231,46 @@ async function waitForUnityEventCodeLenses(
     `Last lenses: ${lastLenses.map(lens => lens.command?.title ?? '<unresolved>').join(', ') || '<none>'}. ` +
     `C# readiness: ${JSON.stringify(getCSharpProviderReadinessState() ?? {})}.`
   );
+}
+
+/** Waits for the activated extension's YAML CodeLens provider to resolve metadata. */
+async function waitForMonoBehaviourScriptCodeLens(uri: vscode.Uri, title: string): Promise<vscode.CodeLens[]> {
+  const timeoutAt = Date.now() + 30_000;
+  let lastLenses: vscode.CodeLens[] = [];
+
+  while (Date.now() < timeoutAt) {
+    lastLenses = await executeCodeLensProvider(uri);
+    if (lastLenses.some(lens => lens.command?.title === title)) {
+      return lastLenses;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  assert.fail(`Timed out waiting for ${title}. Last lenses: ${lastLenses.map(lens => lens.command?.title ?? '<unresolved>').join(', ') || '<none>'}.`);
+}
+
+/** Normalizes Windows drive casing so URI round-trips do not make assertions flaky. */
+function normalizeFsPath(path: string): string {
+  return path.replace(/\\/g, '/').toLowerCase();
+}
+
+/** Reads the script filesystem path returned by the YAML CodeLens command. */
+function toFsPathFromCommandArgument(argument: unknown): string {
+  if (typeof argument !== 'string') {
+    assert.fail(`Expected script path string argument. Argument: ${JSON.stringify(argument)}`);
+  }
+  return argument;
+}
+
+/** Adds test-step context to opaque VS Code command-service failures. */
+async function withStep<T>(step: string, action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const details = error instanceof Error ? error.stack ?? error.message : String(error);
+    throw new Error(`${step} failed: ${details}`);
+  }
 }
 
 /** Waits until the real C# provider returns the exact member ranges used by UnityEvent CodeLens. */

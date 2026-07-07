@@ -27,6 +27,8 @@ export interface UnitySerializedAssetReferenceIndex {
   hasFieldReferences(scriptPath: string): boolean;
   getReferences(scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[];
   getReferenceCount(scriptPath: string, methodName: string, typeName?: string): number;
+  getMethodInvokerFields(scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[];
+  getMethodInvokerFieldCount(scriptPath: string, methodName: string, typeName?: string): number;
   getFieldReferences(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];
   getFieldReferenceCount(scriptPath: string, fieldName: string, typeName?: string): number;
   getFieldTargets(scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[];

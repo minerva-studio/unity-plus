@@ -5,6 +5,7 @@ import { hideMetaFilesInExplorerIfEnabled, registerMetaFilesFeature } from './fe
 import { registerProjectSyncFeature } from './features/project-sync/projectSync';
 import { registerRenameFeature } from './features/rename/renameSync';
 import { registerSerializedInstancesFeature } from './features/serialized-instances/serializedInstances';
+import { registerUnityYamlCodeLensFeature } from './features/unity-yaml-code-lens/unityYamlCodeLens';
 import { createLogger } from './unity/logger';
 import { createLazyUnityMetadataIndex } from './unity/metadataIndex';
 import { checkUnityVisualStudioEditorPackage } from './unity/visualStudioEditorPackage';
@@ -24,6 +25,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerProjectSyncFeature,
     registerEventReferenceFeature,
     registerSerializedInstancesFeature,
+    registerUnityYamlCodeLensFeature,
     registerMetaFilesFeature,
     hideMetaFilesInExplorerIfEnabled: async logger => await hideMetaFilesInExplorerIfEnabled(vscode, logger),
     checkUnityVisualStudioEditorPackage: async root => await checkUnityVisualStudioEditorPackage(root, {

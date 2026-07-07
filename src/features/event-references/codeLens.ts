@@ -29,6 +29,7 @@ export async function createCodeLensesFromIndex(
   const codeLenses: vscode.CodeLens[] = [];
   const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
   let methodLensCount = 0;
+  let methodInvokerLensCount = 0;
   let methodPlaceholderCount = 0;
   let fieldReferenceLensCount = 0;
   let fieldTargetLensCount = 0;
@@ -38,6 +39,7 @@ export async function createCodeLensesFromIndex(
   const fieldResult = resolveFieldLenses(runtime, index, scriptPath, options);
   codeLenses.push(...methodResult.lenses, ...fieldResult.lenses);
   methodLensCount = methodResult.lensCount;
+  methodInvokerLensCount = methodResult.invokerLensCount;
   methodPlaceholderCount = methodResult.placeholderCount;
   fieldCount = fieldResult.fieldCount;
   fieldReferenceLensCount = fieldResult.referenceLensCount;
@@ -48,7 +50,7 @@ export async function createCodeLensesFromIndex(
     // C# file is a UnityEngine.Object type belongs to semantic providers.
   }
 
-  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fieldCount} UnityEvent field(s), ${methodLensCount} method lens(es), ${methodPlaceholderCount} method placeholder(s), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es).`);
+  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fieldCount} UnityEvent field(s), ${methodLensCount} method lens(es), ${methodInvokerLensCount} method invoker lens(es), ${methodPlaceholderCount} method placeholder(s), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es).`);
   return codeLenses;
 }
 
@@ -58,11 +60,11 @@ function resolveMethodLenses(
   index: UnitySerializedAssetReferenceIndex,
   scriptPath: string,
   options: CodeLensRenderOptions
-): { lenses: vscode.CodeLens[]; lensCount: number; placeholderCount: number } {
+): { lenses: vscode.CodeLens[]; lensCount: number; invokerLensCount: number; placeholderCount: number } {
   const lenses: vscode.CodeLens[] = [];
   if (!index.hasMethodReferences(scriptPath)) {
     runtime.logger.debug(`UnityEvent CodeLens skipped C# methods for ${scriptPath}: no indexed method references match this script.`);
-    return { lenses, lensCount: 0, placeholderCount: 0 };
+    return { lenses, lensCount: 0, invokerLensCount: 0, placeholderCount: 0 };
   }
 
   if (options.methodsUnavailable) {
@@ -70,17 +72,19 @@ function resolveMethodLenses(
     if (placeholderCount === 0) {
       runtime.logger.error(`UnityEvent method symbols unavailable, cannot place method placeholder for ${scriptPath}.`);
     }
-    return { lenses, lensCount: 0, placeholderCount };
+    return { lenses, lensCount: 0, invokerLensCount: 0, placeholderCount };
   }
 
   if (!options.cachedMethods) {
     runtime.logger.debug(`UnityEvent CodeLens has no cached C# methods yet for ${scriptPath}.`);
-    return { lenses, lensCount: 0, placeholderCount: 0 };
+    return { lenses, lensCount: 0, invokerLensCount: 0, placeholderCount: 0 };
   }
 
+  const methodLensCounts = appendMethodCodeLenses(runtime, lenses, index, scriptPath, options.cachedMethods, options);
   return {
     lenses,
-    lensCount: appendMethodCodeLenses(runtime, lenses, index, scriptPath, options.cachedMethods, options),
+    lensCount: methodLensCounts.referenceLensCount,
+    invokerLensCount: methodLensCounts.invokerLensCount,
     placeholderCount: 0
   };
 }
@@ -134,15 +138,16 @@ function appendMethodCodeLenses(
   scriptPath: string,
   methods: readonly CSharpMethodSymbolSnapshot[],
   options: CodeLensRenderOptions
-): number {
-  let methodLensCount = 0;
+): { referenceLensCount: number; invokerLensCount: number } {
+  let referenceLensCount = 0;
+  let invokerLensCount = 0;
   for (const method of methods) {
     const references = index.getReferences(scriptPath, method.name, method.typeName);
     if (references.length === 0) {
       continue;
     }
 
-    methodLensCount += 1;
+    referenceLensCount += 1;
     const range = toVscodeRange(runtime.runtimeVscode, method.range);
     codeLenses.push(new runtime.runtimeVscode.CodeLens(range, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length }),
@@ -156,9 +161,24 @@ function appendMethodCodeLenses(
         position: range.start
       } satisfies EventReferenceLocationTarget]
     }));
+
+    const invokers = index.getMethodInvokerFields(scriptPath, method.name, method.typeName);
+    invokerLensCount += 1;
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(range, {
+      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent invokers', { count: invokers.length }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'methodInvokerField',
+        scriptPath,
+        symbolName: method.name,
+        typeName: method.typeName,
+        ...(options.embedReferences ? { eventReferences: invokers } : {}),
+        position: range.start
+      } satisfies EventReferenceLocationTarget]
+    }));
   }
 
-  return methodLensCount;
+  return { referenceLensCount, invokerLensCount };
 }
 
 /** Appends method placeholders when provider errors happen after a previous method read. */
@@ -177,6 +197,19 @@ function appendMethodPlaceholderCodeLenses(
       command: 'unityPlus.showUnityEventReferenceLocations',
       arguments: [{
         kind: 'method',
+        scriptPath,
+        symbolName: method.name,
+        typeName: method.typeName,
+        eventReferences: [],
+        position: range.start
+      } satisfies EventReferenceLocationTarget]
+    }));
+
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(range, {
+      title: runtime.runtimeVscode.l10n.t('- UnityEvent invokers'),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'methodInvokerField',
         scriptPath,
         symbolName: method.name,
         typeName: method.typeName,

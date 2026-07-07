@@ -79,6 +79,11 @@
         "command": "unityPlus.rescanUnityProject",
         "title": "%command.rescanUnityProject.title%",
         "category": "%command.category%"
+      },
+      {
+        "command": "unityPlus.openUnityYamlMonoBehaviourScript",
+        "title": "%command.openUnityYamlMonoBehaviourScript.title%",
+        "category": "%command.category%"
       }
     ],
     "keybindings": [

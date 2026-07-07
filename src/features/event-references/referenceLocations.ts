@@ -9,6 +9,12 @@ interface UnityEventTargetMethodLookup {
   methodName: string;
 }
 
+interface UnityEventInvokerFieldLookup {
+  reference: UnityEventReference;
+  ownerTypeName: string;
+  fieldName: string;
+}
+
 /** Builds hover markdown that summarizes UnityEvent references for a C# symbol. */
 export function createHoverMarkdown(
   runtimeVscode: typeof vscode,
@@ -47,6 +53,10 @@ function getReferencesForLocationTarget(
     return index.getReferences(target.scriptPath, target.symbolName, target.typeName);
   }
 
+  if (target.kind === 'methodInvokerField') {
+    return index.getMethodInvokerFields(target.scriptPath, target.symbolName, target.typeName);
+  }
+
   if (target.kind === 'fieldTarget') {
     return index.getFieldTargets(target.scriptPath, target.symbolName, target.typeName);
   }
@@ -61,6 +71,8 @@ function createNoEventReferenceLocationsMessage(
 ): string {
   return kind === 'fieldTarget'
     ? runtimeVscode.l10n.t('Unity Plus: no UnityEvent target methods found for this field.')
+    : kind === 'methodInvokerField'
+      ? runtimeVscode.l10n.t('Unity Plus: no UnityEvent invoker fields found for this method.')
     : runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.');
 }
 
@@ -122,6 +134,64 @@ async function showFieldTargetMethodLocations(
   return true;
 }
 
+/** Shows C# UnityEvent field declarations that can invoke the current target method. */
+async function showMethodInvokerFieldLocations(
+  runtime: EventReferenceRuntime,
+  target: EventReferenceLocationTarget,
+  references: readonly UnityEventReference[]
+): Promise<boolean> {
+  const locations: vscode.Location[] = [];
+  const seen = new Set<string>();
+
+  if (!runtime.csharpLanguageService) {
+    runtime.logger.error(`UnityEvent invokers cannot resolve C# field locations for ${target.scriptPath}:${target.symbolName ?? '<unknown>'}: C# language service is unavailable.`);
+    return false;
+  }
+
+  const lookups = collectDistinctInvokerFieldLookups(runtime, references);
+  for (const lookup of lookups) {
+    try {
+      const resolved = await runtime.csharpLanguageService.resolveMember(lookup.ownerTypeName, lookup.fieldName, 'field');
+      if (resolved.length === 0) {
+        runtime.logger.error(
+          `UnityEvent invoker C# field lookup found no provider-backed location: ` +
+          `asset=${lookup.reference.assetPath}, ownerType=${lookup.ownerTypeName}, ` +
+          `field=${lookup.fieldName}.`
+        );
+      }
+
+      for (const location of resolved) {
+        const uri = runtime.runtimeVscode.Uri.file(location.uriPath);
+        const key = `${uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
+        if (seen.has(key)) {
+          continue;
+        }
+
+        seen.add(key);
+        locations.push(toCSharpLocation(runtime.runtimeVscode, uri, location.range.start));
+      }
+    } catch (error) {
+      runtime.logger.error(
+        `UnityEvent invoker C# field lookup failed: ` +
+        `asset=${lookup.reference.assetPath}, ownerType=${lookup.ownerTypeName}, ` +
+        `field=${lookup.fieldName}, error=${errorMessage(error)}`
+      );
+    }
+  }
+
+  if (locations.length === 0) {
+    return false;
+  }
+
+  await runtime.runtimeVscode.commands.executeCommand(
+    'editor.action.showReferences',
+    toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
+    target.position,
+    locations
+  );
+  return true;
+}
+
 /** Creates distinct target method lookup requests from YAML references. */
 function collectDistinctTargetMethodLookups(
   runtime: EventReferenceRuntime,
@@ -157,6 +227,49 @@ function collectDistinctTargetMethodLookups(
   }
 
   return lookups;
+}
+
+/** Creates distinct invoker field lookups from YAML references. */
+function collectDistinctInvokerFieldLookups(
+  runtime: EventReferenceRuntime,
+  references: readonly UnityEventReference[]
+): UnityEventInvokerFieldLookup[] {
+  const lookups: UnityEventInvokerFieldLookup[] = [];
+  const seen = new Set<string>();
+
+  for (const reference of references) {
+    const ownerTypeName = reference.eventOwnerTypeName || scriptTypeNameFromPath(reference.eventScriptPath);
+    const fieldName = reference.eventFieldName;
+    if (!ownerTypeName || !fieldName) {
+      runtime.logger.info(
+        `UnityEvent invoker skipped unresolved C# field location: ` +
+        `asset=${reference.assetPath}, eventScript=${reference.eventScriptPath ?? '<unknown>'}, ` +
+        `ownerType=${ownerTypeName ?? '<unknown>'}, field=${fieldName || '<unknown>'}.`
+      );
+      continue;
+    }
+
+    const key = `${typeLookupKey(ownerTypeName)}#${fieldName}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    lookups.push({
+      reference,
+      ownerTypeName,
+      fieldName
+    });
+  }
+
+  return lookups;
+}
+
+/** Uses the event owner script filename as a provider query hint when YAML lacks a full owner type. */
+function scriptTypeNameFromPath(scriptPath: string | undefined): string | undefined {
+  const fileName = scriptPath?.split(/[\\/]/).pop() ?? '';
+  const typeName = fileName.replace(/\.cs$/i, '');
+  return typeName || undefined;
 }
 
 /** Converts a provider-backed C# method position into a peek location. */
@@ -225,6 +338,14 @@ export async function showReferenceLocations(
       return;
     }
 
+    if (target.kind === 'methodInvokerField') {
+      const resolved = await showMethodInvokerFieldLocations(runtime, target, eventReferences);
+      if (!resolved) {
+        runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
+      }
+      return;
+    }
+
     await runtime.runtimeVscode.commands.executeCommand(
       'editor.action.showReferences',
       toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
@@ -249,6 +370,14 @@ export async function showReferenceLocations(
 
   if (target.kind === 'fieldTarget') {
     const resolved = await showFieldTargetMethodLocations(runtime, target, references);
+    if (!resolved) {
+      runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
+    }
+    return;
+  }
+
+  if (target.kind === 'methodInvokerField') {
+    const resolved = await showMethodInvokerFieldLocations(runtime, target, references);
     if (!resolved) {
       runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
     }

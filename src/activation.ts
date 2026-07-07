@@ -4,6 +4,7 @@ import type { MetaFilesFeatureOptions } from './features/meta-files/metaFiles';
 import type { ProjectSyncFeatureOptions } from './features/project-sync/projectSync';
 import type { RenameFeatureOptions } from './features/rename/renameSync';
 import type { SerializedInstancesFeatureOptions } from './features/serialized-instances/serializedInstances';
+import type { UnityYamlCodeLensFeatureOptions } from './features/unity-yaml-code-lens/unityYamlCodeLens';
 import type { UnityPlusLogger } from './unity/logger';
 import type { LazyUnityMetadataIndex, UnityMetadataIndexOptions } from './unity/metadataIndex';
 import type { UnityWorkspaceInfo } from './unity/workspaceDetector';
@@ -27,6 +28,7 @@ export interface UnityPlusActivationDependencies {
   registerProjectSyncFeature(logger: UnityPlusLogger, options?: ProjectSyncFeatureOptions): vscode.Disposable;
   registerEventReferenceFeature(logger: UnityPlusLogger, options?: EventReferenceFeatureOptions): vscode.Disposable;
   registerSerializedInstancesFeature(logger: UnityPlusLogger, options?: SerializedInstancesFeatureOptions): vscode.Disposable;
+  registerUnityYamlCodeLensFeature(logger: UnityPlusLogger, options?: UnityYamlCodeLensFeatureOptions): vscode.Disposable;
   registerMetaFilesFeature(logger: UnityPlusLogger, options?: MetaFilesFeatureOptions): vscode.Disposable;
   hideMetaFilesInExplorerIfEnabled(logger: UnityPlusLogger): Promise<void>;
   checkUnityVisualStudioEditorPackage(root: vscode.Uri): Promise<boolean>;
@@ -135,6 +137,9 @@ function registerWorkspaceFeatures(
     dependencies.registerSerializedInstancesFeature(logger, {
       metadataIndex,
       getCacheVersion
+    }),
+    dependencies.registerUnityYamlCodeLensFeature(logger, {
+      metadataIndex
     }),
     dependencies.registerMetaFilesFeature(logger, {
       root: workspace.root

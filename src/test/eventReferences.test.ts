@@ -309,7 +309,7 @@ describe('eventReferences', () => {
 
     await runtime.waitForCodeLensChange();
     const lenses = await runtime.provideCodeLenses(csharpDocument);
-    assert.strictEqual(lenses.length, 3);
+    assert.strictEqual(lenses.length, 4);
     assert.strictEqual(lenses[0].command?.title, '1 UnityEvent references');
     assert.strictEqual(lenses[0].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[0].command?.arguments?.[0], {
@@ -319,18 +319,27 @@ describe('eventReferences', () => {
       typeName: 'Gate',
       position: new FakePosition(4, 14)
     });
-    assert.strictEqual(lenses[1].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses[1].command?.title, '1 UnityEvent invokers');
     assert.strictEqual(lenses[1].command?.command, 'unityPlus.showUnityEventReferenceLocations');
     assert.deepStrictEqual(lenses[1].command?.arguments?.[0], {
+      kind: 'methodInvokerField',
+      scriptPath: gateScriptPath,
+      symbolName: 'CanInteract',
+      typeName: 'Gate',
+      position: new FakePosition(4, 14)
+    });
+    assert.strictEqual(lenses[2].command?.title, '1 UnityEvent references');
+    assert.strictEqual(lenses[2].command?.command, 'unityPlus.showUnityEventReferenceLocations');
+    assert.deepStrictEqual(lenses[2].command?.arguments?.[0], {
       kind: 'field',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
       typeName: 'Gate',
       position: new FakePosition(3, 20)
     });
-    assert.strictEqual(lenses[2].command?.title, '1 UnityEvent targets');
-    assert.strictEqual(lenses[2].command?.command, 'unityPlus.showUnityEventReferenceLocations');
-    assert.deepStrictEqual(lenses[2].command?.arguments?.[0], {
+    assert.strictEqual(lenses[3].command?.title, '1 UnityEvent targets');
+    assert.strictEqual(lenses[3].command?.command, 'unityPlus.showUnityEventReferenceLocations');
+    assert.deepStrictEqual(lenses[3].command?.arguments?.[0], {
       kind: 'fieldTarget',
       scriptPath: gateScriptPath,
       symbolName: 'OnCheckEnable',
@@ -357,12 +366,19 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
 
-    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[2].command?.arguments?.[0]);
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[1].command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 2);
     assert.strictEqual(runtime.referenceCommands[1].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(3, 20));
+    assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(4, 14));
     assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(3, 20));
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[3].command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 3);
+    assert.strictEqual(runtime.referenceCommands[2].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(3, 20));
+    assert.strictEqual(runtime.referenceCommands[2].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('keeps UnityEvent field CodeLens when method symbols are unavailable', async () => {
@@ -1595,10 +1611,14 @@ describe('eventReferences', () => {
 
     const doorLenses = await runtime.provideCodeLenses(doorDocument);
     const openMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Open');
+    const openInvokerLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'methodInvokerField' && lens.command.arguments[0].symbolName === 'Open');
     const closeMethodLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method' && lens.command.arguments[0].symbolName === 'Close');
+    const closeInvokerLens = doorLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'methodInvokerField' && lens.command.arguments[0].symbolName === 'Close');
 
     assert.strictEqual(openMethodLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(openInvokerLens?.command?.title, '1 UnityEvent invokers');
     assert.strictEqual(closeMethodLens?.command?.title, '2 UnityEvent references');
+    assert.strictEqual(closeInvokerLens?.command?.title, '1 UnityEvent invokers');
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', openTargetLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
@@ -1610,6 +1630,13 @@ describe('eventReferences', () => {
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', pastedTargetLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
+
+    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', openInvokerLens?.command?.arguments?.[0]);
+    assert.strictEqual(runtime.referenceCommands.length, 2);
+    assert.strictEqual(runtime.referenceCommands[1].uri.fsPath, '/Project/Assets/IronDoor.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(2, 14));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/GateController.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(3, 20));
   });
 
   it('shows an informational message when a reference location command has no matches', async () => {
