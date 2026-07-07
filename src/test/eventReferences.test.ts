@@ -1207,7 +1207,7 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
-  it('resolves field targets by target type before using a mismatched YAML script path', async () => {
+  it('resolves field targets with provider workspace method symbols from YAML target type', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
@@ -1228,23 +1228,16 @@ describe('eventReferences', () => {
     }]);
     const csharpLanguageService = {
       ...createFakeCSharpSymbolLanguageService({}),
-      async findTypesByName(typeName: string) {
+      async findMethodsForType(typeName: string, methodName: string) {
         assert.strictEqual(typeName, 'Amlos.Fixtures.UpgradeAltar');
+        assert.strictEqual(methodName, 'Interact');
         return [{
-          name: 'UpgradeAltar',
-          fullName: 'Amlos.Fixtures.UpgradeAltar',
           uriPath: '/Project/Assets/UpgradeAltar.cs',
           range: {
-            start: { line: 2, character: 13 },
-            end: { line: 2, character: 25 }
+            start: { line: 18, character: 14 },
+            end: { line: 18, character: 22 }
           }
         }];
-      },
-      async findTargetMethodPosition(uri: vscode.Uri, targetTypeName: string, methodName: string) {
-        assert.strictEqual(uri.fsPath, '/Project/Assets/UpgradeAltar.cs');
-        assert.strictEqual(targetTypeName, 'Amlos.Fixtures.UpgradeAltar');
-        assert.strictEqual(methodName, 'Interact');
-        return [{ line: 18, character: 14 }];
       }
     };
 
@@ -1270,7 +1263,7 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(18, 14));
   });
 
-  it('does not use a mismatched secondary script path when target type lookup is ambiguous', async () => {
+  it('does not fall back to YAML script paths when workspace target methods are unavailable', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
@@ -1291,30 +1284,10 @@ describe('eventReferences', () => {
     }]);
     const csharpLanguageService = {
       ...createFakeCSharpSymbolLanguageService({}),
-      async findTypesByName() {
-        return [
-          {
-            name: 'UpgradeAltar',
-            fullName: 'Amlos.Fixtures.UpgradeAltar',
-            uriPath: '/Project/Assets/UpgradeAltar.cs',
-            range: {
-              start: { line: 1, character: 13 },
-              end: { line: 1, character: 25 }
-            }
-          },
-          {
-            name: 'UpgradeAltar',
-            fullName: 'Amlos.Fixtures.UpgradeAltar',
-            uriPath: '/Project/Packages/Other/UpgradeAltar.cs',
-            range: {
-              start: { line: 1, character: 13 },
-              end: { line: 1, character: 25 }
-            }
-          }
-        ];
-      },
-      async findTargetMethodPosition() {
-        assert.fail('Mismatched secondary script paths must not be queried.');
+      async findMethodsForType(typeName: string, methodName: string) {
+        assert.strictEqual(typeName, 'Amlos.Fixtures.UpgradeAltar');
+        assert.strictEqual(methodName, 'Interact');
+        return [];
       }
     };
 
@@ -1339,7 +1312,7 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
-  it('retries target method lookup when the C# provider is namespace-only during click', async () => {
+  it('does not retry document symbol target lookup when workspace method symbols are unavailable', async () => {
     const runtime = createEventReferenceRuntime();
     const lazyIndex = createLazyUnityMetadataIndex({
       root: createUri('/Project'),
@@ -1361,24 +1334,9 @@ describe('eventReferences', () => {
     let targetLookupCount = 0;
     const csharpLanguageService = {
       ...createFakeCSharpSymbolLanguageService({}),
-      async findTypesByName() {
-        return [{
-          name: 'Gate',
-          fullName: 'Amlos.Fixtures.Gate',
-          uriPath: '/Project/Assets/Gate.cs',
-          range: {
-            start: { line: 1, character: 13 },
-            end: { line: 1, character: 17 }
-          }
-        }];
-      },
-      async findTargetMethodPosition() {
+      async findMethodsForType() {
         targetLookupCount += 1;
-        if (targetLookupCount === 1) {
-          throw new Error('C# document symbol provider returned namespace-only symbols for target method Amlos.Fixtures.Gate.CanInteract.');
-        }
-
-        return [{ line: 4, character: 14 }];
+        return [];
       }
     };
 
@@ -1399,10 +1357,9 @@ describe('eventReferences', () => {
       position: new FakePosition(3, 20) as unknown as vscode.Position
     }, () => undefined, () => true);
 
-    assert.strictEqual(targetLookupCount, 2);
-    assert.strictEqual(runtime.referenceCommands.length, 1);
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(4, 14));
+    assert.strictEqual(targetLookupCount, 1);
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
   it('deduplicates UnityEvent field target C# method declarations across normal and override assets', async () => {
@@ -2101,6 +2058,11 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
           const [uri] = args as [vscode.Uri];
           const document = textDocuments.get(uri.fsPath);
           return document ? createFakeDocumentSymbols(runtime as unknown as typeof vscode, document) : [];
+        }
+
+        if (command === 'vscode.executeWorkspaceSymbolProvider') {
+          const [query] = args as [string];
+          return createFakeWorkspaceSymbols(runtime as unknown as typeof vscode, textDocuments, query);
         }
 
         if (command === 'vscode.prepareTypeHierarchy') {
@@ -2811,6 +2773,73 @@ function flattenFakeDocumentSymbols(symbol: vscode.DocumentSymbol): vscode.Docum
   return [symbol, ...symbol.children.flatMap(child => flattenFakeDocumentSymbols(child))];
 }
 
+/** Creates fake workspace symbols from opened test documents for provider-backed target lookups. */
+function createFakeWorkspaceSymbols(
+  runtimeVscode: typeof vscode,
+  documents: ReadonlyMap<string, vscode.TextDocument>,
+  query: string
+): vscode.SymbolInformation[] {
+  const symbols: vscode.SymbolInformation[] = [];
+  for (const document of documents.values()) {
+    collectFakeWorkspaceSymbols(
+      runtimeVscode,
+      document.uri,
+      createFakeDocumentSymbols(runtimeVscode, document),
+      [],
+      query,
+      symbols
+    );
+  }
+
+  return symbols;
+}
+
+/** Flattens fake document symbols into SymbolInformation-shaped provider results. */
+function collectFakeWorkspaceSymbols(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  symbols: readonly vscode.DocumentSymbol[],
+  ancestors: readonly vscode.DocumentSymbol[],
+  query: string,
+  results: vscode.SymbolInformation[]
+): void {
+  for (const symbol of symbols) {
+    const symbolName = symbol.name.replace(/\s*\(.*$/, '').trim();
+    if (symbol.kind === runtimeVscode.SymbolKind.Method && symbolName === query) {
+      results.push({
+        name: symbol.name,
+        kind: symbol.kind,
+        containerName: createFakeWorkspaceContainerName(runtimeVscode, ancestors),
+        location: {
+          uri,
+          range: symbol.selectionRange
+        }
+      } as vscode.SymbolInformation);
+    }
+
+    collectFakeWorkspaceSymbols(runtimeVscode, uri, symbol.children, [...ancestors, symbol], query, results);
+  }
+}
+
+/** Builds the declaring type name that real C# workspace symbols expose as containerName. */
+function createFakeWorkspaceContainerName(
+  runtimeVscode: typeof vscode,
+  ancestors: readonly vscode.DocumentSymbol[]
+): string | undefined {
+  const namespaceName = ancestors
+    .filter(symbol => symbol.kind === runtimeVscode.SymbolKind.Namespace)
+    .map(symbol => symbol.name)
+    .join('.');
+  const typeName = [...ancestors]
+    .reverse()
+    .find(symbol => symbol.kind === runtimeVscode.SymbolKind.Class)?.name;
+  if (!typeName) {
+    return undefined;
+  }
+
+  return namespaceName ? `${namespaceName}.${typeName}` : typeName;
+}
+
 /** Returns fake parent hierarchy items that mimic MonoBehaviour inheritance. */
 function createFakeSupertypes(runtimeVscode: typeof vscode, item: vscode.TypeHierarchyItem): vscode.TypeHierarchyItem[] {
   const metadata = item as vscode.TypeHierarchyItem & { isUnityObject?: boolean };
@@ -2969,11 +2998,6 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
     async findTypes(uri) {
       return typesByPath[uri.fsPath] ?? [];
     },
-    async findTypesByName(typeName) {
-      return Object.values(typesByPath)
-        .flat()
-        .filter(type => type.fullName === typeName || type.name === typeName.split('.').at(-1));
-    },
     async findUnityEventFields() {
       return [];
     },
@@ -2982,6 +3006,9 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
     },
     async findUnityEventFieldAtPosition() {
       return undefined;
+    },
+    async findMethodsForType() {
+      return [];
     },
     async findTargetMethodPosition() {
       return [];

@@ -199,25 +199,40 @@ describe('csharpLanguageService', () => {
     assert.strictEqual(fields[0]?.name, 'OnCheckEnable');
   });
 
-  it('finds target types by provider workspace symbols and keeps their source URI', async () => {
+  it('finds target methods by provider workspace symbols and declaring type', async () => {
     const queries: string[] = [];
     const service = createServiceWithSymbols([], {
       queries,
       workspaceSymbols: {
-        'Amlos.Fixtures.UpgradeAltar': [],
-        UpgradeAltar: [
-          fakeSymbolInformation('UpgradeAltar', symbolKind.Class, 'Amlos.Fixtures.', fakeRange(2, 13, 25), '/Project/Assets/UpgradeAltar.cs'),
-          fakeSymbolInformation('UpgradeAltar', symbolKind.Class, 'Other.Namespace.', fakeRange(2, 13, 25), '/Project/Assets/OtherUpgradeAltar.cs')
+        Interact: [
+          fakeSymbolInformation('Interact(bool value)', symbolKind.Method, 'Amlos.Fixtures.UpgradeAltar.', fakeRange(18, 14, 22), '/Project/Assets/UpgradeAltar.cs'),
+          fakeSymbolInformation('Interact(bool value)', symbolKind.Method, 'Other.Namespace.UpgradeAltar.', fakeRange(18, 14, 22), '/Project/Assets/OtherUpgradeAltar.cs'),
+          fakeSymbolInformation('Interact(bool value)', symbolKind.Field, 'Amlos.Fixtures.UpgradeAltar.', fakeRange(9, 8, 16), '/Project/Assets/NotAMethod.cs')
         ]
       }
     });
 
-    const types = await service.findTypesByName('Amlos.Fixtures.UpgradeAltar');
+    const methods = await service.findMethodsForType('Amlos.Fixtures.UpgradeAltar', 'Interact');
 
-    assert.deepStrictEqual(queries, ['Amlos.Fixtures.UpgradeAltar', 'UpgradeAltar']);
-    assert.strictEqual(types.length, 1);
-    assert.strictEqual(types[0].fullName, 'Amlos.Fixtures.UpgradeAltar');
-    assert.strictEqual(types[0].uriPath, '/Project/Assets/UpgradeAltar.cs');
+    assert.deepStrictEqual(queries, ['Interact']);
+    assert.strictEqual(methods.length, 1);
+    assert.strictEqual(methods[0].uriPath, '/Project/Assets/UpgradeAltar.cs');
+    assert.deepStrictEqual(methods[0].range.start, { line: 18, character: 14 });
+  });
+
+  it('matches Roslyn workspace-symbol method containers for UnityEvent target lookup', async () => {
+    const service = createServiceWithSymbols([], {
+      workspaceSymbols: {
+        Fire: [
+          fakeSymbolInformation('Fire()', symbolKind.Method, 'in Cannon (project Assembly-CSharp)', fakeRange(6, 16, 20), '/Project/Assets/Scripts/Cannon.cs')
+        ]
+      }
+    });
+
+    const methods = await service.findMethodsForType('Amlos.Gameplay.Cannon', 'Fire');
+
+    assert.strictEqual(methods.length, 1);
+    assert.strictEqual(methods[0].uriPath, '/Project/Assets/Scripts/Cannon.cs');
   });
 
 });
