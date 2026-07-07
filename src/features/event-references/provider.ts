@@ -2,6 +2,7 @@ import type * as vscode from 'vscode';
 import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot } from '../../unity/csharpLanguageService';
 import { isCSharpFile } from './assetDiscovery';
 import { createCodeLensesFromIndex } from './codeLens';
+import type { UnityEventReference, UnitySerializedAssetReferenceIndex } from './model';
 import { createHoverMarkdown, showReferenceLocations } from './referenceLocations';
 import type { EventReferenceLocationTarget, EventReferenceRuntime, UnityEventReferenceIndexController } from './runtime';
 import { isEventReferenceAutoScanEnabled } from './settings';
@@ -21,9 +22,11 @@ export function createEventReferenceProvider(
     delayMilliseconds: number;
     logCount: number;
     nextAllowedAt: number;
+    refreshTimer?: ReturnType<typeof setTimeout>;
   }>();
   const lastMethodSymbolsByScriptPath = new Map<string, readonly CSharpMethodSymbolSnapshot[]>();
   const lastFieldSymbolsByScriptPath = new Map<string, readonly CSharpFieldSymbolSnapshot[]>();
+  const csharpRefreshInFlight = new Set<string>();
 
   /** Creates a retry key so one script or symbol kind cannot block another. */
   function csharpRetryKey(scriptPath: string, kind: CSharpCodeLensSymbolKind): string {
@@ -42,7 +45,18 @@ export function createEventReferenceProvider(
 
   /** Clears retry backoff state once one symbol category becomes available. */
   function resetCSharpRetry(scriptPath: string, kind: CSharpCodeLensSymbolKind): void {
-    csharpRetryMemory.delete(csharpRetryKey(scriptPath, kind));
+    const key = csharpRetryKey(scriptPath, kind);
+    const memory = csharpRetryMemory.get(key);
+    if (memory?.refreshTimer) {
+      clearTimeout(memory.refreshTimer);
+    }
+
+    csharpRetryMemory.delete(key);
+  }
+
+  /** Checks whether a previous provider failure should render cached placeholders. */
+  function hasCSharpUnavailableState(scriptPath: string, kind: CSharpCodeLensSymbolKind): boolean {
+    return csharpRetryMemory.has(csharpRetryKey(scriptPath, kind));
   }
 
   /** Records C# provider unavailability without actively polling the C# server. */
@@ -61,10 +75,18 @@ export function createEventReferenceProvider(
     }
 
     const delayMilliseconds = getCSharpRetryDelay(scriptPath, kind);
+    const previousTimer = csharpRetryMemory.get(key)?.refreshTimer;
+    if (previousTimer) {
+      clearTimeout(previousTimer);
+    }
+
+    // The timer only asks VS Code to request CodeLens again; it does not call C# directly.
+    const refreshTimer = setTimeout(() => controller.notifyCodeLensesChanged(), delayMilliseconds);
     csharpRetryMemory.set(key, {
       delayMilliseconds: Math.min(csharpRetryMaximumDelayMilliseconds, delayMilliseconds * 2),
       logCount,
-      nextAllowedAt: Date.now() + delayMilliseconds
+      nextAllowedAt: Date.now() + delayMilliseconds,
+      refreshTimer
     });
   }
 
@@ -97,6 +119,52 @@ export function createEventReferenceProvider(
     return memory !== undefined && Date.now() < memory.nextAllowedAt;
   }
 
+  /** Starts an asynchronous C# symbol read without blocking VS Code CodeLens rendering. */
+  function scheduleCSharpSymbolRefresh(
+    document: vscode.TextDocument,
+    index: UnitySerializedAssetReferenceIndex,
+    scriptPath: string,
+    kind: CSharpCodeLensSymbolKind
+  ): void {
+    if (!runtime.csharpLanguageService || isCSharpRetryBackoffActive(scriptPath, kind)) {
+      return;
+    }
+
+    const hasCachedSymbols = kind === 'methods'
+      ? lastMethodSymbolsByScriptPath.has(scriptPath)
+      : lastFieldSymbolsByScriptPath.has(scriptPath);
+    if (hasCachedSymbols && !hasCSharpUnavailableState(scriptPath, kind)) {
+      return;
+    }
+
+    const key = csharpRetryKey(scriptPath, kind);
+    if (csharpRefreshInFlight.has(key)) {
+      return;
+    }
+
+    csharpRefreshInFlight.add(key);
+    void (async () => {
+      try {
+        const expectedNames = kind === 'methods'
+          ? getExpectedMethodNamesForScript(index, scriptPath)
+          : getExpectedFieldNamesForScript(index, scriptPath);
+        const symbols = kind === 'methods'
+          ? await runtime.csharpLanguageService?.findMethods(document.uri, expectedNames) ?? []
+          : await runtime.csharpLanguageService?.findUnityEventFields(document.uri, expectedNames) ?? [];
+        rememberCSharpSymbols(scriptPath, kind, symbols);
+        markCSharpCodeLensReady(scriptPath, kind);
+        controller.notifyCodeLensesChanged();
+      } catch (error) {
+        const canPlacePlaceholder = kind === 'methods'
+          ? (lastMethodSymbolsByScriptPath.get(scriptPath)?.length ?? 0) > 0
+          : (lastFieldSymbolsByScriptPath.get(scriptPath)?.length ?? 0) > 0;
+        recordCSharpCodeLensUnavailable(scriptPath, kind, error, canPlacePlaceholder);
+      } finally {
+        csharpRefreshInFlight.delete(key);
+      }
+    })();
+  }
+
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
     async provideCodeLenses(document, token) {
@@ -122,18 +190,23 @@ export function createEventReferenceProvider(
           return [];
         }
 
+        if (index.hasMethodReferences(scriptPath)) {
+          scheduleCSharpSymbolRefresh(document, index, scriptPath, 'methods');
+        }
+
+        if (index.hasFieldReferences(scriptPath)) {
+          scheduleCSharpSymbolRefresh(document, index, scriptPath, 'fields');
+        }
+
         return await createCodeLensesFromIndex(runtime, document, index, {
           embedReferences: false,
           includeZeroSummaryLenses: true,
-          skipCSharpMethods: isCSharpRetryBackoffActive(scriptPath, 'methods'),
-          skipCSharpFields: isCSharpRetryBackoffActive(scriptPath, 'fields'),
+          cachedMethods: lastMethodSymbolsByScriptPath.get(scriptPath),
+          cachedFields: lastFieldSymbolsByScriptPath.get(scriptPath),
+          methodsUnavailable: hasCSharpUnavailableState(scriptPath, 'methods'),
+          fieldsUnavailable: hasCSharpUnavailableState(scriptPath, 'fields'),
           fallbackMethods: lastMethodSymbolsByScriptPath.get(scriptPath),
-          fallbackFields: lastFieldSymbolsByScriptPath.get(scriptPath),
-          onCSharpSymbolsUnavailable: (kind, error, canPlacePlaceholder) => recordCSharpCodeLensUnavailable(scriptPath, kind, error, canPlacePlaceholder),
-          onCSharpSymbolsReady: (kind, symbols) => {
-            rememberCSharpSymbols(scriptPath, kind, symbols);
-            markCSharpCodeLensReady(scriptPath, kind);
-          }
+          fallbackFields: lastFieldSymbolsByScriptPath.get(scriptPath)
         });
       } catch (error) {
         runtime.logger.warn(`UnityEvent CodeLens failed for ${scriptPath}: ${errorMessage(error)}`);
@@ -155,7 +228,7 @@ export function createEventReferenceProvider(
       }
 
       const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-      const method = await runtime.csharpLanguageService?.findMethodAtPosition(document.uri, position);
+      const method = await findMethodAtHoverPosition(runtime, document.uri, position, scriptPath);
 
       if (method) {
         const references = index.getReferences(scriptPath, method.name, method.typeName);
@@ -164,7 +237,7 @@ export function createEventReferenceProvider(
         }
       }
 
-      const field = await runtime.csharpLanguageService?.findUnityEventFieldAtPosition(document.uri, position);
+      const field = await findFieldAtHoverPosition(runtime, document.uri, position, scriptPath);
       if (field) {
         const references = index.getFieldReferences(scriptPath, field.name, field.typeName);
         if (references.length > 0) {
@@ -184,6 +257,110 @@ export function createEventReferenceProvider(
       );
     }
   };
+}
+
+/** Reads the hovered method symbol without letting C# provider errors escape into VS Code hover plumbing. */
+async function findMethodAtHoverPosition(
+  runtime: EventReferenceRuntime,
+  uri: vscode.Uri,
+  position: vscode.Position,
+  scriptPath: string
+): Promise<CSharpMethodSymbolSnapshot | undefined> {
+  try {
+    return await runtime.csharpLanguageService?.findMethodAtPosition(uri, position);
+  } catch (error) {
+    logHoverCSharpProviderError(runtime, scriptPath, 'methods', error);
+    return undefined;
+  }
+}
+
+/** Reads the hovered UnityEvent field symbol without turning provider readiness into hover failures. */
+async function findFieldAtHoverPosition(
+  runtime: EventReferenceRuntime,
+  uri: vscode.Uri,
+  position: vscode.Position,
+  scriptPath: string
+): Promise<CSharpFieldSymbolSnapshot | undefined> {
+  try {
+    return await runtime.csharpLanguageService?.findUnityEventFieldAtPosition(uri, position);
+  } catch (error) {
+    logHoverCSharpProviderError(runtime, scriptPath, 'fields', error);
+    return undefined;
+  }
+}
+
+/** Logs C# hover lookup failures visibly while keeping the editor hover responsive. */
+function logHoverCSharpProviderError(
+  runtime: EventReferenceRuntime,
+  scriptPath: string,
+  kind: CSharpCodeLensSymbolKind,
+  error: unknown
+): void {
+  const message = errorMessage(error);
+  if (isExpectedCSharpUnavailableError(error)) {
+    runtime.logger.info(`UnityEvent hover C# ${kind} unavailable for ${scriptPath}: ${message}`);
+    return;
+  }
+
+  runtime.logger.error(`UnityEvent hover C# ${kind} unexpected provider failure for ${scriptPath}: ${message}`);
+}
+
+/** Collects target method names that YAML already associates with the current script. */
+function getExpectedMethodNamesForScript(index: UnitySerializedAssetReferenceIndex, scriptPath: string): readonly string[] {
+  return uniqueNames(index.getAllReferences()
+    .filter(reference => referenceMatchesTargetScript(reference, scriptPath))
+    .map(reference => reference.methodName));
+}
+
+/** Collects UnityEvent field names that YAML already associates with the current owner script. */
+function getExpectedFieldNamesForScript(index: UnitySerializedAssetReferenceIndex, scriptPath: string): readonly string[] {
+  return uniqueNames(index.getAllReferences()
+    .filter(reference => referenceMatchesEventOwnerScript(reference, scriptPath))
+    .map(reference => reference.eventFieldName));
+}
+
+/** Matches references resolved by script path or by type name before provider symbols supply full type names. */
+function referenceMatchesTargetScript(reference: UnityEventReference, scriptPath: string): boolean {
+  if (reference.scriptPath && sameProjectPath(reference.scriptPath, scriptPath)) {
+    return true;
+  }
+
+  return !reference.scriptPath &&
+    !!reference.scriptTypeName &&
+    sameShortTypeName(reference.scriptTypeName, scriptTypeNameFromPath(scriptPath));
+}
+
+/** Matches UnityEvent owner fields resolved by script path or by owner type name. */
+function referenceMatchesEventOwnerScript(reference: UnityEventReference, scriptPath: string): boolean {
+  if (reference.eventScriptPath && sameProjectPath(reference.eventScriptPath, scriptPath)) {
+    return true;
+  }
+
+  return !reference.eventScriptPath &&
+    !!reference.eventOwnerTypeName &&
+    sameShortTypeName(reference.eventOwnerTypeName, scriptTypeNameFromPath(scriptPath));
+}
+
+/** Creates a stable unique list while removing empty YAML values. */
+function uniqueNames(names: readonly string[]): readonly string[] {
+  return [...new Set(names.map(name => name.trim()).filter(Boolean))];
+}
+
+/** Compares Unity project paths case-insensitively across slash styles. */
+function sameProjectPath(left: string, right: string): boolean {
+  return left.replace(/\\/g, '/').toLowerCase() === right.replace(/\\/g, '/').toLowerCase();
+}
+
+/** Compares namespace-qualified and short type names. */
+function sameShortTypeName(left: string, right: string | undefined): boolean {
+  return !!right && left.split('.').at(-1)?.toLowerCase() === right.toLowerCase();
+}
+
+/** Uses the script file name as a pre-provider type hint. */
+function scriptTypeNameFromPath(scriptPath: string): string | undefined {
+  const fileName = scriptPath.split(/[\\/]/).pop() ?? '';
+  const typeName = fileName.replace(/\.cs$/i, '');
+  return typeName || undefined;
 }
 
 /** Treats namespace-only and empty provider results as unavailable rather than unexpected provider crashes. */

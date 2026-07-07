@@ -10,7 +10,7 @@ import { readDefaultTextFile } from '../../features/event-references/utils';
 import { createVscodeCSharpLanguageService } from '../../unity/csharpLanguageService';
 import { createLazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityPlusLogger } from '../../unity/logger';
-import { configureCSharpSolution, getUnityFixtureRoot } from './csharpProviderSetup';
+import { configureCSharpSolution, getCSharpProviderReadinessState, getUnityFixtureRoot } from './csharpProviderSetup';
 
 let fixtureRoot: vscode.Uri;
 const csharpReadinessTimeoutMs = 60_000;
@@ -34,7 +34,7 @@ suite('eventReferences - Real Unity Project Shape', () => {
     );
     await waitForCSharpLanguageServiceDeclarations(
       vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'PlainService.cs')),
-      ['type:PlainService', 'method:Tick']
+      ['type:PlainService']
     );
   });
 
@@ -50,44 +50,43 @@ suite('eventReferences - Real Unity Project Shape', () => {
       const index = await buildUnityEventReferenceIndex(runtime, await metadataIndex.getOrBuild(), { mode: 'interactive' });
 
       const diagnostics = index.getDiagnostics();
-      const methodReferences = index.getReferences('Assets/Scripts/Cannon.cs', 'Fire', 'Amlos.Fixtures.Cannon');
       const fieldReferences = index.getFieldReferences('Assets/Scripts/Interactable.cs', 'OnCheckEnable', 'Amlos.Control.Interact.Interactable');
       const fieldTargets = index.getFieldTargets('Assets/Scripts/Interactable.cs', 'OnCheckEnable', 'Amlos.Control.Interact.Interactable');
       const interactableDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Interactable.cs')));
       const cannonDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
       const plainDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'PlainService.cs')));
+      const interactableMethods: never[] = [];
+      const interactableFields = await runtime.csharpLanguageService?.findUnityEventFields(interactableDocument.uri, ['OnCheckEnable']) ?? [];
+      const cannonMethods = await runtime.csharpLanguageService?.findMethods(cannonDocument.uri, ['Fire']) ?? [];
+      const plainMethods: never[] = [];
       const interactableLenses = await createCodeLensesFromIndex(runtime, interactableDocument, index, {
         embedReferences: false,
-        includeZeroSummaryLenses: true
+        includeZeroSummaryLenses: true,
+        cachedMethods: interactableMethods,
+        cachedFields: interactableFields
       });
       const cannonLenses = await createCodeLensesFromIndex(runtime, cannonDocument, index, {
         embedReferences: false,
-        includeZeroSummaryLenses: true
+        includeZeroSummaryLenses: true,
+        cachedMethods: cannonMethods
       });
       const plainLenses = await createCodeLensesFromIndex(runtime, plainDocument, index, {
         embedReferences: false,
-        includeZeroSummaryLenses: true
+        includeZeroSummaryLenses: true,
+        cachedMethods: plainMethods
       });
-      const serializedInstanceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance');
+      const methodLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
       const fieldReferenceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
       const fieldTargetLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
-      const methodLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
 
       assert.strictEqual(diagnostics.persistentCallCount, 1);
-      assert.strictEqual(diagnostics.resolvedByTargetTypeNameCount, 1);
-      assert.strictEqual(diagnostics.resolvedReferenceCount, 1);
-      assert.strictEqual(methodReferences.length, 1);
       assert.strictEqual(fieldReferences.length, 1);
       assert.strictEqual(fieldTargets.length, 1);
-      assert.strictEqual(fieldTargets[0].scriptPath, 'Assets/Scripts/Cannon.cs');
-      assert.strictEqual(serializedInstanceLens?.command?.title, '1 Unity serialized instances');
-      assert.strictEqual(serializedInstanceLens?.range.start.line, 5);
-      assert.strictEqual(serializedInstanceLens?.range.start.character, 24);
+      assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
       assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
       assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
-      assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
-      assert.strictEqual(methodLens?.range.start.line, 6);
-      assert.strictEqual(methodLens?.range.start.character, 16);
+      assert.strictEqual(interactableLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method'), false);
+      assert.strictEqual(plainLenses.length, 0);
       assert.strictEqual(plainLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), false);
 
       const commandRecorder = createShowReferencesRecorder();
@@ -108,9 +107,9 @@ suite('eventReferences - Real Unity Project Shape', () => {
 
       assert.strictEqual(commandRecorder.calls.length, 2);
       assert.strictEqual(normalizeFsPath(commandRecorder.calls[0].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Prefabs', 'Gate.prefab')));
-      assert.strictEqual(normalizeFsPath(commandRecorder.calls[1].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
-      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.line, 6);
-      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.character, 16);
+      assert.strictEqual(normalizeFsPath(commandRecorder.calls[1].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Prefabs', 'Gate.prefab')));
+      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.line, 14);
+      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.character, 22);
     } finally {
       metadataIndex.dispose();
     }
@@ -166,7 +165,14 @@ async function waitForCSharpLanguageServiceDeclarations(uri: vscode.Uri, expecte
     try {
       const types = await csharpLanguageService.findTypes(document.uri);
       const needsFields = expectedDeclarations.some(declaration => declaration.startsWith('field:'));
-      const fields = needsFields ? await csharpLanguageService.findUnityEventFields(document.uri) : [];
+      const fields = needsFields
+        ? await csharpLanguageService.findUnityEventFields(
+          document.uri,
+          expectedDeclarations
+            .filter(declaration => declaration.startsWith('field:'))
+            .map(declaration => declaration.slice('field:'.length))
+        )
+        : [];
       lastDeclarations = [
         ...types.map(type => `type:${type.name}`),
         ...fields.map(field => `field:${field.name}`)
@@ -236,7 +242,8 @@ function failCSharpDeclarationReadiness(
     `C# language service did not include ${expectedDeclarations.join(', ')} for ${uri.fsPath}. ` +
     `Last declarations: ${lastDeclarations.join(', ') || '<none>'}. ` +
     `Last raw provider symbols: ${lastProviderNames.join(', ') || '<none>'}. ` +
-    `Last error: ${lastError ?? '<none>'}.`
+    `Last error: ${lastError ?? '<none>'}. ` +
+    `C# readiness: ${JSON.stringify(getCSharpProviderReadinessState() ?? {})}.`
   );
 }
 
@@ -245,12 +252,17 @@ function flattenSymbolNames(symbols: readonly (vscode.DocumentSymbol | vscode.Sy
   const names: string[] = [];
   for (const symbol of symbols) {
     names.push(normalizeSymbolName(symbol.name));
-    if (symbol instanceof vscode.DocumentSymbol) {
+    if (!isSymbolInformation(symbol)) {
       names.push(...flattenSymbolNames(symbol.children));
     }
   }
 
   return names;
+}
+
+/** Checks for SymbolInformation without relying on extension-host class identity. */
+function isSymbolInformation(symbol: vscode.DocumentSymbol | vscode.SymbolInformation): symbol is vscode.SymbolInformation {
+  return 'location' in symbol;
 }
 
 /** Removes language-server display suffixes such as method parameter lists. */

@@ -104,18 +104,18 @@ export interface PriorityScanState {
 export interface CodeLensRenderOptions {
   embedReferences: boolean;
   includeZeroSummaryLenses?: boolean;
-  /** When true, render without method lenses while method symbol retry backoff is active. */
-  skipCSharpMethods?: boolean;
-  /** When true, render without UnityEvent field lenses while field symbol retry backoff is active. */
-  skipCSharpFields?: boolean;
+  /** Provider-backed methods cached by the asynchronous C# refresh loop. */
+  cachedMethods?: readonly CSharpMethodSymbolSnapshot[];
+  /** Provider-backed fields cached by the asynchronous C# refresh loop. */
+  cachedFields?: readonly CSharpFieldSymbolSnapshot[];
+  /** When true, method symbols failed after a previous provider-backed range was cached. */
+  methodsUnavailable?: boolean;
+  /** When true, field symbols failed after a previous provider-backed range was cached. */
+  fieldsUnavailable?: boolean;
   /** Last provider-backed methods used only to keep error placeholders anchored. */
   fallbackMethods?: readonly CSharpMethodSymbolSnapshot[];
   /** Last provider-backed fields used only to keep error placeholders anchored. */
   fallbackFields?: readonly CSharpFieldSymbolSnapshot[];
-  /** Called when one C# symbol category is not ready, so the provider can retry later. */
-  onCSharpSymbolsUnavailable?: (kind: 'methods' | 'fields', error: unknown, canPlacePlaceholder: boolean) => void;
-  /** Called after one C# symbol category is read successfully, so retry state can reset. */
-  onCSharpSymbolsReady?: (kind: 'methods' | 'fields', symbols: readonly CSharpMethodSymbolSnapshot[] | readonly CSharpFieldSymbolSnapshot[]) => void;
 }
 
 export interface RunWithConcurrencyOptions {

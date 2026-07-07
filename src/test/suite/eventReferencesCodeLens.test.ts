@@ -10,29 +10,32 @@ import { createSerializedInstanceProvider } from '../../features/serialized-inst
 import type { SerializedInstancesRuntime } from '../../features/serialized-instances/runtime';
 import { readDefaultTextFile } from '../../features/event-references/utils';
 import { createSharedUnityYamlAssetHandler } from '../../features/unity-yaml-assets/handler';
-import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
+import { createVscodeCSharpLanguageService } from '../../unity/csharpLanguageService';
 import { createLazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityPlusLogger } from '../../unity/logger';
-import { getUnityFixtureRoot } from './csharpProviderSetup';
+import { configureCSharpSolution, getCSharpProviderReadinessState, getUnityFixtureRoot } from './csharpProviderSetup';
+
+const csharpReadinessTimeoutMs = 60_000;
+const csharpNamespaceOnlyFastFailMs = 20_000;
+const csharpReadinessLogIntervalMs = 2_000;
+const notReadyCodeLensBudgetMs = 5_000;
 
 suite('eventReferences - VS Code CodeLens Provider', () => {
-  test('shows YAML instance lenses immediately and UnityEvent hints after C# symbols become ready', async function () {
-    this.timeout(30_000);
+  test('returns serialized CodeLens quickly while UnityEvent index or C# symbols are not ready', async function () {
+    this.timeout(60_000);
 
     const root = getUnityFixtureRoot();
     const metadataIndex = createLazyUnityMetadataIndex({
       root,
       logger: createMemoryLogger()
     });
-    const csharpService = createDeferredCSharpService();
 
     try {
-      const runtime = createFixtureRuntime(metadataIndex, csharpService);
+      const runtime = createRealEventReferenceRuntime(metadataIndex);
       const instanceRuntime = createSerializedFixtureRuntime(runtime);
-      const metadata = await metadataIndex.getOrBuild();
-      const eventIndex = await buildUnityEventReferenceIndex(runtime, metadata, { mode: 'interactive' });
-      const eventController = createReadyEventIndexController(eventIndex, vscode);
-      const eventProvider = createEventReferenceProvider(runtime, eventController, () => true);
+      await metadataIndex.getOrBuild();
+
+      const eventProvider = createEventReferenceProvider(runtime, createNotReadyEventIndexController(vscode), () => true);
       const instanceProvider = createSerializedInstanceProvider(instanceRuntime, () => true);
       const disposable = vscode.Disposable.from(
         vscode.languages.registerCodeLensProvider({ language: 'csharp' }, instanceProvider),
@@ -40,33 +43,73 @@ suite('eventReferences - VS Code CodeLens Provider', () => {
       );
 
       try {
-        const previousEnabled = vscode.workspace.getConfiguration('unityPlus').get<boolean>('eventReferences.enabled');
-        await vscode.workspace.getConfiguration('unityPlus').update('eventReferences.enabled', false, vscode.ConfigurationTarget.Global);
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs')));
+        const startedAt = Date.now();
+        const lenses = await executeCodeLensProvider(document.uri);
+        const elapsedMs = Date.now() - startedAt;
 
-        try {
-          const document = await vscode.workspace.openTextDocument(vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs')));
-          const firstLenses = await executeCodeLensProvider(document.uri);
+        assert.ok(elapsedMs < notReadyCodeLensBudgetMs, `CodeLens provider should return before C# readiness; elapsed=${elapsedMs}ms`);
+        assert.strictEqual(lenses.some(lens => lens.command?.title === '1 Unity serialized instances'), true);
+      } finally {
+        disposable.dispose();
+      }
+    } finally {
+      metadataIndex.dispose();
+    }
+  });
 
-          assert.strictEqual(firstLenses.some(lens => lens.command?.title === '1 Unity serialized instances'), true);
-          assert.strictEqual(firstLenses.some(lens => lens.command?.title === '1 UnityEvent references'), false);
-          assert.strictEqual(firstLenses.some(lens => lens.command?.title === '1 UnityEvent targets'), false);
+  test('shows UnityEvent field CodeLens after the real C# provider exposes member ranges', async function () {
+    this.timeout(120_000);
 
-          csharpService.markReady();
-          await waitForCodeLensRetry();
+    const root = getUnityFixtureRoot();
+    await configureCSharpSolution(root);
+    await waitForRequiredCSharpMembers(vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs')), {
+      typeFullName: 'Amlos.Control.Interact.Interactable',
+      fields: [{ name: 'OnCheckEnable', detailIncludes: 'UnityEvent', line: 7, character: 26 }],
+      methods: []
+    });
+    await waitForRequiredCSharpMembers(vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Cannon.cs')), {
+      typeFullName: 'Amlos.Fixtures.Cannon',
+      fields: [],
+      methods: [{ name: 'Fire', line: 6, character: 16 }]
+    });
+    const metadataIndex = createLazyUnityMetadataIndex({
+      root,
+      logger: createMemoryLogger()
+    });
 
-          const readyLenses = await executeCodeLensProvider(document.uri);
-          const instanceLens = readyLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance');
-          const fieldReferenceLens = readyLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
-          const fieldTargetLens = readyLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+    try {
+      const runtime = createRealEventReferenceRuntime(metadataIndex);
+      const instanceRuntime = createSerializedFixtureRuntime(runtime);
+      const metadata = await metadataIndex.getOrBuild();
+      const index = await buildUnityEventReferenceIndex(runtime, metadata, { mode: 'background' });
+      const eventProvider = createEventReferenceProvider(runtime, createReadyEventIndexController(index, vscode), () => true);
+      const instanceProvider = createSerializedInstanceProvider(instanceRuntime, () => true);
+      const disposable = vscode.Disposable.from(
+        vscode.languages.registerCodeLensProvider({ language: 'csharp' }, instanceProvider),
+        vscode.languages.registerCodeLensProvider({ language: 'csharp' }, eventProvider)
+      );
 
-          assert.strictEqual(instanceLens?.command?.title, '1 Unity serialized instances');
-          assert.strictEqual(instanceLens?.range.start.line, 5);
-          assert.strictEqual(instanceLens?.range.start.character, 24);
-          assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
-          assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
-        } finally {
-          await vscode.workspace.getConfiguration('unityPlus').update('eventReferences.enabled', previousEnabled, vscode.ConfigurationTarget.Global);
-        }
+      try {
+        const interactableUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs'));
+        const cannonUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Cannon.cs'));
+        const interactableLenses = await waitForUnityEventCodeLenses(interactableUri, { method: false, field: true, fieldTarget: true });
+        const cannonLenses = await waitForUnityEventCodeLenses(cannonUri, { method: true, field: false, fieldTarget: false });
+        const instanceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance');
+        const methodLens = cannonLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+        const fieldReferenceLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'field');
+        const fieldTargetLens = interactableLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+
+        assert.strictEqual(instanceLens?.command?.title, '1 Unity serialized instances');
+        assert.strictEqual(methodLens?.command?.title, '1 UnityEvent references');
+        assert.strictEqual(fieldReferenceLens?.command?.title, '1 UnityEvent references');
+        assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
+        assert.strictEqual(fieldReferenceLens?.range.start.line, 7);
+        assert.strictEqual(fieldReferenceLens?.range.start.character, 26);
+        assert.strictEqual(fieldTargetLens?.range.start.line, 7);
+        assert.strictEqual(fieldTargetLens?.range.start.character, 26);
+        assert.strictEqual(methodLens?.range.start.line, 6);
+        assert.strictEqual(methodLens?.range.start.character, 16);
       } finally {
         disposable.dispose();
       }
@@ -76,12 +119,346 @@ suite('eventReferences - VS Code CodeLens Provider', () => {
   });
 });
 
+interface RequiredCSharpMembers {
+  typeFullName: string;
+  fields: readonly RequiredFieldMember[];
+  methods: readonly RequiredMethodMember[];
+}
+
+interface RequiredFieldMember {
+  name: string;
+  detailIncludes: string;
+  line: number;
+  character: number;
+}
+
+interface RequiredMethodMember {
+  name: string;
+  line: number;
+  character: number;
+}
+
+interface ProviderMemberSnapshot {
+  kind: vscode.SymbolKind;
+  name: string;
+  detail: string;
+  fullTypeName?: string;
+  range: vscode.Range;
+}
+
 /** Executes VS Code's real CodeLens provider command and normalizes missing results. */
 async function executeCodeLensProvider(uri: vscode.Uri): Promise<vscode.CodeLens[]> {
   return await vscode.commands.executeCommand<vscode.CodeLens[] | undefined>(
     'vscode.executeCodeLensProvider',
     uri
   ) ?? [];
+}
+
+/** Waits for the async C# symbol refresh behind the real CodeLens provider to publish UnityEvent lenses. */
+async function waitForUnityEventCodeLenses(
+  uri: vscode.Uri,
+  expected: { method: boolean; field: boolean; fieldTarget: boolean }
+): Promise<vscode.CodeLens[]> {
+  const timeoutAt = Date.now() + 30_000;
+  let lastLenses: vscode.CodeLens[] = [];
+
+  while (Date.now() < timeoutAt) {
+    lastLenses = await executeCodeLensProvider(uri);
+    const hasMethodLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method');
+    const hasFieldLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field');
+    const hasFieldTargetLens = lastLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
+    if ((!expected.method || hasMethodLens) &&
+      (!expected.field || hasFieldLens) &&
+      (!expected.fieldTarget || hasFieldTargetLens)) {
+      return lastLenses;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  assert.fail(
+    `Timed out waiting for UnityEvent CodeLens. ` +
+    `Last lenses: ${lastLenses.map(lens => lens.command?.title ?? '<unresolved>').join(', ') || '<none>'}. ` +
+    `C# readiness: ${JSON.stringify(getCSharpProviderReadinessState() ?? {})}.`
+  );
+}
+
+/** Waits until the real C# provider returns the exact member ranges used by UnityEvent CodeLens. */
+async function waitForRequiredCSharpMembers(uri: vscode.Uri, required: RequiredCSharpMembers): Promise<void> {
+  const startedAt = Date.now();
+  const timeoutAt = startedAt + csharpReadinessTimeoutMs;
+  const document = await vscode.workspace.openTextDocument(uri);
+  await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+
+  const csharpLanguageService = createVscodeCSharpLanguageService(vscode);
+  let namespaceOnlySince: number | undefined;
+  let nextLogAt = startedAt + csharpReadinessLogIntervalMs;
+  let lastMembers: ProviderMemberSnapshot[] = [];
+  let lastRawSymbols: unknown[] = [];
+  let lastServiceError: string | undefined;
+  let lastMissing: string[] = [];
+
+  while (Date.now() < timeoutAt) {
+    const now = Date.now();
+    const symbols = await vscode.commands.executeCommand<Array<vscode.DocumentSymbol | vscode.SymbolInformation> | undefined>(
+      'vscode.executeDocumentSymbolProvider',
+      document.uri
+    ) ?? [];
+    lastRawSymbols = describeProviderSymbolShape(symbols);
+    lastMembers = collectProviderMembers(symbols);
+
+    try {
+      await assertCSharpServiceCanResolveMembers(csharpLanguageService, uri, required);
+      lastServiceError = undefined;
+      return;
+    } catch (error) {
+      lastServiceError = error instanceof Error ? error.message : String(error);
+    }
+
+    lastMissing = findMissingRequiredMembers(lastMembers, required);
+    if (lastMissing.length === 0 && !lastServiceError) {
+      return;
+    }
+
+    namespaceOnlySince = containsOnlyNamespaceSymbols(symbols)
+      ? namespaceOnlySince ?? now
+      : undefined;
+
+    if (namespaceOnlySince !== undefined && Date.now() - namespaceOnlySince >= csharpNamespaceOnlyFastFailMs) {
+      failCSharpReadiness(uri, required, lastMissing, lastMembers, lastRawSymbols, lastServiceError);
+    }
+
+    if (Date.now() >= nextLogAt) {
+      console.log(
+        `[csharp readiness] waiting for ${formatRequiredMembers(required)} after ${Math.round((Date.now() - startedAt) / 1000)}s. ` +
+        `Missing: ${lastMissing.join(', ') || '<none>'}. ` +
+        `Provider members: ${lastMembers.map(member => `${member.fullTypeName ?? '<global>'}.${member.name}`).join(', ') || '<none>'}. ` +
+        `Service error: ${lastServiceError ?? '<none>'}.`
+      );
+      nextLogAt = Date.now() + csharpReadinessLogIntervalMs;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  failCSharpReadiness(uri, required, lastMissing, lastMembers, lastRawSymbols, lastServiceError);
+}
+
+/** Verifies the production language-service adapter sees the same required members. */
+async function assertCSharpServiceCanResolveMembers(
+  csharpLanguageService: ReturnType<typeof createVscodeCSharpLanguageService>,
+  uri: vscode.Uri,
+  required: RequiredCSharpMembers
+): Promise<void> {
+  const types = await csharpLanguageService.findTypes(uri);
+  assert.ok(types.some(type => matchesCSharpTypeName(type.fullName, required.typeFullName)), `missing type ${required.typeFullName}`);
+
+  if (required.fields.length > 0) {
+    const fields = await csharpLanguageService.findUnityEventFields(uri, required.fields.map(field => field.name));
+    for (const field of required.fields) {
+      assert.ok(fields.some(candidate =>
+        candidate.name === field.name &&
+        candidate.range.start.line === field.line &&
+        candidate.range.start.character === field.character
+      ), `missing field ${required.typeFullName}.${field.name} at ${field.line}:${field.character}`);
+    }
+  }
+
+  for (const method of required.methods) {
+    const positions = await csharpLanguageService.findTargetMethodPosition(uri, required.typeFullName, method.name);
+    assert.ok(positions.some(position =>
+      position.line === method.line &&
+      position.character === method.character
+    ), `missing method ${required.typeFullName}.${method.name} at ${method.line}:${method.character}`);
+  }
+}
+
+/** Collects member-level symbols with their nearest type full name. */
+function collectProviderMembers(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): ProviderMemberSnapshot[] {
+  const members: ProviderMemberSnapshot[] = [];
+  for (const symbol of symbols) {
+    if (isSymbolInformation(symbol)) {
+      if (symbol.kind === vscode.SymbolKind.Field || symbol.kind === vscode.SymbolKind.Method) {
+        members.push({
+          kind: symbol.kind,
+          name: normalizeSymbolName(symbol.name),
+          detail: '',
+          fullTypeName: normalizeContainerName(symbol.containerName),
+          range: symbol.location.range
+        });
+      }
+      continue;
+    }
+
+    collectDocumentSymbolMembers(symbol, [], members);
+  }
+
+  return members;
+}
+
+/** Recursively walks document symbols so readiness is based on real member ranges. */
+function collectDocumentSymbolMembers(
+  symbol: vscode.DocumentSymbol,
+  ancestors: readonly vscode.DocumentSymbol[],
+  members: ProviderMemberSnapshot[]
+): void {
+  if (symbol.kind === vscode.SymbolKind.Field || symbol.kind === vscode.SymbolKind.Method) {
+    members.push({
+      kind: symbol.kind,
+      name: normalizeSymbolName(symbol.name),
+      detail: symbol.detail,
+      fullTypeName: findNearestTypeFullName(ancestors),
+      range: symbol.selectionRange
+    });
+  }
+
+  for (const child of symbol.children) {
+    collectDocumentSymbolMembers(child, [...ancestors, symbol], members);
+  }
+}
+
+/** Finds which concrete declarations are still missing from raw provider symbols. */
+function findMissingRequiredMembers(members: readonly ProviderMemberSnapshot[], required: RequiredCSharpMembers): string[] {
+  const missing: string[] = [];
+  for (const field of required.fields) {
+    if (!members.some(member =>
+      member.kind === vscode.SymbolKind.Field &&
+      member.name === field.name &&
+      matchesCSharpTypeName(member.fullTypeName ?? '', required.typeFullName) &&
+      member.detail.includes(field.detailIncludes) &&
+      member.range.start.line === field.line &&
+      member.range.start.character === field.character
+    )) {
+      missing.push(`field:${required.typeFullName}.${field.name}@${field.line}:${field.character}`);
+    }
+  }
+
+  for (const method of required.methods) {
+    if (!members.some(member =>
+      member.kind === vscode.SymbolKind.Method &&
+      member.name === method.name &&
+      matchesCSharpTypeName(member.fullTypeName ?? '', required.typeFullName) &&
+      member.range.start.line === method.line &&
+      member.range.start.character === method.character
+    )) {
+      missing.push(`method:${required.typeFullName}.${method.name}@${method.line}:${method.character}`);
+    }
+  }
+
+  return missing;
+}
+
+/** Converts nested namespace/type ancestors into a full C# type name. */
+function findNearestTypeFullName(ancestors: readonly vscode.DocumentSymbol[]): string | undefined {
+  const namespaces = ancestors
+    .filter(ancestor => ancestor.kind === vscode.SymbolKind.Namespace)
+    .map(ancestor => normalizeSymbolName(ancestor.name));
+  const type = [...ancestors].reverse().find(ancestor =>
+    ancestor.kind === vscode.SymbolKind.Class ||
+    ancestor.kind === vscode.SymbolKind.Struct ||
+    ancestor.kind === vscode.SymbolKind.Interface ||
+    ancestor.kind === vscode.SymbolKind.Enum
+  );
+
+  return type ? [...namespaces, normalizeSymbolName(type.name)].filter(Boolean).join('.') : undefined;
+}
+
+/** Checks whether the provider is still reporting only namespace containers. */
+function containsOnlyNamespaceSymbols(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): boolean {
+  if (symbols.length === 0) {
+    return false;
+  }
+
+  return symbols.every(symbol => {
+    if (symbol.kind !== vscode.SymbolKind.Namespace) {
+      return false;
+    }
+
+    return isSymbolInformation(symbol) ||
+      symbol.children.length === 0 ||
+      containsOnlyNamespaceSymbols(symbol.children);
+  });
+}
+
+/** Formats provider symbols without dumping full VS Code object graphs. */
+function describeProviderSymbolShape(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): unknown[] {
+  return symbols.map(symbol => {
+    if (isSymbolInformation(symbol)) {
+      return {
+        name: symbol.name,
+        kind: symbol.kind,
+        containerName: symbol.containerName,
+        range: describeRange(symbol.location.range)
+      };
+    }
+
+    return {
+      name: symbol.name,
+      kind: symbol.kind,
+      detail: symbol.detail,
+      range: describeRange(symbol.range),
+      selectionRange: describeRange(symbol.selectionRange),
+      children: describeProviderSymbolShape(symbol.children)
+    };
+  });
+}
+
+/** Formats a VS Code range into a JSON-friendly object for failure messages. */
+function describeRange(range: vscode.Range): unknown {
+  return {
+    start: { line: range.start.line, character: range.start.character },
+    end: { line: range.end.line, character: range.end.character }
+  };
+}
+
+/** Fails readiness with raw provider shape and adapter status. */
+function failCSharpReadiness(
+  uri: vscode.Uri,
+  required: RequiredCSharpMembers,
+  missing: readonly string[],
+  members: readonly ProviderMemberSnapshot[],
+  rawSymbols: readonly unknown[],
+  serviceError: string | undefined
+): never {
+  assert.fail(
+    `C# provider did not expose required member ranges for ${uri.fsPath}. ` +
+    `Expected: ${formatRequiredMembers(required)}. ` +
+    `Missing: ${missing.join(', ') || '<none>'}. ` +
+    `Members: ${members.map(member => `${member.fullTypeName ?? '<global>'}.${member.name}@${member.range.start.line}:${member.range.start.character}`).join(', ') || '<none>'}. ` +
+    `Service error: ${serviceError ?? '<none>'}. ` +
+    `C# readiness: ${JSON.stringify(getCSharpProviderReadinessState() ?? {})}. ` +
+    `Raw symbols: ${JSON.stringify(rawSymbols)}.`
+  );
+}
+
+/** Creates a human-readable readiness target summary. */
+function formatRequiredMembers(required: RequiredCSharpMembers): string {
+  return [
+    required.typeFullName,
+    ...required.fields.map(field => `field:${field.name}@${field.line}:${field.character}`),
+    ...required.methods.map(method => `method:${method.name}@${method.line}:${method.character}`)
+  ].join(', ');
+}
+
+/** Checks for SymbolInformation without relying on instanceof across extension-host boundaries. */
+function isSymbolInformation(symbol: vscode.DocumentSymbol | vscode.SymbolInformation): symbol is vscode.SymbolInformation {
+  return 'location' in symbol;
+}
+
+/** Normalizes C# provider labels such as Fire() and trailing namespace dots. */
+function normalizeSymbolName(name: string): string {
+  return name.replace(/\(.*\)$/, '').replace(/\.$/, '');
+}
+
+/** Normalizes provider container names to match full type names. */
+function normalizeContainerName(name: string | undefined): string | undefined {
+  return name?.replace(/\.$/, '');
+}
+
+/** Compares provider full names by exact name or by the final C# type segment. */
+function matchesCSharpTypeName(actual: string, expected: string): boolean {
+  return actual.toLowerCase() === expected.toLowerCase() ||
+    actual.split('.').at(-1)?.toLowerCase() === expected.split('.').at(-1)?.toLowerCase();
 }
 
 /** Creates the serialized-instance runtime view over the same fixture services. */
@@ -97,16 +474,8 @@ function createSerializedFixtureRuntime(runtime: EventReferenceRuntime): Seriali
   };
 }
 
-/** Waits past the initial C# provider cooldown before asking CodeLens again. */
-async function waitForCodeLensRetry(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 1200));
-}
-
-/** Creates a runtime that scans the real Unity fixture while using a controlled C# provider. */
-function createFixtureRuntime(
-  metadataIndex: EventReferenceRuntime['metadataIndex'],
-  csharpLanguageService: CSharpSymbolLanguageService
-): EventReferenceRuntime {
+/** Creates a runtime that uses the real VS Code C# provider and real Unity fixture files. */
+function createRealEventReferenceRuntime(metadataIndex: EventReferenceRuntime['metadataIndex']): EventReferenceRuntime {
   const logger = createMemoryLogger();
   return {
     runtimeVscode: vscode,
@@ -123,20 +492,24 @@ function createFixtureRuntime(
       readTextFile: readDefaultTextFile
     }),
     getCacheVersion: () => 0,
-    csharpLanguageService,
-    resolveCSharpType: async fullTypeName => {
-      if (fullTypeName === 'Amlos.Fixtures.Cannon') {
-        return 'Assets/Scripts/Cannon.cs';
-      }
-
-      return fullTypeName === 'Amlos.Control.Interact.Interactable'
-        ? 'Assets/Scripts/Interactable.cs'
-        : undefined;
-    }
+    csharpLanguageService: createVscodeCSharpLanguageService(vscode)
   };
 }
 
-/** Creates a controller whose index is already built for deterministic CodeLens tests. */
+/** Creates a controller whose index is intentionally not ready. */
+function createNotReadyEventIndexController(runtimeVscode: typeof vscode): UnityEventReferenceIndexController {
+  const emitter = new runtimeVscode.EventEmitter<void>();
+  return {
+    onDidChangeCodeLenses: emitter.event,
+    getStatus: () => 'building',
+    getReadyIndex: () => undefined,
+    scheduleBuild: () => undefined,
+    forceBuild: async () => undefined,
+    notifyCodeLensesChanged: () => emitter.fire()
+  };
+}
+
+/** Creates a controller whose index is already built for deterministic CodeLens provider checks. */
 function createReadyEventIndexController(
   index: UnitySerializedAssetReferenceIndex,
   runtimeVscode: typeof vscode
@@ -150,137 +523,6 @@ function createReadyEventIndexController(
     forceBuild: async () => index,
     notifyCodeLensesChanged: () => emitter.fire()
   };
-}
-
-interface DeferredCSharpService extends CSharpSymbolLanguageService {
-  markReady(): void;
-}
-
-/** Creates a C# service that first behaves like a warming server, then returns fixture symbols. */
-function createDeferredCSharpService(): DeferredCSharpService {
-  let ready = false;
-
-  function throwIfNotReady(): void {
-    if (!ready) {
-      throw new Error('C# document symbol provider returned namespace-only symbols for fixture symbols.');
-    }
-  }
-
-  return {
-    markReady() {
-      ready = true;
-    },
-    async getPrimaryTopLevelType() {
-      throwIfNotReady();
-      return undefined;
-    },
-    async findReferences() {
-      return [];
-    },
-    async buildRenameEdit() {
-      return undefined;
-    },
-    async findMethods(uri) {
-      throwIfNotReady();
-      return getMethodSymbols(uri.fsPath);
-    },
-    async findTypes(uri) {
-      throwIfNotReady();
-      return getTypeSymbols(uri.fsPath);
-    },
-    async findUnityEventFields(uri) {
-      throwIfNotReady();
-      return getFieldSymbols(uri.fsPath);
-    },
-    async findMethodAtPosition(uri, position) {
-      throwIfNotReady();
-      return getMethodSymbols(uri.fsPath).find(method => containsPosition(method.range, position));
-    },
-    async findUnityEventFieldAtPosition(uri, position) {
-      throwIfNotReady();
-      return getFieldSymbols(uri.fsPath).find(field => containsPosition(field.range, position));
-    },
-    async findTargetMethodPosition(uri, _targetTypeName, methodName) {
-      throwIfNotReady();
-      return getMethodSymbols(uri.fsPath)
-        .filter(method => method.name === methodName)
-        .map(method => method.range.start);
-    },
-    async isUnityObjectType() {
-      throwIfNotReady();
-      return true;
-    }
-  };
-}
-
-/** Returns fixture method symbols by script path. */
-function getMethodSymbols(fsPath: string): CSharpMethodSymbolSnapshot[] {
-  if (normalizeFsPath(fsPath).endsWith('/assets/scripts/cannon.cs')) {
-    return [{
-      name: 'Fire',
-      typeName: 'Amlos.Fixtures.Cannon',
-      range: createRange(6, 16, 20)
-    }];
-  }
-
-  return [];
-}
-
-/** Returns fixture type symbols by script path. */
-function getTypeSymbols(fsPath: string): CSharpTypeSymbolSnapshot[] {
-  if (normalizeFsPath(fsPath).endsWith('/assets/scripts/interactable.cs')) {
-    return [{
-      name: 'Interactable',
-      fullName: 'Amlos.Control.Interact.Interactable',
-      range: createRange(5, 24, 36)
-    }];
-  }
-
-  if (normalizeFsPath(fsPath).endsWith('/assets/scripts/cannon.cs')) {
-    return [{
-      name: 'Cannon',
-      fullName: 'Amlos.Fixtures.Cannon',
-      range: createRange(4, 20, 26)
-    }];
-  }
-
-  return [];
-}
-
-/** Returns fixture UnityEvent field symbols by script path. */
-function getFieldSymbols(fsPath: string): CSharpFieldSymbolSnapshot[] {
-  if (!normalizeFsPath(fsPath).endsWith('/assets/scripts/interactable.cs')) {
-    return [];
-  }
-
-  return [{
-    name: 'OnCheckEnable',
-    typeName: 'Amlos.Control.Interact.Interactable',
-    range: createRange(7, 26, 39)
-  }];
-}
-
-/** Creates a C# range for fixture symbols. */
-function createRange(line: number, startCharacter: number, endCharacter: number): CSharpMethodSymbolSnapshot['range'] {
-  return {
-    start: { line, character: startCharacter },
-    end: { line, character: endCharacter }
-  };
-}
-
-/** Checks whether a position lies inside a fixture symbol range. */
-function containsPosition(
-  range: CSharpMethodSymbolSnapshot['range'],
-  position: { line: number; character: number }
-): boolean {
-  return range.start.line === position.line &&
-    range.start.character <= position.character &&
-    position.character <= range.end.character;
-}
-
-/** Normalizes paths for Windows-safe fixture matching. */
-function normalizeFsPath(path: string): string {
-  return path.replace(/\\/g, '/').toLowerCase();
 }
 
 /** Creates a quiet logger for integration fixtures. */

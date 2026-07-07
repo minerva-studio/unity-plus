@@ -53,17 +53,17 @@ export function createReferenceIndex(
   const getReferences = (scriptPath: string, methodName: string, typeName?: string): readonly UnityEventReference[] =>
     mergeUniqueReferences(
       referencesByKey.get(referenceKey(scriptPath, methodName)),
-      typeName ? referencesByTypeKey.get(typeReferenceKey(typeName, methodName)) : undefined
+      typeName ? getTypeKeyReferences(referencesByTypeKey, typeName, methodName) : undefined
     );
   const getFieldReferences = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
     mergeUniqueReferences(
-      filterByType(referencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
-      typeName ? referencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
+      referencesByFieldKey.get(referenceKey(scriptPath, fieldName)),
+      typeName ? getTypeKeyReferences(referencesByFieldTypeKey, typeName, fieldName) : undefined
     );
   const getFieldTargets = (scriptPath: string, fieldName: string, typeName?: string): readonly UnityEventReference[] =>
     mergeUniqueReferences(
-      filterByType(targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)), typeName, reference => reference.eventOwnerTypeName),
-      typeName ? targetReferencesByFieldTypeKey.get(fieldTypeReferenceKey(typeName, fieldName)) : undefined
+      targetReferencesByFieldKey.get(referenceKey(scriptPath, fieldName)),
+      typeName ? getTypeKeyReferences(targetReferencesByFieldTypeKey, typeName, fieldName) : undefined
     );
 
   return {
@@ -206,23 +206,6 @@ function mergeUniqueReferences<T>(first: readonly T[] | undefined, second: reado
   return merged;
 }
 
-/** Narrows fallback references to the requested owner type when type metadata exists. */
-function filterByType<T>(
-  references: readonly T[] | undefined,
-  typeName: string | undefined,
-  getTypeName: (reference: T) => string | undefined
-): readonly T[] | undefined {
-  if (!references || !typeName) {
-    return references;
-  }
-
-  const requestedTypeKey = typeKey(typeName);
-  return references.filter(reference => {
-    const referenceTypeName = getTypeName(reference);
-    return !referenceTypeName || typeKey(referenceTypeName) === requestedTypeKey;
-  });
-}
-
 /** Creates a script-path and member-name lookup key. */
 function referenceKey(scriptPath: string, methodName: string): string {
   return `${pathReferenceKey(scriptPath)}#${methodName}`;
@@ -252,6 +235,37 @@ function hasAnyKeyForType(map: ReadonlyMap<string, readonly UnityEventReference[
   }
 
   return false;
+}
+
+/** Finds member references by exact or short owner type name. */
+function getTypeKeyReferences(
+  map: ReadonlyMap<string, readonly UnityEventReference[]>,
+  typeName: string,
+  memberName: string
+): readonly UnityEventReference[] | undefined {
+  const requestedType = typeKey(typeName);
+  const requestedShortType = shortTypeKey(typeName);
+  const matches: UnityEventReference[] = [];
+
+  for (const [key, references] of map.entries()) {
+    const separatorIndex = key.indexOf('#');
+    const keyType = key.slice(0, separatorIndex);
+    const keyMemberName = key.slice(separatorIndex + 1);
+    if (keyMemberName !== memberName) {
+      continue;
+    }
+
+    if (keyType === requestedType || shortTypeKey(keyType) === requestedShortType) {
+      matches.push(...references);
+    }
+  }
+
+  return matches.length > 0 ? matches : undefined;
+}
+
+/** Returns the case-insensitive final segment of a type key. */
+function shortTypeKey(typeName: string): string {
+  return typeKey(typeName).split('.').at(-1) ?? typeKey(typeName);
 }
 
 /** Uses the script file name as a cheap prefilter before provider symbols supply full type names. */

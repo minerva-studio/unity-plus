@@ -415,7 +415,7 @@ describe('eventReferences', () => {
     const secondReadyLenses = await runtime.provideCodeLenses(csharpDocument);
 
     assert.strictEqual(csharpMethodReads, 1);
-    assert.strictEqual(csharpFieldReads, 2);
+    assert.strictEqual(csharpFieldReads, 1);
     assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method'), false);
     assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
     assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget'), true);
@@ -534,7 +534,7 @@ describe('eventReferences', () => {
     assert.strictEqual(lenses.filter(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget').length, 2);
   });
 
-  it('skips C# field queries for scripts without indexed UnityEvent bindings', async () => {
+  it('keeps unrelated field symbols from rendering UnityEvent field lenses', async () => {
     const runtime = createEventReferenceRuntime();
     const gateDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -567,20 +567,21 @@ describe('eventReferences', () => {
       csharpLanguageService: {
         ...createFakeCSharpSymbolLanguageService({}),
         async findMethods(uri) {
-          if (uri.fsPath.endsWith('Gate.cs')) {
+          if (uri.fsPath.replace(/\\/g, '/').endsWith('/Assets/Gate.cs')) {
             throw new Error('C# method symbols not ready');
           }
 
           return [];
         },
         async findUnityEventFields(uri) {
-          if (uri.fsPath.endsWith('OtherGate.cs')) {
+          const normalizedPath = uri.fsPath.replace(/\\/g, '/');
+          if (normalizedPath.endsWith('/Assets/OtherGate.cs')) {
             otherFieldReads += 1;
           }
 
           return [{
             name: 'OnCheckEnable',
-            typeName: uri.fsPath.endsWith('OtherGate.cs') ? 'OtherGate' : 'Gate',
+            typeName: normalizedPath.endsWith('/Assets/OtherGate.cs') ? 'OtherGate' : 'Gate',
             range: {
               start: { line: 3, character: 20 },
               end: { line: 3, character: 33 }
@@ -2046,7 +2047,12 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
       const results = await Promise.all(codeLensProviders.map(async provider =>
         await provider.provideCodeLenses(document, token) ?? []
       ));
-      return results.flat();
+      await Promise.resolve();
+      await Promise.resolve();
+      const refreshedResults = await Promise.all(codeLensProviders.map(async provider =>
+        await provider.provideCodeLenses(document, token) ?? []
+      ));
+      return refreshedResults.flat();
     },
     async provideHover(
       document: vscode.TextDocument,

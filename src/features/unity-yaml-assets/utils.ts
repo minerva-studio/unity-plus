@@ -52,7 +52,8 @@ export async function readDefaultTextFile(uri: vscode.Uri, runtimeVscode: typeof
 
 /** Returns the final segment of a managed type name. */
 export function shortTypeName(fullTypeName: string): string {
-  return fullTypeName.split('.').at(-1) ?? fullTypeName;
+  const typeName = fullTypeName.split(',')[0]?.trim() ?? fullTypeName;
+  return typeName.split('.').at(-1) ?? typeName;
 }
 
 /** Finds the last namespace declaration before a type declaration offset. */
