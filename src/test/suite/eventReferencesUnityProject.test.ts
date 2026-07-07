@@ -107,9 +107,9 @@ suite('eventReferences - Real Unity Project Shape', () => {
 
       assert.strictEqual(commandRecorder.calls.length, 2);
       assert.strictEqual(normalizeFsPath(commandRecorder.calls[0].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Prefabs', 'Gate.prefab')));
-      assert.strictEqual(normalizeFsPath(commandRecorder.calls[1].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Prefabs', 'Gate.prefab')));
-      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.line, 14);
-      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.character, 22);
+      assert.strictEqual(normalizeFsPath(commandRecorder.calls[1].locations[0].uri.fsPath), normalizeFsPath(join(fixtureRoot.fsPath, 'Assets', 'Scripts', 'Cannon.cs')));
+      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.line, 6);
+      assert.strictEqual(commandRecorder.calls[1].locations[0].range.start.character, 16);
     } finally {
       metadataIndex.dispose();
     }

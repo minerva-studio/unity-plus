@@ -76,6 +76,8 @@ describe('package manifest', () => {
     assert.ok(bundle['Unity Plus: Install the Unity Visual Studio Editor package (com.unity.ide.visualstudio) in this Unity project.']);
     assert.ok(bundle['Unity Plus: Open a Unity project before creating a C# script.']);
     assert.ok(bundle['{count} UnityEvent references']);
+    assert.strictEqual(bundle['{count} UnityEvent targets'], '{count} UnityEvent 目标');
+    assert.strictEqual(bundle['- UnityEvent targets'], '- UnityEvent 目标');
   });
 
   it('contributes explicit commands for creating Unity C# scripts', () => {

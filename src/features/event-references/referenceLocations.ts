@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 import type { UnityEventReference, UnitySerializedAssetReferenceIndex } from './model';
 import type { EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
-import { escapeMarkdown, toWorkspaceUri } from './utils';
+import { errorMessage, escapeMarkdown, toWorkspaceUri } from './utils';
 
 /** Builds hover markdown that summarizes UnityEvent references for a C# symbol. */
 export function createHoverMarkdown(
@@ -48,7 +48,7 @@ function getReferencesForLocationTarget(
   return index.getFieldReferences(target.scriptPath, target.symbolName, target.typeName);
 }
 
-/** Creates the empty-location message for field targets without implying C# Invoke references. */
+/** Creates the empty-location message for unresolved YAML or C# target locations. */
 function createNoEventReferenceLocationsMessage(
   runtimeVscode: typeof vscode,
   kind: EventReferenceLocationTarget['kind']
@@ -56,6 +56,77 @@ function createNoEventReferenceLocationsMessage(
   return kind === 'fieldTarget'
     ? runtimeVscode.l10n.t('Unity Plus: no UnityEvent target methods found for this field.')
     : runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.');
+}
+
+/** Shows C# method declarations reached by UnityEvent target bindings. */
+async function showFieldTargetMethodLocations(
+  runtime: EventReferenceRuntime,
+  target: EventReferenceLocationTarget,
+  references: readonly UnityEventReference[]
+): Promise<boolean> {
+  const locations: vscode.Location[] = [];
+  const seen = new Set<string>();
+
+  if (!runtime.csharpLanguageService) {
+    runtime.logger.error(`UnityEvent targets cannot resolve C# method locations for ${target.scriptPath}:${target.symbolName ?? '<unknown>'}: C# language service is unavailable.`);
+    return false;
+  }
+
+  for (const reference of references) {
+    const targetScriptPath = reference.scriptPath;
+    const targetTypeName = reference.targetTypeName || reference.scriptTypeName;
+    const methodName = reference.methodName;
+    if (!targetScriptPath || !targetTypeName || !methodName) {
+      runtime.logger.info(
+        `UnityEvent target skipped unresolved C# method location: ` +
+        `asset=${reference.assetPath}, eventScript=${reference.eventScriptPath ?? '<unknown>'}, ` +
+        `field=${reference.eventFieldName}, targetScript=${targetScriptPath ?? '<unknown>'}, ` +
+        `targetType=${targetTypeName ?? '<unknown>'}, method=${methodName || '<unknown>'}.`
+      );
+      continue;
+    }
+
+    try {
+      const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, targetScriptPath);
+      const positions = await runtime.csharpLanguageService.findTargetMethodPosition(uri, targetTypeName, methodName);
+      for (const position of positions) {
+        const key = `${uri.fsPath}:${position.line}:${position.character}`;
+        if (seen.has(key)) {
+          continue;
+        }
+
+        seen.add(key);
+        locations.push(toCSharpLocation(runtime.runtimeVscode, uri, position));
+      }
+    } catch (error) {
+      runtime.logger.error(
+        `UnityEvent target C# method lookup failed: ` +
+        `asset=${reference.assetPath}, targetScript=${targetScriptPath}, ` +
+        `targetType=${targetTypeName}, method=${methodName}, error=${errorMessage(error)}`
+      );
+    }
+  }
+
+  if (locations.length === 0) {
+    return false;
+  }
+
+  await runtime.runtimeVscode.commands.executeCommand(
+    'editor.action.showReferences',
+    toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
+    target.position,
+    locations
+  );
+  return true;
+}
+
+/** Converts a provider-backed C# method position into a peek location. */
+function toCSharpLocation(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  position: { line: number; character: number }
+): vscode.Location {
+  return new runtimeVscode.Location(uri, new runtimeVscode.Position(position.line, position.character));
 }
 
 /** Shows indexed Unity YAML bindings using the UnityEvent field as the stable peek anchor. */
@@ -103,9 +174,10 @@ export async function showReferenceLocations(
     }
 
     if (target.kind === 'fieldTarget') {
-      // Field-target CodeLens answers where serialized Unity YAML binds this
-      // event field, not where a possible C# target method is declared.
-      await showIndexedYamlLocations(runtime, target, eventReferences);
+      const resolved = await showFieldTargetMethodLocations(runtime, target, eventReferences);
+      if (!resolved) {
+        runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
+      }
       return;
     }
 
@@ -132,9 +204,10 @@ export async function showReferenceLocations(
   }
 
   if (target.kind === 'fieldTarget') {
-    // Field-target CodeLens answers where serialized Unity YAML binds this
-    // event field, not where a possible C# target method is declared.
-    await showIndexedYamlLocations(runtime, target, references);
+    const resolved = await showFieldTargetMethodLocations(runtime, target, references);
+    if (!resolved) {
+      runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
+    }
     return;
   }
 

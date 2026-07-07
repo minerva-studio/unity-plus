@@ -359,8 +359,8 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 2);
     assert.strictEqual(runtime.referenceCommands[1].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[1].position, new FakePosition(3, 20));
-    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
-    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(13, 22));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('keeps UnityEvent field CodeLens when method symbols are unavailable', async () => {
@@ -1107,11 +1107,11 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(4, 25));
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(6, 14));
   });
 
-  it('projects field targets to YAML bindings instead of C# invocation call sites', async () => {
+  it('projects field targets to C# method declarations instead of C# invocation call sites', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -1158,11 +1158,11 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(3, 20));
     assert.strictEqual(runtime.referenceCommands[0].locations.length, 1);
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(9, 14));
   });
 
-  it('does not use field Invoke call sites when showing YAML target bindings', async () => {
+  it('does not fall back to field Invoke call sites when target declarations are missing', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -1201,12 +1201,11 @@ describe('eventReferences', () => {
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
 
-    assert.strictEqual(runtime.referenceCommands.length, 1);
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
   });
 
-  it('deduplicates UnityEvent field target YAML bindings across normal and override assets', async () => {
+  it('deduplicates UnityEvent field target C# method declarations across normal and override assets', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -1260,8 +1259,8 @@ describe('eventReferences', () => {
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands[1].locations.length, 1);
-    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
-    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(13, 22));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('counts all field references but only resolvable field targets for mixed UnityEvent calls', async () => {
@@ -1443,7 +1442,8 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/GateController.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(3, 20));
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/GateController.prefab');
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/IronDoor.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(2, 14));
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', pastedTargetLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
