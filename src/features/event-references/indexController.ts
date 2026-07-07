@@ -38,6 +38,7 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     const buildContext = scanStatus ? { ...context, scanStatus } : context;
     status = 'building';
     scanStatus?.start('Preparing UnityEvent reference scan', 'Unity refs: project');
+    runtime.logger.info(`UnityEvent ${context.mode} reference scan started.`);
     buildPromise = buildUnityEventReferenceIndex(runtime, undefined, buildContext)
       .then(builtIndex => {
         if (buildVersion !== runtime.getCacheVersion()) {
@@ -48,6 +49,7 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
 
         index = builtIndex;
         status = 'ready';
+        runtime.logger.info(`UnityEvent ${context.mode} reference scan completed: ${builtIndex.getDiagnostics().resolvedReferenceCount} reference(s), ${builtIndex.getDiagnostics().serializedInstanceCount} serialized instance(s), ${builtIndex.getDiagnostics().elapsedMilliseconds}ms.`);
         scanStatus?.finish('completed', builtIndex.getDiagnostics(), {
           label: 'Unity refs: project',
           phase: 'Project scan complete',
@@ -89,6 +91,7 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     }
 
     scheduledBuild = true;
+    runtime.logger.debug('UnityEvent background reference scan scheduled.');
     setTimeout(() => {
       scheduledBuild = false;
       refreshVersion();

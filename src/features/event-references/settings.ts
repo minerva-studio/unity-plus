@@ -5,7 +5,7 @@ import { defaultAssetScanConcurrency } from './runtime';
 export function isEventReferenceAutoScanEnabled(runtimeVscode: typeof vscode): boolean {
   return runtimeVscode.workspace
     .getConfiguration('unityPlus')
-    .get<boolean>('eventReferences.autoScan', false) === true;
+    .get<boolean>('eventReferences.autoScan', true) !== false;
 }
 
 /** Reads the bounded background scan concurrency setting. */

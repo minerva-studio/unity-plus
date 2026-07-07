@@ -58,8 +58,10 @@ export async function createCodeLensesFromIndex(
       safeFindMethods(runtime, document),
       safeFindUnityEventFields(runtime, document)
     ]);
+    options.onCSharpSymbolsReady?.();
   } catch (error) {
     runtime.logger.warn(`UnityEvent method/field CodeLens skipped for ${scriptPath}: ${String(error)}`);
+    options.onCSharpSymbolsUnavailable?.(error);
     return codeLenses;
   }
 

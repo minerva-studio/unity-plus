@@ -44,7 +44,7 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.templates.csharpScript'].default, '');
     assert.strictEqual(properties['unityPlus.templates.scriptableObject'].default, '');
     assert.strictEqual(properties['unityPlus.eventReferences.enabled'].default, true);
-    assert.strictEqual(properties['unityPlus.eventReferences.autoScan'].default, false);
+    assert.strictEqual(properties['unityPlus.eventReferences.autoScan'].default, true);
     assert.strictEqual(properties['unityPlus.eventReferences.backgroundScanConcurrency'].default, 4);
     assert.strictEqual(properties['unityPlus.eventReferences.backgroundScanConcurrency'].minimum, 1);
     assert.strictEqual(properties['unityPlus.eventReferences.backgroundScanConcurrency'].maximum, 16);

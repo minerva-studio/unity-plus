@@ -24,6 +24,7 @@ export async function run(): Promise<void> {
 
   // Register all test files
   mocha.addFile(resolve(testsRoot, 'renameSync.test.js'));
+  mocha.addFile(resolve(testsRoot, 'eventReferencesCodeLens.test.js'));
   mocha.addFile(resolve(testsRoot, 'activation.test.js'));
   mocha.addFile(resolve(testsRoot, 'metaFiles.test.js'));
   mocha.addFile(resolve(testsRoot, 'projectSync.test.js'));

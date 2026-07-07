@@ -6,12 +6,58 @@ import type { EventReferenceLocationTarget, EventReferenceRuntime, UnityEventRef
 import { isEventReferenceAutoScanEnabled } from './settings';
 import { errorMessage, isCancellationRequested, toProjectPath } from './utils';
 
+const csharpRetryInitialDelayMilliseconds = 1000;
+const csharpRetryMaximumDelayMilliseconds = 10000;
+
 /** Creates the VS Code provider facade that delegates scanning, rendering, and location display. */
 export function createEventReferenceProvider(
   runtime: EventReferenceRuntime,
   controller: UnityEventReferenceIndexController,
   isEnabled: () => boolean
 ): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
+  let csharpRetryTimer: NodeJS.Timeout | undefined;
+  let csharpRetryDelayMilliseconds = csharpRetryInitialDelayMilliseconds;
+  let csharpRetryLogCount = 0;
+
+  /** Queues a bounded CodeLens refresh while the C# server is still warming up. */
+  function scheduleCSharpCodeLensRetry(scriptPath: string, error: unknown): void {
+    if (csharpRetryTimer) {
+      return;
+    }
+
+    csharpRetryLogCount += 1;
+    const message = errorMessage(error);
+    if (csharpRetryLogCount === 1 || csharpRetryLogCount % 5 === 0) {
+      runtime.logger.info(`UnityEvent CodeLens is waiting for C# symbols before showing method and field hints for ${scriptPath}: ${message}`);
+    } else {
+      runtime.logger.debug(`UnityEvent CodeLens C# symbol retry for ${scriptPath}: ${message}`);
+    }
+
+    csharpRetryTimer = setTimeout(() => {
+      csharpRetryTimer = undefined;
+      controller.notifyCodeLensesChanged();
+      csharpRetryDelayMilliseconds = Math.min(
+        csharpRetryMaximumDelayMilliseconds,
+        csharpRetryDelayMilliseconds * 2
+      );
+    }, csharpRetryDelayMilliseconds);
+  }
+
+  /** Clears C# retry state after provider-backed symbols become available. */
+  function markCSharpCodeLensReady(): void {
+    if (csharpRetryTimer) {
+      clearTimeout(csharpRetryTimer);
+      csharpRetryTimer = undefined;
+    }
+
+    if (csharpRetryLogCount > 0) {
+      runtime.logger.info('UnityEvent CodeLens C# symbols are ready; method and field hints can render.');
+    }
+
+    csharpRetryDelayMilliseconds = csharpRetryInitialDelayMilliseconds;
+    csharpRetryLogCount = 0;
+  }
+
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
     async provideCodeLenses(document, token) {
@@ -29,18 +75,19 @@ export function createEventReferenceProvider(
           }
 
           if (isEventReferenceAutoScanEnabled(runtime.runtimeVscode)) {
+            // CodeLens should start the YAML index but never wait for it. VS Code
+            // will ask again after the controller fires a CodeLens refresh.
+            runtime.logger.debug(`UnityEvent CodeLens requested before index was ready for ${scriptPath}; scheduling background scan.`);
             controller.scheduleBuild();
           }
-
-          // CodeLens requests must stay cheap while the serialized-asset index
-          // is unavailable. Returning no UnityEvent lenses keeps other providers
-          // responsive and avoids waking the C# server before it is ready.
           return [];
         }
 
         return await createCodeLensesFromIndex(runtime, document, index, {
           embedReferences: false,
-          includeZeroSummaryLenses: true
+          includeZeroSummaryLenses: true,
+          onCSharpSymbolsUnavailable: error => scheduleCSharpCodeLensRetry(scriptPath, error),
+          onCSharpSymbolsReady: markCSharpCodeLensReady
         });
       } catch (error) {
         runtime.logger.warn(`UnityEvent CodeLens failed for ${scriptPath}: ${errorMessage(error)}`);

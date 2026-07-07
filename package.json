@@ -183,7 +183,7 @@
         },
         "unityPlus.eventReferences.autoScan": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "%configuration.eventReferences.autoScan.description%"
         },
         "unityPlus.eventReferences.backgroundScanConcurrency": {
