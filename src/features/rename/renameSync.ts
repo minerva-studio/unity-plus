@@ -357,9 +357,7 @@ export function registerRenameFeature(
 }
 
 export async function runRenameTypeCommand(runtime: RenameTypeCommandRuntime): Promise<RenameTypeCommandResult> {
-  return await runtime.showProgress('Unity Plus: Preparing rename...', async () =>
-    await runPreparedRenameTypeCommand(runtime)
-  );
+  return await runPreparedRenameTypeCommand(runtime);
 }
 
 async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): Promise<RenameTypeCommandResult> {

@@ -9,6 +9,7 @@ import {
   buildScriptFilenameSyncOperations,
   buildAssetMetaRenameOperations,
   applyScriptFilenameSyncPlan,
+  runRenameTypeCommand,
   ScriptFilenameSyncPlan,
   ScriptFileRenameOperation,
 } from '../../features/rename/renameSync';
@@ -439,6 +440,82 @@ suite('renameSync - Real C# Provider Command Routing', () => {
         `field rename should fall back before the old 2s type-settle wait; elapsed=${elapsedMs}ms; ${formatCSharpReadinessFailure()}`
       );
     } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    }
+  });
+
+  test('does not show Unity Plus progress before falling back from a real field rename', async function () {
+    this.timeout(30000);
+    const root = getUnityFixtureRoot();
+    await configureCSharpSolution(root);
+
+    const uri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs'));
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+    const fieldPosition = findTextPosition(document, 'OnCheckEnable');
+    editor.selection = new vscode.Selection(fieldPosition, fieldPosition);
+
+    const progressTitles: string[] = [];
+    const languageService = createVscodeCSharpLanguageService(vscode);
+    const cancelTimer = setInterval(() => {
+      void cancelRenameInputIfVisible();
+    }, 100);
+
+    try {
+      const result = await runRenameTypeCommand({
+        editor: {
+          languageId: document.languageId,
+          uri: document.uri,
+          filePath: document.uri.fsPath,
+          cursor: {
+            line: fieldPosition.line,
+            character: fieldPosition.character
+          }
+        },
+        mode: 'on',
+        previewMode: 'silent',
+        languageService,
+        showInputBox: async () => {
+          throw new Error('field rename fallback must not ask for Unity Plus type input');
+        },
+        showRenameInput: async () => {
+          throw new Error('field rename fallback must not ask for Unity Plus rename input');
+        },
+        showProgress: async (title, task) => {
+          progressTitles.push(title);
+          return await task();
+        },
+        showInformationMessage: () => undefined,
+        showWarningMessage: () => undefined,
+        executeNativeRename: async () => await vscode.commands.executeCommand('editor.action.rename'),
+        executeAtomicRename: async () => {
+          throw new Error('field rename fallback must not execute Unity Plus atomic rename');
+        },
+        fileExists: async path => {
+          try {
+            await vscode.workspace.fs.stat(vscode.Uri.file(path));
+            return true;
+          } catch {
+            return false;
+          }
+        },
+        createFileUri: path => vscode.Uri.file(path),
+        applyWorkspaceEdit: async edit => await vscode.workspace.applyEdit(edit),
+        confirmRenamePreview: async () => ({ kind: 'cancelled' }),
+        confirmRenameWarning: async () => false,
+        wait: async ms => await new Promise(resolve => setTimeout(resolve, ms)),
+        retryIntervalMs: 200,
+        settleTimeoutMs: 2000,
+        markSyncing: () => undefined,
+        unmarkSyncing: () => undefined,
+        logger: createTestLogger()
+      });
+
+      assert.strictEqual(result.kind, 'fallback');
+      assert.deepStrictEqual(progressTitles, []);
+    } finally {
+      clearInterval(cancelTimer);
+      await cancelRenameInputIfVisible();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
     }
   });
