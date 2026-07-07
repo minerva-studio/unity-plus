@@ -1,7 +1,6 @@
 import type * as vscode from 'vscode';
 import type { UnityEventReference, UnitySerializedAssetReferenceIndex, UnitySerializedInstanceLocation } from './model';
 import type { EventReferenceLocationTarget, EventReferenceRuntime } from './runtime';
-import { isUnityBuiltInTargetTypeName } from './targetTypes';
 import { escapeMarkdown, toWorkspaceUri } from './utils';
 
 /** Builds hover markdown that summarizes UnityEvent references for a C# symbol. */
@@ -67,71 +66,18 @@ function createNoEventReferenceLocationsMessage(
     : runtimeVscode.l10n.t('Unity Plus: no UnityEvent references found for this symbol.');
 }
 
-/** Creates declaration locations for YAML-declared target methods without running click-time target inference. */
-async function createTargetMethodLocations(
-  runtime: EventReferenceRuntime,
-  references: readonly UnityEventReference[]
-): Promise<vscode.Location[]> {
-  const locations: vscode.Location[] = [];
-  const seenLocations = new Set<string>();
-
-  for (const reference of references) {
-    if (!reference.scriptPath || !reference.targetTypeName || isUnityBuiltInTargetTypeName(reference.targetTypeName)) {
-      continue;
-    }
-
-    const uri = toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, reference.scriptPath);
-    try {
-      const positions = await runtime.csharpLanguageService?.findTargetMethodPosition(
-        uri,
-        reference.targetTypeName,
-        reference.methodName
-      );
-
-      if (positions?.length) {
-        for (const position of positions) {
-          appendUniqueLocation(
-            locations,
-            seenLocations,
-            new runtime.runtimeVscode.Location(uri, toVscodePosition(runtime.runtimeVscode, position))
-          );
-        }
-      }
-    } catch {
-      // Missing or unreadable scripts cannot provide target locations, but other targets may still resolve.
-    }
-  }
-
-  return locations;
-}
-
-/** Shows YAML-declared target methods using the UnityEvent field as the stable peek anchor. */
-async function showTargetMethodLocations(
+/** Shows indexed Unity YAML bindings using the UnityEvent field as the stable peek anchor. */
+async function showIndexedYamlLocations(
   runtime: EventReferenceRuntime,
   target: EventReferenceLocationTarget,
-  locations: readonly vscode.Location[]
+  references: readonly UnityEventReference[]
 ): Promise<void> {
   await runtime.runtimeVscode.commands.executeCommand(
     'editor.action.showReferences',
     toWorkspaceUri(runtime.runtimeVscode, runtime.metadataIndex.root, target.scriptPath),
     target.position,
-    locations
+    references.map(reference => toReferenceLocation(runtime.runtimeVscode, runtime.metadataIndex.root, reference))
   );
-}
-
-/** Appends one location while avoiding repeated target declarations in the peek list. */
-function appendUniqueLocation(
-  locations: vscode.Location[],
-  seenLocations: Set<string>,
-  location: vscode.Location
-): void {
-  const key = `${location.uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
-  if (seenLocations.has(key)) {
-    return;
-  }
-
-  seenLocations.add(key);
-  locations.push(location);
 }
 
 /** Converts a UnityEvent YAML reference into a VS Code peek location. */
@@ -152,11 +98,6 @@ function toSerializedInstanceLocation(
 ): vscode.Location {
   const position = new runtimeVscode.Position(reference.line, reference.character);
   return new runtimeVscode.Location(toWorkspaceUri(runtimeVscode, root, reference.assetPath), position);
-}
-
-/** Converts language-service positions back into VS Code positions for peek locations. */
-function toVscodePosition(runtimeVscode: typeof vscode, position: { line: number; character: number }): vscode.Position {
-  return new runtimeVscode.Position(position.line, position.character);
 }
 
 /** Shows references or serialized instances for a CodeLens command target. */
@@ -196,13 +137,9 @@ export async function showReferenceLocations(
     }
 
     if (target.kind === 'fieldTarget') {
-      const locations = await createTargetMethodLocations(runtime, eventReferences);
-      if (locations.length === 0) {
-        runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
-        return;
-      }
-
-      await showTargetMethodLocations(runtime, target, locations);
+      // Field-target CodeLens answers where serialized Unity YAML binds this
+      // event field, not where a possible C# target method is declared.
+      await showIndexedYamlLocations(runtime, target, eventReferences);
       return;
     }
 
@@ -247,13 +184,9 @@ export async function showReferenceLocations(
   const eventReferences = references as readonly UnityEventReference[];
 
   if (target.kind === 'fieldTarget') {
-    const locations = await createTargetMethodLocations(runtime, eventReferences);
-    if (locations.length === 0) {
-      runtime.runtimeVscode.window.showInformationMessage(createNoEventReferenceLocationsMessage(runtime.runtimeVscode, target.kind));
-      return;
-    }
-
-    await showTargetMethodLocations(runtime, target, locations);
+    // Field-target CodeLens answers where serialized Unity YAML binds this
+    // event field, not where a possible C# target method is declared.
+    await showIndexedYamlLocations(runtime, target, eventReferences);
     return;
   }
 

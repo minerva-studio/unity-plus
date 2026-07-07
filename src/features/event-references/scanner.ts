@@ -149,6 +149,22 @@ async function createBuildScopedTypeResolver(
     };
   }
 
+  if (context.mode === 'background') {
+    let loggedSkip = false;
+    return async fullTypeName => {
+      throwIfCancellationRequested(context.cancellationToken);
+
+      if (!loggedSkip) {
+        // Background scans must stay YAML/metadata-only so CodeLens startup does
+        // not compete with the C# language server while it is still warming up.
+        runtime.logger.debug(`UnityEvent background scan skipped C# type index for ${fullTypeName}.`);
+        loggedSkip = true;
+      }
+
+      return undefined;
+    };
+  }
+
   let typeIndexPromise: Promise<CSharpTypeIndex> | undefined;
   return async fullTypeName => {
     throwIfCancellationRequested(context.cancellationToken);

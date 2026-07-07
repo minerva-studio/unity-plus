@@ -27,7 +27,7 @@ export function createEventReferenceProvider(
 
     csharpRetryLogCount += 1;
     const message = errorMessage(error);
-    if (csharpRetryLogCount === 1 || csharpRetryLogCount % 5 === 0) {
+    if (csharpRetryLogCount === 1 || csharpRetryLogCount % 10 === 0) {
       runtime.logger.info(`UnityEvent CodeLens is waiting for C# symbols before showing method and field hints for ${scriptPath}: ${message}`);
     } else {
       runtime.logger.debug(`UnityEvent CodeLens C# symbol retry for ${scriptPath}: ${message}`);
@@ -86,6 +86,7 @@ export function createEventReferenceProvider(
         return await createCodeLensesFromIndex(runtime, document, index, {
           embedReferences: false,
           includeZeroSummaryLenses: true,
+          skipCSharpSymbols: !!csharpRetryTimer,
           onCSharpSymbolsUnavailable: error => scheduleCSharpCodeLensRetry(scriptPath, error),
           onCSharpSymbolsReady: markCSharpCodeLensReady
         });

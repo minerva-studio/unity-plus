@@ -104,6 +104,8 @@ export interface PriorityScanState {
 export interface CodeLensRenderOptions {
   embedReferences: boolean;
   includeZeroSummaryLenses?: boolean;
+  /** When true, render YAML-only lenses while C# symbol retry backoff is active. */
+  skipCSharpSymbols?: boolean;
   /** Called when C# symbols are not ready, so the provider can retry later. */
   onCSharpSymbolsUnavailable?: (error: unknown) => void;
   /** Called after C# symbols are read successfully, so retry state can reset. */

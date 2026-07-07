@@ -10,6 +10,7 @@ export function createUnityEventReferenceScanStatus(
   logger: UnityPlusLogger,
   formatDiagnostics: (runtimeVscode: typeof vscode, diagnostics: UnityEventReferenceDiagnostics) => string
 ): UnityEventReferenceScanStatusReporter {
+  void formatDiagnostics;
   const window = runtimeVscode.window as typeof runtimeVscode.window & {
     createStatusBarItem?: (alignment?: vscode.StatusBarAlignment, priority?: number) => vscode.StatusBarItem;
   };
@@ -85,7 +86,7 @@ export function createUnityEventReferenceScanStatus(
       }
 
       if (diagnostics) {
-        logger.info(`UnityEvent background reference scan ${result}: ${formatDiagnostics(runtimeVscode, diagnostics)}.`);
+        logger.info(`UnityEvent background reference scan ${result}: ${formatDiagnosticsForLog(diagnostics)}.`);
       } else {
         logger.info(`UnityEvent background reference scan ${result}.`);
       }
@@ -98,6 +99,21 @@ export function createUnityEventReferenceScanStatus(
       item?.dispose();
     }
   };
+}
+
+/** Formats scan diagnostics for logs without localized UI text or encoding risk. */
+function formatDiagnosticsForLog(diagnostics: UnityEventReferenceDiagnostics): string {
+  return [
+    `${diagnostics.candidateAssetCount} candidate asset(s)`,
+    `${diagnostics.assetReadCount} read`,
+    `${diagnostics.prefabCount} prefab(s)`,
+    `${diagnostics.sceneCount} scene(s)`,
+    `${diagnostics.assetCount} asset file(s)`,
+    `${diagnostics.resolvedReferenceCount} UnityEvent reference(s)`,
+    `${diagnostics.serializedInstanceCount} serialized instance(s)`,
+    `${diagnostics.resolvedByTargetTypeNameCount} target method(s) resolved by type name`,
+    `${diagnostics.elapsedMilliseconds}ms`
+  ].join(', ');
 }
 
 /** Formats the status bar tooltip without allocating parser-side state. */

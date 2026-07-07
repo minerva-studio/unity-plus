@@ -555,8 +555,8 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 3);
     assert.strictEqual(runtime.referenceCommands[2].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[2].position, new FakePosition(3, 20));
-    assert.strictEqual(runtime.referenceCommands[2].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
+    assert.strictEqual(runtime.referenceCommands[2].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(13, 22));
   });
 
   it('shows serialized instance CodeLens from YAML without UnityObject type hierarchy checks', async () => {
@@ -623,6 +623,55 @@ describe('eventReferences', () => {
     const lenses = await runtime.provideCodeLenses(csharpDocument);
 
     assert.strictEqual(lenses.some(lens => /Unity serialized instances/.test(lens.command?.title ?? '')), true);
+  });
+
+  it('does not query C# symbols again during CodeLens retry backoff', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    let csharpMethodReads = 0;
+    let csharpFieldReads = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName),
+      csharpLanguageService: {
+        ...createFakeCSharpSymbolLanguageService({}),
+        async findMethods() {
+          csharpMethodReads += 1;
+          throw new Error('C# symbols not ready');
+        },
+        async findUnityEventFields() {
+          csharpFieldReads += 1;
+          throw new Error('C# symbols not ready');
+        }
+      }
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+    await runtime.waitForCodeLensChange();
+
+    const firstReadyLenses = await runtime.provideCodeLenses(csharpDocument);
+    const secondReadyLenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(csharpMethodReads, 1);
+    assert.strictEqual(csharpFieldReads, 1);
+    assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), true);
+    assert.strictEqual(secondReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), true);
   });
 
   it('schedules one background index build after repeated CodeLens requests', async () => {
@@ -1164,11 +1213,11 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(4, 25));
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(6, 14));
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
   });
 
-  it('projects field targets from YAML target methods instead of C# invocation call sites', async () => {
+  it('projects field targets to YAML bindings instead of C# invocation call sites', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -1215,10 +1264,11 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/Gate.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(3, 20));
     assert.strictEqual(runtime.referenceCommands[0].locations.length, 1);
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(9, 14));
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
   });
 
-  it('does not use field Invoke call sites when a YAML target declaration cannot be found', async () => {
+  it('does not use field Invoke call sites when showing YAML target bindings', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -1257,68 +1307,12 @@ describe('eventReferences', () => {
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
 
-    assert.strictEqual(runtime.referenceCommands.length, 0);
-    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(13, 22));
   });
 
-  it('ignores same-name methods outside the YAML target type', async () => {
-    const runtime = createEventReferenceRuntime();
-    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
-      'using UnityEngine.Events;',
-      'public class Gate',
-      '{',
-      '  public UnityEvent OnCheckEnable;',
-      '}'
-    ].join('\n'));
-    const targetDocument = createTextDocument('/Project/Assets/IronDoor.cs', [
-      'public class WrongType',
-      '{',
-      '  public void Open()',
-      '  {',
-      '  }',
-      '}',
-      'public class IronDoor',
-      '{',
-      '}'
-    ].join('\n'));
-    const lazyIndex = createLazyUnityMetadataIndex({
-      root: createUri('/Project'),
-      logger: createTestLogger(),
-      createIndex: () => createMetadataIndex()
-    });
-
-    registerEventReferenceFeature(createTestLogger(), {
-      runtimeVscode: runtime.runtime,
-      metadataIndex: lazyIndex,
-      isEnabled: () => true,
-      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
-      readTextFile: async uri => {
-        if (uri.fsPath.endsWith('Gate.cs')) {
-          return csharpDocument.getText();
-        }
-
-        return uri.fsPath.endsWith('IronDoor.cs')
-          ? targetDocument.getText()
-          : createUnresolvedTargetAssemblyYaml(2);
-      },
-      resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? ironDoorScriptPath : createTypeResolver()(typeName)
-    });
-
-    await assertPendingCodeLenses(runtime, csharpDocument);
-
-    await runtime.waitForCodeLensChange();
-    const lenses = await runtime.provideCodeLenses(csharpDocument);
-    const fieldTargetLens = lenses.find(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget');
-
-    assert.strictEqual(fieldTargetLens?.command?.title, '1 UnityEvent targets');
-
-    await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
-
-    assert.strictEqual(runtime.referenceCommands.length, 0);
-    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
-  });
-
-  it('deduplicates UnityEvent field target CodeLens locations across normal and override bindings', async () => {
+  it('deduplicates UnityEvent field target YAML bindings across normal and override assets', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -1372,8 +1366,8 @@ describe('eventReferences', () => {
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', fieldTargetLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands[1].locations.length, 1);
-    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(4, 14));
+    assert.strictEqual(runtime.referenceCommands[1].locations[0].uri.fsPath, '/Project/Assets/Gate.prefab');
+    assert.deepStrictEqual(runtime.referenceCommands[1].locations[0].range.start, new FakePosition(13, 22));
   });
 
   it('counts all field references but only resolvable field targets for mixed UnityEvent calls', async () => {
@@ -1555,8 +1549,7 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.referenceCommands.length, 1);
     assert.strictEqual(runtime.referenceCommands[0].uri.fsPath, '/Project/Assets/GateController.cs');
     assert.deepStrictEqual(runtime.referenceCommands[0].position, new FakePosition(3, 20));
-    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/IronDoor.cs');
-    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(2, 14));
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/GateController.prefab');
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', pastedTargetLens?.command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
@@ -1677,7 +1670,7 @@ describe('eventReferences', () => {
           }
         }]
       })
-    }, createMetadataIndex());
+    }, createMetadataIndex(), { mode: 'interactive' });
 
     assert.strictEqual(index.getReferenceCount('Assets/Scripts/Gate.cs', 'Interact'), 1);
     assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
@@ -1732,7 +1725,7 @@ describe('eventReferences', () => {
           }];
         }
       }
-    }, createMetadataIndex());
+    }, createMetadataIndex(), { mode: 'interactive' });
 
     const targets = index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Gate');
 
@@ -1740,6 +1733,38 @@ describe('eventReferences', () => {
     assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
     assert.strictEqual(targets.length, 1);
     assert.strictEqual(targets[0].scriptPath, 'Assets/Scripts/IronDoor.cs');
+  });
+
+  it('keeps background scans off the C# type index when YAML metadata is enough', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      findCSharpFiles: async () => {
+        throw new Error('background scans must not enumerate C# files');
+      },
+      readTextFile: async () => createUnresolvedTargetAssemblyYaml(2),
+      csharpLanguageService: {
+        ...createFakeCSharpSymbolLanguageService({}),
+        async findTypes() {
+          throw new Error('background scans must not ask the C# language server for types');
+        }
+      }
+    }, createMetadataIndex(), { mode: 'background' });
+    const targets = index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Gate');
+
+    assert.strictEqual(index.getFieldReferenceCount(gateScriptPath, 'OnCheckEnable', 'Gate'), 1);
+    assert.strictEqual(targets.length, 1);
+    assert.strictEqual(targets[0].scriptPath, undefined);
+    assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 0);
   });
 
   it('does not scan for CodeLens when UnityEvent references are disabled', async () => {

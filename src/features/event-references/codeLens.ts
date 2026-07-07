@@ -51,6 +51,13 @@ export async function createCodeLensesFromIndex(
     }));
   }
 
+  if (options.skipCSharpSymbols) {
+    // During retry backoff, CodeLens must not keep probing the C# server. YAML
+    // instance lenses remain useful while semantic field/method lenses wait.
+    runtime.logger.debug(`UnityEvent CodeLens skipped C# symbols during retry backoff for ${scriptPath}.`);
+    return codeLenses;
+  }
+
   let methods: CSharpMethodSymbolSnapshot[];
   let fields: CSharpFieldSymbolSnapshot[];
   try {
@@ -60,7 +67,9 @@ export async function createCodeLensesFromIndex(
     ]);
     options.onCSharpSymbolsReady?.();
   } catch (error) {
-    runtime.logger.warn(`UnityEvent method/field CodeLens skipped for ${scriptPath}: ${String(error)}`);
+    // C# symbols often arrive after VS Code first asks for CodeLens. Keep the
+    // YAML-backed lenses visible and let the provider retry without warning spam.
+    runtime.logger.debug(`UnityEvent method/field CodeLens skipped for ${scriptPath}: ${String(error)}`);
     options.onCSharpSymbolsUnavailable?.(error);
     return codeLenses;
   }
@@ -186,7 +195,7 @@ async function safeFindMethods(
   try {
     return await runtime.csharpLanguageService?.findMethods(document.uri) ?? [];
   } catch (error) {
-    runtime.logger.warn(`UnityEvent CodeLens could not read C# methods in ${document.uri.fsPath}: ${String(error)}`);
+    runtime.logger.debug(`UnityEvent CodeLens could not read C# methods in ${document.uri.fsPath}: ${String(error)}`);
     throw error;
   }
 }
@@ -199,7 +208,7 @@ async function safeFindUnityEventFields(
   try {
     return await runtime.csharpLanguageService?.findUnityEventFields(document.uri) ?? [];
   } catch (error) {
-    runtime.logger.warn(`UnityEvent CodeLens could not read UnityEvent fields in ${document.uri.fsPath}: ${String(error)}`);
+    runtime.logger.debug(`UnityEvent CodeLens could not read UnityEvent fields in ${document.uri.fsPath}: ${String(error)}`);
     throw error;
   }
 }
