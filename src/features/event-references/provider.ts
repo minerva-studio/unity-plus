@@ -8,6 +8,7 @@ import { errorMessage, isCancellationRequested, toProjectPath } from './utils';
 
 const csharpRetryInitialDelayMilliseconds = 1000;
 const csharpRetryMaximumDelayMilliseconds = 10000;
+type CSharpCodeLensSymbolKind = 'methods' | 'fields';
 
 /** Creates the VS Code provider facade that delegates scanning, rendering, and location display. */
 export function createEventReferenceProvider(
@@ -15,47 +16,87 @@ export function createEventReferenceProvider(
   controller: UnityEventReferenceIndexController,
   isEnabled: () => boolean
 ): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
-  let csharpRetryTimer: NodeJS.Timeout | undefined;
-  let csharpRetryDelayMilliseconds = csharpRetryInitialDelayMilliseconds;
-  let csharpRetryLogCount = 0;
+  const csharpRetryStates = new Map<string, {
+    timer: NodeJS.Timeout;
+    delayMilliseconds: number;
+    logCount: number;
+  }>();
+  const csharpRetryMemory = new Map<string, {
+    delayMilliseconds: number;
+    logCount: number;
+  }>();
+
+  /** Creates a retry key so one script or symbol kind cannot block another. */
+  function csharpRetryKey(scriptPath: string, kind: CSharpCodeLensSymbolKind): string {
+    return `${scriptPath.replace(/\\/g, '/').toLowerCase()}#${kind}`;
+  }
+
+  /** Reads the next retry delay for one script and symbol category. */
+  function getCSharpRetryDelay(scriptPath: string, kind: CSharpCodeLensSymbolKind): number {
+    return csharpRetryMemory.get(csharpRetryKey(scriptPath, kind))?.delayMilliseconds ?? csharpRetryInitialDelayMilliseconds;
+  }
+
+  /** Reads the retry log count for one script and symbol category. */
+  function getCSharpRetryLogCount(scriptPath: string, kind: CSharpCodeLensSymbolKind): number {
+    return csharpRetryMemory.get(csharpRetryKey(scriptPath, kind))?.logCount ?? 0;
+  }
+
+  /** Stores retry backoff state after a timed retry has been scheduled. */
+  function setCSharpRetryDelay(scriptPath: string, kind: CSharpCodeLensSymbolKind, delayMilliseconds: number, logCount: number): void {
+    csharpRetryMemory.set(csharpRetryKey(scriptPath, kind), { delayMilliseconds, logCount });
+  }
+
+  /** Clears retry backoff state once one symbol category becomes available. */
+  function resetCSharpRetry(scriptPath: string, kind: CSharpCodeLensSymbolKind): void {
+    csharpRetryMemory.delete(csharpRetryKey(scriptPath, kind));
+  }
 
   /** Queues a bounded CodeLens refresh while the C# server is still warming up. */
-  function scheduleCSharpCodeLensRetry(scriptPath: string, error: unknown): void {
-    if (csharpRetryTimer) {
+  function scheduleCSharpCodeLensRetry(scriptPath: string, kind: CSharpCodeLensSymbolKind, error: unknown): void {
+    const key = csharpRetryKey(scriptPath, kind);
+    const existingState = csharpRetryStates.get(key);
+    if (existingState) {
       return;
     }
 
-    csharpRetryLogCount += 1;
+    const previousLogCount = getCSharpRetryLogCount(scriptPath, kind);
+    const logCount = previousLogCount + 1;
     const message = errorMessage(error);
-    if (csharpRetryLogCount === 1 || csharpRetryLogCount % 10 === 0) {
-      runtime.logger.info(`UnityEvent CodeLens is waiting for C# symbols before showing method and field hints for ${scriptPath}: ${message}`);
+    if (logCount === 1 || logCount % 10 === 0) {
+      runtime.logger.info(`UnityEvent CodeLens is waiting for C# ${kind} before showing matching hints for ${scriptPath}: ${message}`);
     } else {
-      runtime.logger.debug(`UnityEvent CodeLens C# symbol retry for ${scriptPath}: ${message}`);
+      runtime.logger.debug(`UnityEvent CodeLens C# ${kind} retry for ${scriptPath}: ${message}`);
     }
 
-    csharpRetryTimer = setTimeout(() => {
-      csharpRetryTimer = undefined;
+    const delayMilliseconds = getCSharpRetryDelay(scriptPath, kind);
+    const timer = setTimeout(() => {
+      csharpRetryStates.delete(key);
       controller.notifyCodeLensesChanged();
-      csharpRetryDelayMilliseconds = Math.min(
-        csharpRetryMaximumDelayMilliseconds,
-        csharpRetryDelayMilliseconds * 2
-      );
-    }, csharpRetryDelayMilliseconds);
+      setCSharpRetryDelay(scriptPath, kind, Math.min(csharpRetryMaximumDelayMilliseconds, delayMilliseconds * 2), logCount);
+    }, delayMilliseconds);
+
+    csharpRetryStates.set(key, { timer, delayMilliseconds, logCount });
   }
 
   /** Clears C# retry state after provider-backed symbols become available. */
-  function markCSharpCodeLensReady(): void {
-    if (csharpRetryTimer) {
-      clearTimeout(csharpRetryTimer);
-      csharpRetryTimer = undefined;
+  function markCSharpCodeLensReady(scriptPath: string, kind: CSharpCodeLensSymbolKind): void {
+    const key = csharpRetryKey(scriptPath, kind);
+    const state = csharpRetryStates.get(key);
+    if (state) {
+      clearTimeout(state.timer);
+      csharpRetryStates.delete(key);
     }
 
-    if (csharpRetryLogCount > 0) {
-      runtime.logger.info('UnityEvent CodeLens C# symbols are ready; method and field hints can render.');
+    if (getCSharpRetryLogCount(scriptPath, kind) > 0 || state) {
+      runtime.logger.info(`UnityEvent CodeLens C# ${kind} are ready for ${scriptPath}; matching hints can render.`);
     }
 
-    csharpRetryDelayMilliseconds = csharpRetryInitialDelayMilliseconds;
-    csharpRetryLogCount = 0;
+    resetCSharpRetry(scriptPath, kind);
+  }
+
+  /** Checks whether a script and symbol category is currently in retry backoff. */
+  function isCSharpRetryBackoffActive(scriptPath: string, kind: CSharpCodeLensSymbolKind): boolean {
+    return csharpRetryStates.has(csharpRetryKey(scriptPath, kind));
   }
 
   return {
@@ -86,9 +127,10 @@ export function createEventReferenceProvider(
         return await createCodeLensesFromIndex(runtime, document, index, {
           embedReferences: false,
           includeZeroSummaryLenses: true,
-          skipCSharpSymbols: !!csharpRetryTimer,
-          onCSharpSymbolsUnavailable: error => scheduleCSharpCodeLensRetry(scriptPath, error),
-          onCSharpSymbolsReady: markCSharpCodeLensReady
+          skipCSharpMethods: isCSharpRetryBackoffActive(scriptPath, 'methods'),
+          skipCSharpFields: isCSharpRetryBackoffActive(scriptPath, 'fields'),
+          onCSharpSymbolsUnavailable: (kind, error) => scheduleCSharpCodeLensRetry(scriptPath, kind, error),
+          onCSharpSymbolsReady: kind => markCSharpCodeLensReady(scriptPath, kind)
         });
       } catch (error) {
         runtime.logger.warn(`UnityEvent CodeLens failed for ${scriptPath}: ${errorMessage(error)}`);

@@ -625,12 +625,13 @@ describe('eventReferences', () => {
     assert.strictEqual(lenses.some(lens => /Unity serialized instances/.test(lens.command?.title ?? '')), true);
   });
 
-  it('does not query C# symbols again during CodeLens retry backoff', async () => {
+  it('keeps UnityEvent field CodeLens when method symbols are unavailable', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
       'public class Gate',
       '{',
+      '  public bool CanInteract() => true;',
       '  public UnityEvent OnCheckEnable;',
       '}'
     ].join('\n'));
@@ -657,7 +658,14 @@ describe('eventReferences', () => {
         },
         async findUnityEventFields() {
           csharpFieldReads += 1;
-          throw new Error('C# symbols not ready');
+          return [{
+            name: 'OnCheckEnable',
+            typeName: 'Gate',
+            range: {
+              start: { line: 4, character: 20 },
+              end: { line: 4, character: 33 }
+            }
+          }];
         }
       }
     });
@@ -669,9 +677,130 @@ describe('eventReferences', () => {
     const secondReadyLenses = await runtime.provideCodeLenses(csharpDocument);
 
     assert.strictEqual(csharpMethodReads, 1);
-    assert.strictEqual(csharpFieldReads, 1);
+    assert.strictEqual(csharpFieldReads, 2);
     assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), true);
-    assert.strictEqual(secondReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), true);
+    assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method'), false);
+    assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
+    assert.strictEqual(firstReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget'), true);
+    assert.strictEqual(secondReadyLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
+  });
+
+  it('keeps method and instance CodeLens when UnityEvent field symbols are unavailable', async () => {
+    const runtime = createEventReferenceRuntime();
+    const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public bool CanInteract() => true;',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? csharpDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName),
+      csharpLanguageService: {
+        ...createFakeCSharpSymbolLanguageService({}),
+        async findMethods() {
+          return [{
+            name: 'CanInteract',
+            typeName: 'Gate',
+            range: {
+              start: { line: 3, character: 14 },
+              end: { line: 3, character: 25 }
+            }
+          }];
+        },
+        async findUnityEventFields() {
+          throw new Error('C# field symbols not ready');
+        }
+      }
+    });
+
+    await assertPendingCodeLenses(runtime, csharpDocument);
+    await runtime.waitForCodeLensChange();
+    const lenses = await runtime.provideCodeLenses(csharpDocument);
+
+    assert.strictEqual(lenses.some(lens => lens.command?.arguments?.[0]?.kind === 'serializedInstance'), true);
+    assert.strictEqual(lenses.some(lens => lens.command?.arguments?.[0]?.kind === 'method'), true);
+    assert.strictEqual(lenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), false);
+    assert.strictEqual(lenses.some(lens => lens.command?.arguments?.[0]?.kind === 'fieldTarget'), false);
+  });
+
+  it('keeps retry backoff scoped to one script and C# symbol kind', async () => {
+    const runtime = createEventReferenceRuntime();
+    const gateDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    const otherDocument = createTextDocument('/Project/Assets/OtherGate.cs', [
+      'using UnityEngine.Events;',
+      'public class OtherGate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '}'
+    ].join('\n'));
+    let otherFieldReads = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? gateDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName),
+      csharpLanguageService: {
+        ...createFakeCSharpSymbolLanguageService({}),
+        async findMethods(uri) {
+          if (uri.fsPath.endsWith('Gate.cs')) {
+            throw new Error('C# method symbols not ready');
+          }
+
+          return [];
+        },
+        async findUnityEventFields(uri) {
+          if (uri.fsPath.endsWith('OtherGate.cs')) {
+            otherFieldReads += 1;
+          }
+
+          return [{
+            name: 'OnCheckEnable',
+            typeName: uri.fsPath.endsWith('OtherGate.cs') ? 'OtherGate' : 'Gate',
+            range: {
+              start: { line: 3, character: 20 },
+              end: { line: 3, character: 33 }
+            }
+          }];
+        }
+      }
+    });
+
+    await assertPendingCodeLenses(runtime, gateDocument);
+    await runtime.waitForCodeLensChange();
+
+    const gateLenses = await runtime.provideCodeLenses(gateDocument);
+    const otherLenses = await runtime.provideCodeLenses(otherDocument);
+
+    assert.strictEqual(gateLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
+    assert.strictEqual(otherFieldReads, 1);
+    assert.strictEqual(otherLenses.some(lens => lens.command?.arguments?.[0]?.kind === 'field'), true);
   });
 
   it('schedules one background index build after repeated CodeLens requests', async () => {

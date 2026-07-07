@@ -51,52 +51,103 @@ export async function createCodeLensesFromIndex(
     }));
   }
 
-  if (options.skipCSharpSymbols) {
-    // During retry backoff, CodeLens must not keep probing the C# server. YAML
-    // instance lenses remain useful while semantic field/method lenses wait.
-    runtime.logger.debug(`UnityEvent CodeLens skipped C# symbols during retry backoff for ${scriptPath}.`);
-    return codeLenses;
-  }
-
-  let methods: CSharpMethodSymbolSnapshot[];
-  let fields: CSharpFieldSymbolSnapshot[];
-  try {
-    [methods, fields] = await Promise.all([
-      safeFindMethods(runtime, document),
-      safeFindUnityEventFields(runtime, document)
-    ]);
-    options.onCSharpSymbolsReady?.();
-  } catch (error) {
-    // C# symbols often arrive after VS Code first asks for CodeLens. Keep the
-    // YAML-backed lenses visible and let the provider retry without warning spam.
-    runtime.logger.debug(`UnityEvent method/field CodeLens skipped for ${scriptPath}: ${String(error)}`);
-    options.onCSharpSymbolsUnavailable?.(error);
-    return codeLenses;
-  }
-
-  for (const method of methods) {
-    const references = index.getReferences(scriptPath, method.name, method.typeName);
-    if (references.length > 0) {
-      methodLensCount += 1;
-      const range = toVscodeRange(runtime.runtimeVscode, method.range);
-      codeLenses.push(new runtime.runtimeVscode.CodeLens(range, {
-        title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length }),
-        command: 'unityPlus.showUnityEventReferenceLocations',
-        arguments: [{
-          kind: 'method',
-          scriptPath,
-          symbolName: method.name,
-          typeName: method.typeName,
-          ...(options.embedReferences ? { eventReferences: references } : {}),
-          position: range.start
-        } satisfies EventReferenceLocationTarget]
-      }));
+  if (options.skipCSharpMethods) {
+    // Method symbol retry is scoped separately so UnityEvent field lenses can
+    // still render when only method symbols are warming up.
+    runtime.logger.debug(`UnityEvent CodeLens skipped C# methods during retry backoff for ${scriptPath}.`);
+  } else {
+    try {
+      const methods = await safeFindMethods(runtime, document);
+      options.onCSharpSymbolsReady?.('methods');
+      methodLensCount = appendMethodCodeLenses(runtime, codeLenses, index, scriptPath, methods, options);
+    } catch (error) {
+      // C# method symbols often arrive after VS Code first asks for CodeLens.
+      // Field lenses stay independent so UnityEvent fields are not hidden here.
+      runtime.logger.debug(`UnityEvent method CodeLens skipped for ${scriptPath}: ${String(error)}`);
+      options.onCSharpSymbolsUnavailable?.('methods', error);
     }
   }
 
+  let fieldCount = 0;
+  if (options.skipCSharpFields) {
+    // Field symbol retry is scoped separately so method and YAML instance lenses
+    // can stay visible while UnityEvent field symbols are unavailable.
+    runtime.logger.debug(`UnityEvent CodeLens skipped C# UnityEvent fields during retry backoff for ${scriptPath}.`);
+  } else {
+    try {
+      const fields = await safeFindUnityEventFields(runtime, document);
+      options.onCSharpSymbolsReady?.('fields');
+      fieldCount = fields.length;
+      const fieldLensCounts = appendFieldCodeLenses(runtime, codeLenses, index, scriptPath, fields, options);
+      fieldReferenceLensCount = fieldLensCounts.referenceLensCount;
+      fieldTargetLensCount = fieldLensCounts.targetLensCount;
+    } catch (error) {
+      // Field symbol failures should only hide field-level lenses. Method and
+      // serialized instance lenses are still valid with the current index.
+      runtime.logger.debug(`UnityEvent field CodeLens skipped for ${scriptPath}: ${String(error)}`);
+      options.onCSharpSymbolsUnavailable?.('fields', error);
+    }
+  }
+
+  if (options.includeZeroSummaryLenses) {
+    // Instance CodeLens is intentionally omitted at zero because proving that a
+    // C# file is a UnityEngine.Object type belongs to semantic providers.
+  }
+
+  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fieldCount} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
+  return codeLenses;
+}
+
+/** Appends method CodeLens entries from provider-backed C# method symbols. */
+function appendMethodCodeLenses(
+  runtime: EventReferenceRuntime,
+  codeLenses: vscode.CodeLens[],
+  index: UnitySerializedAssetReferenceIndex,
+  scriptPath: string,
+  methods: readonly CSharpMethodSymbolSnapshot[],
+  options: CodeLensRenderOptions
+): number {
+  let methodLensCount = 0;
+  for (const method of methods) {
+    const references = index.getReferences(scriptPath, method.name, method.typeName);
+    if (references.length === 0) {
+      continue;
+    }
+
+    methodLensCount += 1;
+    const range = toVscodeRange(runtime.runtimeVscode, method.range);
+    codeLenses.push(new runtime.runtimeVscode.CodeLens(range, {
+      title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: references.length }),
+      command: 'unityPlus.showUnityEventReferenceLocations',
+      arguments: [{
+        kind: 'method',
+        scriptPath,
+        symbolName: method.name,
+        typeName: method.typeName,
+        ...(options.embedReferences ? { eventReferences: references } : {}),
+        position: range.start
+      } satisfies EventReferenceLocationTarget]
+    }));
+  }
+
+  return methodLensCount;
+}
+
+/** Appends UnityEvent field CodeLens entries from provider-backed C# field symbols. */
+function appendFieldCodeLenses(
+  runtime: EventReferenceRuntime,
+  codeLenses: vscode.CodeLens[],
+  index: UnitySerializedAssetReferenceIndex,
+  scriptPath: string,
+  fields: readonly CSharpFieldSymbolSnapshot[],
+  options: CodeLensRenderOptions
+): { referenceLensCount: number; targetLensCount: number } {
+  let referenceLensCount = 0;
+  let targetLensCount = 0;
+
   for (const field of fields) {
     const fieldReferences = index.getFieldReferences(scriptPath, field.name, field.typeName);
-    fieldReferenceLensCount += 1;
+    referenceLensCount += 1;
     const fieldRange = toVscodeRange(runtime.runtimeVscode, field.range);
     codeLenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent references', { count: fieldReferences.length }),
@@ -112,7 +163,7 @@ export async function createCodeLensesFromIndex(
     }));
 
     const fieldTargets = index.getFieldTargets(scriptPath, field.name, field.typeName);
-    fieldTargetLensCount += 1;
+    targetLensCount += 1;
     codeLenses.push(new runtime.runtimeVscode.CodeLens(fieldRange, {
       title: runtime.runtimeVscode.l10n.t('{count} UnityEvent targets', { count: fieldTargets.length }),
       command: 'unityPlus.showUnityEventReferenceLocations',
@@ -127,13 +178,7 @@ export async function createCodeLensesFromIndex(
     }));
   }
 
-  if (options.includeZeroSummaryLenses) {
-    // Instance CodeLens is intentionally omitted at zero because proving that a
-    // C# file is a UnityEngine.Object type belongs to semantic providers.
-  }
-
-  runtime.logger.debug(`UnityEvent CodeLens for ${scriptPath}: ${fields.length} UnityEvent field(s), ${methodLensCount} method lens(es), ${fieldReferenceLensCount} field reference lens(es), ${fieldTargetLensCount} field target lens(es), ${serializedInstanceLensCount} serialized instance lens(es).`);
-  return codeLenses;
+  return { referenceLensCount, targetLensCount };
 }
 
 /** Converts language-service ranges back into VS Code ranges for CodeLens rendering. */

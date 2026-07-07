@@ -104,12 +104,14 @@ export interface PriorityScanState {
 export interface CodeLensRenderOptions {
   embedReferences: boolean;
   includeZeroSummaryLenses?: boolean;
-  /** When true, render YAML-only lenses while C# symbol retry backoff is active. */
-  skipCSharpSymbols?: boolean;
-  /** Called when C# symbols are not ready, so the provider can retry later. */
-  onCSharpSymbolsUnavailable?: (error: unknown) => void;
-  /** Called after C# symbols are read successfully, so retry state can reset. */
-  onCSharpSymbolsReady?: () => void;
+  /** When true, render without method lenses while method symbol retry backoff is active. */
+  skipCSharpMethods?: boolean;
+  /** When true, render without UnityEvent field lenses while field symbol retry backoff is active. */
+  skipCSharpFields?: boolean;
+  /** Called when one C# symbol category is not ready, so the provider can retry later. */
+  onCSharpSymbolsUnavailable?: (kind: 'methods' | 'fields', error: unknown) => void;
+  /** Called after one C# symbol category is read successfully, so retry state can reset. */
+  onCSharpSymbolsReady?: (kind: 'methods' | 'fields') => void;
 }
 
 export interface RunWithConcurrencyOptions {
