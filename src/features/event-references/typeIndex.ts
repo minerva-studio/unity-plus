@@ -2,7 +2,7 @@ import type { UnityEventReferenceBuildContext } from './model';
 import type { CSharpTypeIndex, EventReferenceRuntime } from './runtime';
 import { backgroundScanYieldEvery, defaultAssetScanConcurrency, progressReportInterval, scanYieldEvery } from './runtime';
 import { getBackgroundScanConcurrency } from './settings';
-import { isCancellationRequested, runWithConcurrency, shortTypeName, throwIfCancellationRequested, toProjectPath, UnityEventReferenceScanCanceledError } from './utils';
+import { errorMessage, isCancellationRequested, runWithConcurrency, shortTypeName, throwIfCancellationRequested, toProjectPath, UnityEventReferenceScanCanceledError } from './utils';
 
 /** Builds a C# type-name index from C# server symbols only. */
 export async function buildDefaultCSharpTypeIndex(
@@ -15,6 +15,7 @@ export async function buildDefaultCSharpTypeIndex(
   const matches: Array<{ fullName: string; shortName: string; path: string }> = [];
   let lastReportedCount = 0;
   let serverTypeCount = 0;
+  let symbolReadFailureCount = 0;
 
   await runWithConcurrency(files, async file => {
     throwIfCancellationRequested(context.cancellationToken);
@@ -28,13 +29,17 @@ export async function buildDefaultCSharpTypeIndex(
         serverTypeCount += types.length;
         matches.push(...types.map(type => ({ fullName: type.fullName, shortName: type.name, path })));
       }
-    } catch {
+    } catch (error) {
       if (isCancellationRequested(context.cancellationToken)) {
         throw new UnityEventReferenceScanCanceledError();
       }
 
-      // C# type resolution is intentionally backed only by the configured C# server.
-      throw new Error(`UnityEvent C# type index could not read C# server symbols for ${file.fsPath}.`);
+      symbolReadFailureCount += 1;
+      // C# type resolution remains backed only by the configured C# server.
+      // A warming or partial server means this file contributes no type data
+      // for this scan, but YAML GUID-based references and instances can still
+      // build a useful index.
+      runtime.logger.debug(`UnityEvent C# type index skipped ${file.fsPath}: ${errorMessage(error)}`);
     }
   }, context.mode === 'background' ? getBackgroundScanConcurrency(runtime.runtimeVscode) : defaultAssetScanConcurrency, {
     cancellationToken: context.cancellationToken,
@@ -56,7 +61,7 @@ export async function buildDefaultCSharpTypeIndex(
     }
   });
 
-  logCSharpTypeIndexSummary(runtime, files.length, serverTypeCount, countResolvableTypeMatches(matches));
+  logCSharpTypeIndexSummary(runtime, files.length, serverTypeCount, countResolvableTypeMatches(matches), symbolReadFailureCount);
   return createCSharpTypeIndex(matches);
 }
 
@@ -65,14 +70,17 @@ function logCSharpTypeIndexSummary(
   runtime: Pick<EventReferenceRuntime, 'logger'>,
   fileCount: number,
   serverTypeCount: number,
-  resolvableTypeCount: number
+  resolvableTypeCount: number,
+  symbolReadFailureCount: number
 ): void {
-  runtime.logger.debug(`UnityEvent C# type index: ${fileCount} C# file(s), ${serverTypeCount} C# server type(s), ${resolvableTypeCount} resolvable type key(s).`);
+  runtime.logger.debug(`UnityEvent C# type index: ${fileCount} C# file(s), ${serverTypeCount} C# server type(s), ${resolvableTypeCount} resolvable type key(s), ${symbolReadFailureCount} symbol read failure(s).`);
 
   if (fileCount === 0) {
     runtime.logger.warn('UnityEvent C# type index found 0 C# files; target type resolution will be empty.');
   } else if (resolvableTypeCount === 0) {
     runtime.logger.warn('UnityEvent C# type index found 0 resolvable types; check C# server document symbols.');
+  } else if (symbolReadFailureCount > 0) {
+    runtime.logger.info(`UnityEvent C# type index used partial C# server symbols: ${symbolReadFailureCount}/${fileCount} file(s) had no symbols yet.`);
   }
 }
 

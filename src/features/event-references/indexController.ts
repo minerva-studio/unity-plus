@@ -18,6 +18,14 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
       return;
     }
 
+    if (status === 'building' && buildPromise) {
+      // Keep the in-flight build as the single owner of cancellation. Clearing
+      // buildPromise here would allow file watcher churn to start parallel full
+      // project scans before the current build can observe the version change.
+      cachedVersion = version;
+      return;
+    }
+
     cachedVersion = version;
     status = 'idle';
     index = undefined;

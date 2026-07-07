@@ -1684,6 +1684,64 @@ describe('eventReferences', () => {
     assert.strictEqual(csharpFileScans, 1);
   });
 
+  it('keeps building the index when one C# type-index file has no symbols yet', async () => {
+    const runtime = createEventReferenceRuntime();
+    let csharpFileScans = 0;
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = await buildUnityEventReferenceIndex({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      getCacheVersion: () => 0,
+      findAssetFiles: async () => [createUri('/Project/Assets/Gate.prefab')],
+      findCSharpFiles: async () => {
+        csharpFileScans += 1;
+        return [
+          createUri('/Project/Assets/Scripts/UI/Windows/Window_PausePanel.cs'),
+          createUri('/Project/Assets/Scripts/IronDoor.cs')
+        ];
+      },
+      readTextFile: async () => createUnresolvedTargetAssemblyYaml(2),
+      csharpLanguageService: {
+        ...createFakeCSharpSymbolLanguageService({
+          '/Project/Assets/Scripts/IronDoor.cs': [{
+            name: 'IronDoor',
+            fullName: 'Amlos.Fixtures.IronDoor',
+            range: {
+              start: { line: 0, character: 13 },
+              end: { line: 0, character: 21 }
+            }
+          }]
+        }),
+        async findTypes(uri) {
+          if (uri.fsPath.endsWith('Window_PausePanel.cs')) {
+            throw new Error('C# document symbol provider returned namespace-only symbols.');
+          }
+
+          return [{
+            name: 'IronDoor',
+            fullName: 'Amlos.Fixtures.IronDoor',
+            range: {
+              start: { line: 0, character: 13 },
+              end: { line: 0, character: 21 }
+            }
+          }];
+        }
+      }
+    }, createMetadataIndex());
+
+    const targets = index.getFieldTargets(gateScriptPath, 'OnCheckEnable', 'Gate');
+
+    assert.strictEqual(csharpFileScans, 1);
+    assert.strictEqual(index.getDiagnostics().resolvedByTargetTypeNameCount, 1);
+    assert.strictEqual(targets.length, 1);
+    assert.strictEqual(targets[0].scriptPath, 'Assets/Scripts/IronDoor.cs');
+  });
+
   it('does not scan for CodeLens when UnityEvent references are disabled', async () => {
     let scans = 0;
     const runtime = createEventReferenceRuntime();
