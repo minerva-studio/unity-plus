@@ -93,7 +93,7 @@ function formatDiagnosticsForLog(diagnostics: UnityEventReferenceDiagnostics): s
     `${diagnostics.sceneCount} scene(s)`,
     `${diagnostics.assetCount} asset file(s)`,
     `${diagnostics.resolvedReferenceCount} UnityEvent reference(s)`,
-    `${diagnostics.resolvedByTargetTypeNameCount} target method(s) resolved by type name`,
+    `${diagnostics.resolvedByTargetTypeNameCount} target script path(s) resolved by type name`,
     `${diagnostics.elapsedMilliseconds}ms`
   ].join(', ');
 }

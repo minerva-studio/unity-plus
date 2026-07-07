@@ -1228,15 +1228,20 @@ describe('eventReferences', () => {
     }]);
     const csharpLanguageService = {
       ...createFakeCSharpSymbolLanguageService({}),
-      async findMethodsForType(typeName: string, methodName: string) {
+      async resolveMember(typeName: string, methodName: string, kind: 'method' | 'field') {
         assert.strictEqual(typeName, 'Amlos.Fixtures.UpgradeAltar');
         assert.strictEqual(methodName, 'Interact');
+        assert.strictEqual(kind, 'method');
         return [{
           uriPath: '/Project/Assets/UpgradeAltar.cs',
+          name: 'Interact',
+          containerName: 'Amlos.Fixtures.UpgradeAltar',
           range: {
             start: { line: 18, character: 14 },
             end: { line: 18, character: 22 }
-          }
+          },
+          source: 'documentSymbols' as const,
+          diagnostics: []
         }];
       }
     };
@@ -1284,10 +1289,10 @@ describe('eventReferences', () => {
     }]);
     const csharpLanguageService = {
       ...createFakeCSharpSymbolLanguageService({}),
-      async findMethodsForType(typeName: string, methodName: string) {
+      async resolveMember(typeName: string, methodName: string) {
         assert.strictEqual(typeName, 'Amlos.Fixtures.UpgradeAltar');
         assert.strictEqual(methodName, 'Interact');
-        return [];
+        throw new Error('C# provider could not resolve method Amlos.Fixtures.UpgradeAltar.Interact.');
       }
     };
 
@@ -1334,9 +1339,9 @@ describe('eventReferences', () => {
     let targetLookupCount = 0;
     const csharpLanguageService = {
       ...createFakeCSharpSymbolLanguageService({}),
-      async findMethodsForType() {
+      async resolveMember() {
         targetLookupCount += 1;
-        return [];
+        throw new Error('C# provider could not resolve method Amlos.Fixtures.Gate.CanInteract.');
       }
     };
 
@@ -1867,7 +1872,7 @@ describe('eventReferences', () => {
     assert.strictEqual(runtime.infoMessages[0].includes('scanned 0 prefab(s), 1 scene(s), and 0 asset file(s)'), true);
     assert.strictEqual(runtime.infoMessages[0].includes('serialized instance'), false);
     assert.strictEqual(runtime.infoMessages[0].includes('found 0 UnityEvent reference(s)'), true);
-    assert.strictEqual(runtime.infoMessages[0].includes('resolved 0 UnityEvent target method(s)'), true);
+    assert.strictEqual(runtime.infoMessages[0].includes('resolved 0 UnityEvent target script path(s) by type name'), true);
   });
 
   it('scans all prefab and scene assets by default', async () => {
@@ -2805,6 +2810,18 @@ function collectFakeWorkspaceSymbols(
 ): void {
   for (const symbol of symbols) {
     const symbolName = symbol.name.replace(/\s*\(.*$/, '').trim();
+    if (symbol.kind === runtimeVscode.SymbolKind.Class && symbolName === query) {
+      results.push({
+        name: symbol.name,
+        kind: symbol.kind,
+        containerName: createFakeWorkspaceNamespaceName(runtimeVscode, ancestors),
+        location: {
+          uri,
+          range: symbol.selectionRange
+        }
+      } as vscode.SymbolInformation);
+    }
+
     if (symbol.kind === runtimeVscode.SymbolKind.Method && symbolName === query) {
       results.push({
         name: symbol.name,
@@ -2819,6 +2836,18 @@ function collectFakeWorkspaceSymbols(
 
     collectFakeWorkspaceSymbols(runtimeVscode, uri, symbol.children, [...ancestors, symbol], query, results);
   }
+}
+
+/** Builds the namespace container that workspace type symbols expose. */
+function createFakeWorkspaceNamespaceName(
+  runtimeVscode: typeof vscode,
+  ancestors: readonly vscode.DocumentSymbol[]
+): string | undefined {
+  const namespaceName = ancestors
+    .filter(symbol => symbol.kind === runtimeVscode.SymbolKind.Namespace)
+    .map(symbol => symbol.name)
+    .join('.');
+  return namespaceName || undefined;
 }
 
 /** Builds the declaring type name that real C# workspace symbols expose as containerName. */
@@ -2998,6 +3027,12 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
     async findTypes(uri) {
       return typesByPath[uri.fsPath] ?? [];
     },
+    async resolveType() {
+      return [];
+    },
+    async resolveMember() {
+      return [];
+    },
     async findUnityEventFields() {
       return [];
     },
@@ -3006,9 +3041,6 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
     },
     async findUnityEventFieldAtPosition() {
       return undefined;
-    },
-    async findMethodsForType() {
-      return [];
     },
     async findTargetMethodPosition() {
       return [];

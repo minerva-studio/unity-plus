@@ -81,16 +81,24 @@ async function showFieldTargetMethodLocations(
   const lookups = collectDistinctTargetMethodLookups(runtime, references);
   for (const lookup of lookups) {
     try {
-      const positions = await runtime.csharpLanguageService.findMethodsForType(lookup.targetTypeName, lookup.methodName);
-      for (const position of positions) {
-        const uri = runtime.runtimeVscode.Uri.file(position.uriPath);
-        const key = `${uri.fsPath}:${position.range.start.line}:${position.range.start.character}`;
+      const resolved = await runtime.csharpLanguageService.resolveMember(lookup.targetTypeName, lookup.methodName, 'method');
+      if (resolved.length === 0) {
+        runtime.logger.error(
+          `UnityEvent target C# method lookup found no provider-backed location: ` +
+          `asset=${lookup.reference.assetPath}, targetType=${lookup.targetTypeName}, ` +
+          `method=${lookup.methodName}.`
+        );
+      }
+
+      for (const location of resolved) {
+        const uri = runtime.runtimeVscode.Uri.file(location.uriPath);
+        const key = `${uri.fsPath}:${location.range.start.line}:${location.range.start.character}`;
         if (seen.has(key)) {
           continue;
         }
 
         seen.add(key);
-        locations.push(toCSharpLocation(runtime.runtimeVscode, uri, position.range.start));
+        locations.push(toCSharpLocation(runtime.runtimeVscode, uri, location.range.start));
       }
     } catch (error) {
       runtime.logger.error(

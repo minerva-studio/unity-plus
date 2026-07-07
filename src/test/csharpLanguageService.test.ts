@@ -80,6 +80,9 @@ function createServiceWithSymbols(
     MarkdownString: class {
       constructor(public readonly value: string) {}
     },
+    Uri: {
+      file: (fsPath: string) => ({ fsPath })
+    },
     commands: {
       executeCommand: async (command: string, ...args: unknown[]) => {
         if (command === 'vscode.executeDocumentSymbolProvider') {
@@ -212,9 +215,9 @@ describe('csharpLanguageService', () => {
       }
     });
 
-    const methods = await service.findMethodsForType('Amlos.Fixtures.UpgradeAltar', 'Interact');
+    const methods = await service.resolveMember('Amlos.Fixtures.UpgradeAltar', 'Interact', 'method');
 
-    assert.deepStrictEqual(queries, ['Interact']);
+    assert.deepStrictEqual(queries, ['Amlos.Fixtures.UpgradeAltar', 'UpgradeAltar', 'Interact']);
     assert.strictEqual(methods.length, 1);
     assert.strictEqual(methods[0].uriPath, '/Project/Assets/UpgradeAltar.cs');
     assert.deepStrictEqual(methods[0].range.start, { line: 18, character: 14 });
@@ -223,16 +226,77 @@ describe('csharpLanguageService', () => {
   it('matches Roslyn workspace-symbol method containers for UnityEvent target lookup', async () => {
     const service = createServiceWithSymbols([], {
       workspaceSymbols: {
+        Cannon: [
+          fakeSymbolInformation('Cannon', symbolKind.Class, 'project Assembly-CSharp', fakeRange(1, 13, 19), '/Project/Assets/Scripts/Cannon.cs')
+        ],
         Fire: [
           fakeSymbolInformation('Fire()', symbolKind.Method, 'in Cannon (project Assembly-CSharp)', fakeRange(6, 16, 20), '/Project/Assets/Scripts/Cannon.cs')
         ]
       }
     });
 
-    const methods = await service.findMethodsForType('Amlos.Gameplay.Cannon', 'Fire');
+    const methods = await service.resolveMember('Amlos.Gameplay.Cannon', 'Fire', 'method');
 
     assert.strictEqual(methods.length, 1);
     assert.strictEqual(methods[0].uriPath, '/Project/Assets/Scripts/Cannon.cs');
+  });
+
+  it('matches localized workspace-symbol containers by provider-backed type URI and short type name', async () => {
+    const service = createServiceWithSymbols([
+      fakeSymbolInformation('Amlos.Fixtures', symbolKind.Namespace, undefined, fakeRange(1, 0, 14), '/Project/Assets/Scripts/Shop.cs')
+    ], {
+      workspaceSymbols: {
+        Shop: [
+          fakeSymbolInformation('Shop', symbolKind.Class, '项目 Amlos.Gameplay.Impl.Fixtures', fakeRange(10, 17, 21), '/Project/Assets/Scripts/Shop.cs')
+        ],
+        Reroll: [
+          fakeSymbolInformation('Reroll()', symbolKind.Method, '在 Shop (项目 Amlos.Gameplay.Impl.Fixtures)中', fakeRange(81, 20, 26), '/Project/Assets/Scripts/Shop.cs'),
+          fakeSymbolInformation('Reroll()', symbolKind.Method, '在 Shop (项目 Other.Assembly)中', fakeRange(20, 10, 16), '/Project/Assets/Scripts/OtherShop.cs')
+        ]
+      }
+    });
+
+    const methods = await service.resolveMember('Amlos.Fixtures.Shop', 'Reroll', 'method');
+
+    assert.strictEqual(methods.length, 1);
+    assert.strictEqual(methods[0].uriPath, '/Project/Assets/Scripts/Shop.cs');
+    assert.deepStrictEqual(methods[0].range.start, { line: 81, character: 20 });
+  });
+
+  it('rejects same-file workspace members when the localized container short type does not match', async () => {
+    const service = createServiceWithSymbols([], {
+      workspaceSymbols: {
+        IronDoor: [
+          fakeSymbolInformation('IronDoor', symbolKind.Class, '项目 Amlos.Gameplay.Impl.Fixtures', fakeRange(1, 13, 21), '/Project/Assets/Scripts/IronDoor.cs')
+        ],
+        Open: [
+          fakeSymbolInformation('Open()', symbolKind.Method, '在 SteelDoor (项目 Amlos.Gameplay.Impl.Fixtures)中', fakeRange(6, 16, 20), '/Project/Assets/Scripts/IronDoor.cs')
+        ]
+      }
+    });
+
+    await assert.rejects(
+      async () => await service.resolveMember('Amlos.Fixtures.IronDoor', 'Open', 'method'),
+      /declaring-type-mismatch/
+    );
+  });
+
+  it('fails clearly when workspace symbols cannot prove a member declaring type', async () => {
+    const service = createServiceWithSymbols([], {
+      workspaceSymbols: {
+        Open: [
+          fakeSymbolInformation('Open()', symbolKind.Method, undefined, fakeRange(6, 16, 20), '/Project/Assets/Scripts/IronDoor.cs')
+        ],
+        IronDoor: [
+          fakeSymbolInformation('IronDoor', symbolKind.Class, 'project Assembly-CSharp', fakeRange(1, 13, 21), '/Project/Assets/Scripts/IronDoor.cs')
+        ]
+      }
+    });
+
+    await assert.rejects(
+      async () => await service.resolveMember('Amlos.Fixtures.IronDoor', 'Open', 'method'),
+      /could not resolve method Amlos\.Fixtures\.IronDoor\.Open/
+    );
   });
 
 });

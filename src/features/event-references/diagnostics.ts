@@ -105,7 +105,7 @@ export function formatDiagnostics(runtimeVscode: typeof vscode, diagnostics: Uni
     runtimeVscode.l10n.t('found {count} UnityEvent reference(s)', {
       count: diagnostics.resolvedReferenceCount
     }),
-    runtimeVscode.l10n.t('resolved {count} UnityEvent target method(s)', {
+    runtimeVscode.l10n.t('resolved {count} UnityEvent target script path(s) by type name', {
       count: diagnostics.resolvedByTargetTypeNameCount
     }),
     runtimeVscode.l10n.t('owner scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved', {

@@ -50,7 +50,7 @@
   "- UnityEvent targets": "- UnityEvent 目标",
   "YAML parser paths: {assetCount} asset parse(s), {unityEventCount} UnityEvent parse(s), {skippedUnityEventCount} UnityEvent parse(s) skipped": "YAML parser paths: {assetCount} asset parse(s), {unityEventCount} UnityEvent parse(s), {skippedUnityEventCount} UnityEvent parse(s) skipped",
   "found {count} UnityEvent reference(s)": "found {count} UnityEvent reference(s)",
-  "resolved {count} UnityEvent target method(s)": "resolved {count} UnityEvent target method(s)",
+  "resolved {count} UnityEvent target script path(s) by type name": "resolved {count} UnityEvent target script path(s) by type name",
   "owner scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved": "owner 脚本：{guidCount} 个 GUID、{editorCount} 个 editor class、{unresolvedCount} 个未解析",
   "serialized instance scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved": "序列化实例脚本：{guidCount} 个 GUID、{editorCount} 个 editor class、{unresolvedCount} 个未解析",
   "serialized instance text hits: {hitCount} found, {resolvedCount} metadata-resolved, {unresolvedCount} unresolved, {dedupedCount} deduped": "序列化实例文本命中：找到 {hitCount} 个，metadata 解析 {resolvedCount} 个，未解析 {unresolvedCount} 个，去重 {dedupedCount} 个"

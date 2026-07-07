@@ -47,9 +47,15 @@ export interface CSharpTypeSymbolSnapshot {
   range: CSharpRange;
 }
 
-export interface CSharpTargetMethodLocation {
+export type CSharpSymbolKind = 'type' | 'method' | 'field';
+
+export interface CSharpSymbolLocation {
   uriPath: string;
+  name: string;
+  containerName?: string;
   range: CSharpRange;
+  source: 'documentSymbols' | 'workspaceSymbols';
+  diagnostics: readonly string[];
 }
 
 export interface CSharpLanguageService {
@@ -64,7 +70,8 @@ export interface CSharpSymbolLanguageService extends CSharpLanguageService {
   findUnityEventFields(uri: vscode.Uri, expectedNames?: readonly string[]): Promise<CSharpFieldSymbolSnapshot[]>;
   findMethodAtPosition(uri: vscode.Uri, position: CSharpPosition): Promise<CSharpMethodSymbolSnapshot | undefined>;
   findUnityEventFieldAtPosition(uri: vscode.Uri, position: CSharpPosition): Promise<CSharpFieldSymbolSnapshot | undefined>;
-  findMethodsForType(typeName: string, methodName: string): Promise<CSharpTargetMethodLocation[]>;
+  resolveType(typeName: string): Promise<CSharpSymbolLocation[]>;
+  resolveMember(typeName: string, memberName: string, kind: 'method' | 'field'): Promise<CSharpSymbolLocation[]>;
   findTargetMethodPosition(uri: vscode.Uri, targetTypeName: string, methodName: string): Promise<CSharpPosition[]>;
   isUnityObjectType(uri: vscode.Uri, typeName: string): Promise<boolean>;
 }
@@ -136,8 +143,11 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
     async findUnityEventFieldAtPosition(uri, position) {
       return (await this.findUnityEventFields(uri)).find(field => containsCSharpPosition(field.range, position));
     },
-    async findMethodsForType(typeName, methodName) {
-      return await findMethodsForTypeFromWorkspaceSymbols(runtimeVscode, typeName, methodName);
+    async resolveType(typeName) {
+      return await resolveTypeSymbol(runtimeVscode, typeName);
+    },
+    async resolveMember(typeName, memberName, kind) {
+      return await resolveMemberSymbol(runtimeVscode, typeName, memberName, kind);
     },
     async findTargetMethodPosition(uri, targetTypeName, methodName) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
@@ -357,23 +367,150 @@ async function findMethodsFromWorkspaceSymbols(
   return dedupeMethodSnapshots(methods);
 }
 
-/** Resolves target method declarations by asking the C# workspace symbol provider for the method name. */
-async function findMethodsForTypeFromWorkspaceSymbols(
+/** Resolves a type declaration by asking the C# provider for workspace symbols. */
+async function resolveTypeSymbol(
+  runtimeVscode: typeof vscode,
+  typeName: string
+): Promise<CSharpSymbolLocation[]> {
+  const diagnostics: string[] = [];
+  const queries = createTypeSymbolQueries(typeName);
+  const symbols = await getWorkspaceSymbolsForExactNames(runtimeVscode, queries);
+  diagnostics.push(`type=${typeName}; queries=${queries.join(', ')}; raw=${symbols.length}`);
+
+  const typeSymbols = symbols
+    .filter(symbol => getTopLevelTypeKind(runtimeVscode, symbol.kind))
+    .map(symbol => ({
+      symbol,
+      name: normalizeCSharpSymbolName(symbol.name),
+      fullName: toWorkspaceTypeFullName(symbol)
+    }));
+  const exactMatches = typeSymbols.filter(candidate => matchesCSharpTypeName(candidate.fullName, typeName));
+  const shortMatches = typeSymbols.filter(candidate =>
+    csharpSymbolKey(candidate.name) === csharpSymbolKey(shortCSharpTypeName(typeName))
+  );
+  const accepted = exactMatches.length > 0
+    ? exactMatches
+    : uniqueWorkspaceSymbolUris(shortMatches).length === 1
+      ? shortMatches
+      : [];
+
+  if (accepted.length === 0) {
+    diagnostics.push(`accepted=0; typeCandidates=${describeWorkspaceSymbolSample(typeSymbols.map(candidate => candidate.symbol))}`);
+  } else {
+    diagnostics.push(`accepted=${accepted.length}`);
+  }
+
+  return dedupeSymbolLocations(accepted.map(candidate => ({
+    uriPath: candidate.symbol.location.uri.fsPath,
+    name: candidate.name,
+    containerName: normalizeCSharpQualifiedName(candidate.symbol.containerName),
+    range: toCSharpRange(candidate.symbol.location.range),
+    source: 'workspaceSymbols',
+    diagnostics
+  })));
+}
+
+/** Resolves a member by first locating its containing type, then reading provider document symbols. */
+async function resolveMemberSymbol(
   runtimeVscode: typeof vscode,
   typeName: string,
-  methodName: string
-): Promise<CSharpTargetMethodLocation[]> {
-  const symbols = await getWorkspaceSymbolsForExactNames(runtimeVscode, [methodName]);
-  const methods = symbols
-    .filter(symbol => symbol.kind === runtimeVscode.SymbolKind.Method)
-    .filter(symbol => normalizeCSharpSymbolName(symbol.name) === methodName)
-    .filter(symbol => symbol.containerName && matchesCSharpTypeName(symbol.containerName, typeName))
-    .map(symbol => ({
-      uriPath: symbol.location.uri.fsPath,
-      range: toCSharpRange(symbol.location.range)
-    }));
+  memberName: string,
+  kind: 'method' | 'field'
+): Promise<CSharpSymbolLocation[]> {
+  const diagnostics: string[] = [`member=${typeName}.${memberName}; kind=${kind}`];
+  const typeLocations = await resolveTypeSymbol(runtimeVscode, typeName);
+  diagnostics.push(...typeLocations.flatMap(location => location.diagnostics));
 
-  return dedupeTargetMethodLocations(methods);
+  const locations: CSharpSymbolLocation[] = [];
+  for (const typeLocation of typeLocations) {
+    const uri = runtimeVscode.Uri.file(typeLocation.uriPath);
+    try {
+      const symbols = await getDocumentSymbols(runtimeVscode, uri);
+      const documentMatches: CSharpSymbolLocation[] = [];
+      collectMemberSymbolLocationsInDocument(runtimeVscode, uri, symbols, [], typeName, memberName, kind, documentMatches, diagnostics);
+      if (documentMatches.length > 0) {
+        locations.push(...documentMatches);
+        continue;
+      }
+
+      diagnostics.push(`documentSymbols no ${kind} match in ${uri.fsPath}; shape=${describeProviderSymbolShape(symbols)}`);
+    } catch (error) {
+      diagnostics.push(`documentSymbols failed in ${uri.fsPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (locations.length > 0) {
+    return dedupeSymbolLocations(locations);
+  }
+
+  const workspaceFallback = await resolveMemberSymbolFromWorkspaceSymbols(runtimeVscode, typeLocations, typeName, memberName, kind, diagnostics);
+  const resolvedFallback = dedupeSymbolLocations(workspaceFallback);
+  if (resolvedFallback.length > 0) {
+    return resolvedFallback;
+  }
+
+  throw new Error(`C# provider could not resolve ${kind} ${typeName}.${memberName}. Diagnostics: ${diagnostics.join(' | ')}`);
+}
+
+/** Resolves a member from workspace symbols only when declaring type evidence is present. */
+async function resolveMemberSymbolFromWorkspaceSymbols(
+  runtimeVscode: typeof vscode,
+  typeLocations: readonly CSharpSymbolLocation[],
+  typeName: string,
+  memberName: string,
+  kind: 'method' | 'field',
+  diagnostics: string[]
+): Promise<CSharpSymbolLocation[]> {
+  const symbols = await getWorkspaceSymbolsForExactNames(runtimeVscode, [memberName]);
+  const expectedKind = kind === 'method'
+    ? runtimeVscode.SymbolKind.Method
+    : runtimeVscode.SymbolKind.Field;
+  diagnostics.push(`workspace ${kind} query=${memberName}; raw=${symbols.length}`);
+
+  const accepted: CSharpSymbolLocation[] = [];
+  const rejected: Array<{ symbol: vscode.SymbolInformation; reason: string }> = [];
+  const typeUriKeys = new Set(typeLocations.map(location => csharpPathKey(location.uriPath)));
+  const targetShortTypeName = shortCSharpTypeName(typeName);
+
+  for (const symbol of symbols) {
+    if (symbol.kind !== expectedKind || normalizeCSharpSymbolName(symbol.name) !== memberName) {
+      rejected.push({ symbol, reason: 'kind-or-name-mismatch' });
+      continue;
+    }
+
+    const containerName = normalizeCSharpQualifiedName(symbol.containerName);
+    const containerShortName = normalizeWorkspaceSymbolContainerShortName(symbol.containerName);
+    const fullTypeMatch = containerName && matchesFullCSharpDeclaringTypeName(containerName, typeName);
+    const sameUriTypeMatch = typeUriKeys.has(csharpUriKey(symbol.location.uri)) &&
+      containerShortName &&
+      csharpSymbolKey(containerShortName) === csharpSymbolKey(targetShortTypeName);
+    if (!fullTypeMatch && !sameUriTypeMatch) {
+      rejected.push({
+        symbol,
+        reason: `declaring-type-mismatch; rawContainer=${symbol.containerName ?? '<none>'}; ` +
+          `normalizedContainer=${containerName ?? '<none>'}; shortContainer=${containerShortName ?? '<none>'}; ` +
+          `sameTypeUri=${typeUriKeys.has(csharpUriKey(symbol.location.uri))}`
+      });
+      continue;
+    }
+
+    accepted.push({
+      uriPath: symbol.location.uri.fsPath,
+      name: normalizeCSharpSymbolName(symbol.name),
+      containerName: containerName ?? containerShortName,
+      range: toCSharpRange(symbol.location.range),
+      source: 'workspaceSymbols',
+      diagnostics
+    });
+  }
+
+  if (accepted.length === 0) {
+    diagnostics.push(`workspace ${kind} accepted=0; rejected=${describeRejectedWorkspaceSymbolSample(rejected)}`);
+  } else {
+    diagnostics.push(`workspace ${kind} accepted=${accepted.length}`);
+  }
+
+  return accepted;
 }
 
 /** Restores UnityEvent field positions from exact provider symbols and hover-backed type evidence. */
@@ -463,6 +600,15 @@ function createMemberQueries(exactNames: readonly string[]): string[] {
   return [...new Set(queries)];
 }
 
+/** Creates type lookup queries that match Roslyn NavigateTo's name-based behavior. */
+function createTypeSymbolQueries(typeName: string): string[] {
+  const normalizedFullName = normalizeCSharpQualifiedName(typeName) ?? typeName;
+  return [...new Set([
+    normalizedFullName,
+    shortCSharpTypeName(normalizedFullName)
+  ].filter(name => name.length > 0))];
+}
+
 /** Uses the current script file name as the only type fallback query. */
 function scriptFileStem(uri: vscode.Uri): string {
   const fileName = uri.fsPath.split(/[\\/]/).pop() ?? '';
@@ -475,6 +621,39 @@ function toWorkspaceTypeFullName(symbol: vscode.SymbolInformation): string {
   return name.includes('.')
     ? normalizeCSharpQualifiedName(name) ?? name
     : joinCSharpName(normalizeCSharpNamespaceName(symbol.containerName), name);
+}
+
+/** Keeps URI uniqueness separate from type-name proof for diagnostic-friendly resolver decisions. */
+function uniqueWorkspaceSymbolUris(symbols: readonly { symbol: vscode.SymbolInformation }[]): string[] {
+  return [...new Set(symbols.map(candidate => csharpUriKey(candidate.symbol.location.uri)))];
+}
+
+/** Formats a bounded workspace-symbol sample without dumping source text. */
+function describeWorkspaceSymbolSample(symbols: readonly vscode.SymbolInformation[], limit = 8): string {
+  return JSON.stringify(symbols.slice(0, limit).map(symbol => ({
+    name: symbol.name,
+    kind: symbol.kind,
+    containerName: symbol.containerName,
+    uri: symbol.location.uri.fsPath,
+    range: toPlainRange(symbol.location.range)
+  })));
+}
+
+/** Formats rejected workspace-symbol candidates with the resolver decision reason. */
+function describeRejectedWorkspaceSymbolSample(
+  rejected: readonly { symbol: vscode.SymbolInformation; reason: string }[],
+  limit = 8
+): string {
+  return JSON.stringify(rejected.slice(0, limit).map(({ symbol, reason }) => ({
+    name: symbol.name,
+    kind: symbol.kind,
+    containerName: symbol.containerName,
+    normalizedContainer: normalizeCSharpQualifiedName(symbol.containerName),
+    shortContainer: normalizeWorkspaceSymbolContainerShortName(symbol.containerName),
+    uri: symbol.location.uri.fsPath,
+    range: toPlainRange(symbol.location.range),
+    reason
+  })));
 }
 
 /** Proves a workspace field symbol is a UnityEvent by asking the provider for hover text at the symbol range. */
@@ -541,8 +720,8 @@ function dedupeFieldSnapshots(fields: readonly CSharpFieldSymbolSnapshot[]): CSh
   });
 }
 
-/** Removes duplicate target method locations returned by overlapping provider symbols. */
-function dedupeTargetMethodLocations(methods: readonly CSharpTargetMethodLocation[]): CSharpTargetMethodLocation[] {
+/** Removes duplicate symbol locations returned by overlapping provider paths. */
+function dedupeSymbolLocations(methods: readonly CSharpSymbolLocation[]): CSharpSymbolLocation[] {
   const seen = new Set<string>();
   return methods.filter(method => {
     const key = `${method.uriPath}#${method.range.start.line}:${method.range.start.character}`;
@@ -571,7 +750,12 @@ function dedupeTypeSnapshots(types: readonly CSharpTypeSymbolSnapshot[]): CSharp
 
 /** Normalizes provider URIs for exact same-file filtering. */
 function csharpUriKey(uri: vscode.Uri): string {
-  return uri.fsPath.replace(/\\/g, '/').toLowerCase();
+  return csharpPathKey(uri.fsPath);
+}
+
+/** Normalizes provider file paths for exact same-file filtering. */
+function csharpPathKey(path: string): string {
+  return path.replace(/\\/g, '/').toLowerCase();
 }
 
 /** Collects method symbols and annotates each method with its nearest containing type. */
@@ -663,6 +847,83 @@ function collectUnityEventFieldSymbols(
     }
 
     collectUnityEventFieldSymbols(runtimeVscode, symbol.children, [...ancestors, symbol], fields);
+  }
+}
+
+/** Collects provider-backed member locations inside the requested type's document symbol subtree. */
+function collectMemberSymbolLocationsInDocument(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[],
+  ancestors: readonly vscode.DocumentSymbol[],
+  typeName: string,
+  memberName: string,
+  kind: 'method' | 'field',
+  locations: CSharpSymbolLocation[],
+  diagnostics: readonly string[]
+): void {
+  for (const symbol of symbols) {
+    if (isSymbolInformation(symbol)) {
+      const expectedKind = kind === 'method'
+        ? runtimeVscode.SymbolKind.Method
+        : runtimeVscode.SymbolKind.Field;
+      const containerName = normalizeCSharpQualifiedName(symbol.containerName);
+      if (symbol.kind === expectedKind &&
+        normalizeCSharpSymbolName(symbol.name) === memberName &&
+        containerName &&
+        matchesCSharpTypeName(containerName, typeName)) {
+        locations.push({
+          uriPath: symbol.location.uri.fsPath,
+          name: normalizeCSharpSymbolName(symbol.name),
+          containerName,
+          range: toCSharpRange(symbol.location.range),
+          source: 'documentSymbols',
+          diagnostics
+        });
+      }
+      continue;
+    }
+
+    const symbolTypeName = getTopLevelTypeKind(runtimeVscode, symbol.kind)
+      ? joinCSharpName(findNearestNamespace(runtimeVscode, ancestors), normalizeCSharpSymbolName(symbol.name))
+      : undefined;
+    if (symbolTypeName && matchesCSharpTypeName(symbolTypeName, typeName)) {
+      collectMemberSymbolsInType(runtimeVscode, uri, symbol, symbolTypeName, memberName, kind, locations, diagnostics);
+      continue;
+    }
+
+    collectMemberSymbolLocationsInDocument(runtimeVscode, uri, symbol.children, [...ancestors, symbol], typeName, memberName, kind, locations, diagnostics);
+  }
+}
+
+/** Collects matching methods or fields once the containing type symbol has been proven. */
+function collectMemberSymbolsInType(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  typeSymbol: vscode.DocumentSymbol,
+  typeName: string,
+  memberName: string,
+  kind: 'method' | 'field',
+  locations: CSharpSymbolLocation[],
+  diagnostics: readonly string[]
+): void {
+  const expectedKind = kind === 'method'
+    ? runtimeVscode.SymbolKind.Method
+    : runtimeVscode.SymbolKind.Field;
+
+  for (const child of typeSymbol.children) {
+    if (child.kind === expectedKind && normalizeCSharpSymbolName(child.name) === memberName) {
+      locations.push({
+        uriPath: uri.fsPath,
+        name: normalizeCSharpSymbolName(child.name),
+        containerName: typeName,
+        range: toCSharpRange(child.selectionRange),
+        source: 'documentSymbols',
+        diagnostics
+      });
+    }
+
+    collectMemberSymbolsInType(runtimeVscode, uri, child, typeName, memberName, kind, locations, diagnostics);
   }
 }
 
@@ -782,6 +1043,7 @@ function flattenProviderSymbolNames(symbols: readonly (vscode.DocumentSymbol | v
 /** Formats provider symbol shape for logs without dumping source code. */
 function describeProviderSymbolShape(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): string {
   return JSON.stringify(symbols.map(symbol => ({
+    shape: isSymbolInformation(symbol) ? 'SymbolInformation' : 'DocumentSymbol',
     name: symbol.name,
     kind: symbol.kind,
     range: isSymbolInformation(symbol)
@@ -852,7 +1114,7 @@ function normalizeCSharpNamespaceName(name: string | undefined): string | undefi
 
 /** Normalizes provider-qualified type names without inventing missing type data. */
 function normalizeCSharpQualifiedName(name: string | undefined): string | undefined {
-  const providerContainer = normalizeWorkspaceSymbolContainerName(name);
+  const providerContainer = stripCSharpAssemblyName(normalizeWorkspaceSymbolContainerName(name));
   const normalized = providerContainer
     ?.split('.')
     .map(part => normalizeCSharpSymbolName(part))
@@ -868,13 +1130,24 @@ function normalizeWorkspaceSymbolContainerName(name: string | undefined): string
     return undefined;
   }
 
-  const projectScopedMember = /^in\s+(.+?)\s+\(project\s+.+\)$/i.exec(container);
+  const projectScopedMember = /^(?:in|在)\s*(.+?)\s*\((?:project|项目)\s+.+\)\s*(?:中)?$/i.exec(container);
   if (projectScopedMember?.[1]) {
     return projectScopedMember[1];
   }
 
-  const projectScopedType = /^project\s+.+$/i.test(container);
+  const projectScopedType = /^(?:project|项目)\s+.+$/i.test(container);
   return projectScopedType ? undefined : container;
+}
+
+/** Extracts only the declaring type label from localized workspace-symbol containers. */
+function normalizeWorkspaceSymbolContainerShortName(name: string | undefined): string | undefined {
+  const containerName = stripCSharpAssemblyName(normalizeWorkspaceSymbolContainerName(name));
+  return containerName ? shortCSharpTypeName(containerName) : undefined;
+}
+
+/** Removes Unity/Roslyn assembly suffixes from type display strings. */
+function stripCSharpAssemblyName(name: string | undefined): string | undefined {
+  return name?.split(',')[0]?.trim();
 }
 
 /** Joins namespace and symbol names without allowing empty or doubled separators. */
@@ -890,9 +1163,21 @@ function matchesCSharpTypeName(symbolTypeName: string, targetTypeName: string): 
     csharpSymbolKey(shortCSharpTypeName(symbolTypeName)) === csharpSymbolKey(shortCSharpTypeName(targetTypeName));
 }
 
+/** Matches only when both provider and target carry namespace-qualified type names. */
+function matchesFullCSharpDeclaringTypeName(symbolTypeName: string, targetTypeName: string): boolean {
+  const symbolName = normalizeCSharpQualifiedName(symbolTypeName) ?? symbolTypeName;
+  const targetName = normalizeCSharpQualifiedName(targetTypeName) ?? targetTypeName;
+  if (!symbolName.includes('.') || !targetName.includes('.')) {
+    return false;
+  }
+
+  return csharpSymbolKey(symbolName) === csharpSymbolKey(targetName);
+}
+
 /** Returns the final segment of a namespace-qualified C# type name. */
 function shortCSharpTypeName(typeName: string): string {
-  return typeName.split('.').at(-1) ?? typeName;
+  const normalizedTypeName = stripCSharpAssemblyName(typeName) ?? typeName;
+  return normalizedTypeName.split('.').at(-1) ?? normalizedTypeName;
 }
 
 /** Normalizes C# symbol names for case-insensitive comparisons. */
