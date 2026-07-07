@@ -377,7 +377,16 @@ async function runPreparedRenameTypeCommand(runtime: RenameTypeCommandRuntime): 
     return await fallbackToNativeRename(runtime, 'Rename sync mode is off; using VS Code Rename Symbol.');
   }
 
-  const { currentType, fallbackReason } = await waitForRenameCommandPrimaryTopLevelType(runtime);
+  // The command entry must not wait for C# symbols when the cursor is on a
+  // field or member. A single provider snapshot is enough to decide whether
+  // Unity Plus owns this rename or should immediately fall back to native F2.
+  const currentType = await getPrimaryTopLevelType(runtime.languageService, runtime.editor.uri, runtime.mode, runtime.logger);
+  const fallbackReason = getAtomicRenameFallbackReason(
+    runtime.editor.filePath,
+    currentType,
+    runtime.editor.cursor,
+    runtime.mode
+  );
   runtime.logger.debug(`Unity Plus rename command primary top-level type: ${currentType?.name ?? '<none>'}.`);
 
   if (fallbackReason) {
@@ -543,53 +552,6 @@ export function showRenameInput(
 function validateRenameInputValue(value: string): string | undefined {
   const trimmedValue = value.trim();
   return isValidCSharpIdentifier(trimmedValue) ? undefined : 'Enter a valid C# type name.';
-}
-
-async function waitForRenameCommandPrimaryTopLevelType(runtime: RenameTypeCommandRuntime): Promise<{
-  currentType?: CSharpTopLevelTypeSnapshot;
-  fallbackReason?: string;
-}> {
-  if (!runtime.editor) {
-    return { fallbackReason: 'Using VS Code Rename Symbol because no active editor is available.' };
-  }
-
-  let elapsedMs = 0;
-  let attempts = 0;
-  let latestType: CSharpTopLevelTypeSnapshot | undefined;
-  let latestReason: string | undefined;
-
-  while (elapsedMs <= runtime.settleTimeoutMs) {
-    attempts += 1;
-    latestType = await getPrimaryTopLevelType(runtime.languageService, runtime.editor.uri, runtime.mode, runtime.logger);
-    latestReason = getAtomicRenameFallbackReason(
-      runtime.editor.filePath,
-      latestType,
-      runtime.editor.cursor,
-      runtime.mode
-    );
-
-    if (!latestReason || !isRetryableAtomicRenameFallbackReason(latestReason)) {
-      runtime.logger.debug(`Unity Plus rename command primary top-level type settled after ${attempts} attempt(s).`);
-      return {
-        currentType: latestType,
-        fallbackReason: latestReason
-      };
-    }
-
-    await runtime.wait(runtime.retryIntervalMs);
-    elapsedMs += runtime.retryIntervalMs;
-  }
-
-  runtime.logger.debug(`Unity Plus rename command primary top-level type did not settle after ${attempts} attempt(s).`);
-  return {
-    currentType: latestType,
-    fallbackReason: latestReason ?? 'Using VS Code Rename Symbol because no primary top-level C# type was found.'
-  };
-}
-
-function isRetryableAtomicRenameFallbackReason(reason: string): boolean {
-  return reason.includes('no primary top-level C# type was found') ||
-    reason.includes('primary top-level type location is unavailable');
 }
 
 export async function executeAtomicScriptRename(runtime: AtomicScriptRenameRuntime): Promise<AtomicScriptRenameResult> {

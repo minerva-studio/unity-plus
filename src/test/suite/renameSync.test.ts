@@ -12,8 +12,9 @@ import {
   ScriptFilenameSyncPlan,
   ScriptFileRenameOperation,
 } from '../../features/rename/renameSync';
-import { CSharpTopLevelTypeSnapshot } from '../../unity/csharpLanguageService';
+import { createVscodeCSharpLanguageService, CSharpTopLevelTypeSnapshot } from '../../unity/csharpLanguageService';
 import { createLogger, UnityPlusLogOutput } from '../../unity/logger';
+import { configureCSharpSolution, getCSharpProviderReadinessState, getUnityFixtureRoot } from './csharpProviderSetup';
 
 /**
  * Integration tests for renameSync.
@@ -401,6 +402,48 @@ suite('renameSync — Command Registration (Real VS Code)', () => {
   });
 });
 
+suite('renameSync - Real C# Provider Command Routing', () => {
+  test('reads the real primary type name range for the Unity fixture', async function () {
+    this.timeout(30000);
+    const root = getUnityFixtureRoot();
+    await configureCSharpSolution(root);
+
+    const uri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs'));
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+
+    const languageService = createVscodeCSharpLanguageService(vscode);
+    const primaryType = await waitForPrimaryTypeNameRange(languageService, uri, 'Interactable');
+
+    assert.strictEqual(primaryType.name, 'Interactable');
+    assert.ok(primaryType.nameRange, formatCSharpReadinessFailure('missing Interactable name range'));
+    assert.strictEqual(primaryType.nameRange?.start.line, 5);
+    assert.strictEqual(primaryType.nameRange?.start.character, 24);
+  });
+
+  test('falls back from a real UnityEvent field rename without waiting for type settle', async function () {
+    this.timeout(30000);
+    const root = getUnityFixtureRoot();
+    await configureCSharpSolution(root);
+
+    const uri = vscode.Uri.file(join(root.fsPath, 'Assets', 'Scripts', 'Interactable.cs'));
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document, { preview: false, preserveFocus: false });
+    const fieldPosition = findTextPosition(document, 'OnCheckEnable');
+    editor.selection = new vscode.Selection(fieldPosition, fieldPosition);
+
+    try {
+      const elapsedMs = await measureCommandElapsedMilliseconds('unityPlus.syncClassName', 1200);
+      assert.ok(
+        elapsedMs < 1200,
+        `field rename should fall back before the old 2s type-settle wait; elapsed=${elapsedMs}ms; ${formatCSharpReadinessFailure()}`
+      );
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    }
+  });
+});
+
 // ---- Helpers ----
 
 interface MemoryLogOutput extends UnityPlusLogOutput {
@@ -424,4 +467,78 @@ function createTestLogger() {
     output: createMemoryOutput(),
     getLevel: () => 'debug',
   });
+}
+
+/** Waits for the real C# provider to expose the primary type range used by rename. */
+async function waitForPrimaryTypeNameRange(
+  languageService: ReturnType<typeof createVscodeCSharpLanguageService>,
+  uri: vscode.Uri,
+  expectedName: string
+): Promise<CSharpTopLevelTypeSnapshot> {
+  const timeoutAt = Date.now() + 20000;
+  let lastError = '';
+  while (Date.now() < timeoutAt) {
+    try {
+      const primaryType = await languageService.getPrimaryTopLevelType(uri);
+      if (primaryType?.name === expectedName && primaryType.nameRange) {
+        return primaryType;
+      }
+
+      lastError = `last primary type=${primaryType?.name ?? '<none>'}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+
+  throw new Error(formatCSharpReadinessFailure(`timed out waiting for ${expectedName}; ${lastError}`));
+}
+
+/** Finds a token position in a real VS Code text document. */
+function findTextPosition(document: vscode.TextDocument, token: string): vscode.Position {
+  const text = document.getText();
+  const index = text.indexOf(token);
+  assert.ok(index >= 0, `expected token ${token} in ${document.uri.fsPath}`);
+  return document.positionAt(index);
+}
+
+/** Measures a VS Code command while failing quickly if it regresses to the old wait path. */
+async function measureCommandElapsedMilliseconds(command: string, timeoutMs: number): Promise<number> {
+  const startedAt = Date.now();
+  const cancelTimer = setInterval(() => {
+    void cancelRenameInputIfVisible();
+  }, 100);
+  const timeout = new Promise<'timeout'>(resolve => {
+    setTimeout(() => resolve('timeout'), timeoutMs);
+  });
+  try {
+    const completed = vscode.commands.executeCommand(command).then(() => 'completed' as const);
+    const result = await Promise.race([completed, timeout]);
+    if (result === 'timeout') {
+      throw new Error(`${command} did not return within ${timeoutMs}ms`);
+    }
+
+    return Date.now() - startedAt;
+  } finally {
+    clearInterval(cancelTimer);
+    await cancelRenameInputIfVisible();
+  }
+}
+
+/** Formats real C# provider setup details for integration failures. */
+function formatCSharpReadinessFailure(reason = 'C# provider did not expose the expected rename symbols'): string {
+  const readiness = getCSharpProviderReadinessState();
+  return `${reason}; readiness=${JSON.stringify(readiness ?? null)}`;
+}
+
+/** Cancels VS Code's native rename input when the command falls back to editor.action.rename. */
+async function cancelRenameInputIfVisible(): Promise<void> {
+  for (const command of ['cancelRenameInput', 'workbench.action.closeQuickOpen']) {
+    try {
+      await vscode.commands.executeCommand(command);
+    } catch {
+      // Some VS Code builds do not expose all UI cancellation commands.
+    }
+  }
 }
