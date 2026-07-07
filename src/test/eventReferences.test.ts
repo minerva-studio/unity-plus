@@ -5,6 +5,8 @@ import {
   parseUnityEventReferences,
   registerEventReferenceFeature
 } from '../features/event-references/eventReferences';
+import { createReferenceIndex } from '../features/event-references/referenceIndex';
+import { showReferenceLocations } from '../features/event-references/referenceLocations';
 import { createLogger, UnityPlusLogOutput } from '../unity/logger';
 import { createLazyUnityMetadataIndex, UnityMetadataIndex } from '../unity/metadataIndex';
 import type { CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../unity/csharpLanguageService';
@@ -1203,6 +1205,204 @@ describe('eventReferences', () => {
 
     assert.strictEqual(runtime.referenceCommands.length, 0);
     assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
+  });
+
+  it('resolves field targets by target type before using a mismatched YAML script path', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = createReferenceIndex([{
+      assetPath: 'Assets/Gate.prefab',
+      assetKind: 'prefab',
+      line: 13,
+      character: 22,
+      eventFieldName: 'OnCheckEnable',
+      eventScriptPath: gateScriptPath,
+      targetTypeName: 'Amlos.Fixtures.UpgradeAltar',
+      methodName: 'Interact',
+      scriptPath: 'Assets/Avgamator.cs',
+      scriptTypeName: 'Amlos.Fixtures.UpgradeAltar'
+    }]);
+    const csharpLanguageService = {
+      ...createFakeCSharpSymbolLanguageService({}),
+      async findTypesByName(typeName: string) {
+        assert.strictEqual(typeName, 'Amlos.Fixtures.UpgradeAltar');
+        return [{
+          name: 'UpgradeAltar',
+          fullName: 'Amlos.Fixtures.UpgradeAltar',
+          uriPath: '/Project/Assets/UpgradeAltar.cs',
+          range: {
+            start: { line: 2, character: 13 },
+            end: { line: 2, character: 25 }
+          }
+        }];
+      },
+      async findTargetMethodPosition(uri: vscode.Uri, targetTypeName: string, methodName: string) {
+        assert.strictEqual(uri.fsPath, '/Project/Assets/UpgradeAltar.cs');
+        assert.strictEqual(targetTypeName, 'Amlos.Fixtures.UpgradeAltar');
+        assert.strictEqual(methodName, 'Interact');
+        return [{ line: 18, character: 14 }];
+      }
+    };
+
+    await showReferenceLocations({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      findAssetFiles: async () => [],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => '',
+      getCacheVersion: () => 0,
+      csharpLanguageService
+    }, index, {
+      kind: 'fieldTarget',
+      scriptPath: gateScriptPath,
+      symbolName: 'OnCheckEnable',
+      typeName: 'Gate',
+      position: new FakePosition(3, 20) as unknown as vscode.Position
+    }, () => undefined, () => true);
+
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/UpgradeAltar.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(18, 14));
+  });
+
+  it('does not use a mismatched secondary script path when target type lookup is ambiguous', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = createReferenceIndex([{
+      assetPath: 'Assets/Gate.prefab',
+      assetKind: 'prefab',
+      line: 13,
+      character: 22,
+      eventFieldName: 'OnCheckEnable',
+      eventScriptPath: gateScriptPath,
+      targetTypeName: 'Amlos.Fixtures.UpgradeAltar',
+      methodName: 'Interact',
+      scriptPath: 'Assets/Avgamator.cs',
+      scriptTypeName: 'Amlos.Fixtures.UpgradeAltar'
+    }]);
+    const csharpLanguageService = {
+      ...createFakeCSharpSymbolLanguageService({}),
+      async findTypesByName() {
+        return [
+          {
+            name: 'UpgradeAltar',
+            fullName: 'Amlos.Fixtures.UpgradeAltar',
+            uriPath: '/Project/Assets/UpgradeAltar.cs',
+            range: {
+              start: { line: 1, character: 13 },
+              end: { line: 1, character: 25 }
+            }
+          },
+          {
+            name: 'UpgradeAltar',
+            fullName: 'Amlos.Fixtures.UpgradeAltar',
+            uriPath: '/Project/Packages/Other/UpgradeAltar.cs',
+            range: {
+              start: { line: 1, character: 13 },
+              end: { line: 1, character: 25 }
+            }
+          }
+        ];
+      },
+      async findTargetMethodPosition() {
+        assert.fail('Mismatched secondary script paths must not be queried.');
+      }
+    };
+
+    await showReferenceLocations({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      findAssetFiles: async () => [],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => '',
+      getCacheVersion: () => 0,
+      csharpLanguageService
+    }, index, {
+      kind: 'fieldTarget',
+      scriptPath: gateScriptPath,
+      symbolName: 'OnCheckEnable',
+      typeName: 'Gate',
+      position: new FakePosition(3, 20) as unknown as vscode.Position
+    }, () => undefined, () => true);
+
+    assert.strictEqual(runtime.referenceCommands.length, 0);
+    assert.strictEqual(runtime.infoMessages.at(-1), 'Unity Plus: no UnityEvent target methods found for this field.');
+  });
+
+  it('retries target method lookup when the C# provider is namespace-only during click', async () => {
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+    const index = createReferenceIndex([{
+      assetPath: 'Assets/Gate.prefab',
+      assetKind: 'prefab',
+      line: 13,
+      character: 22,
+      eventFieldName: 'OnCheckEnable',
+      eventScriptPath: gateScriptPath,
+      targetTypeName: 'Amlos.Fixtures.Gate',
+      methodName: 'CanInteract',
+      scriptPath: gateScriptPath,
+      scriptTypeName: 'Amlos.Fixtures.Gate'
+    }]);
+    let targetLookupCount = 0;
+    const csharpLanguageService = {
+      ...createFakeCSharpSymbolLanguageService({}),
+      async findTypesByName() {
+        return [{
+          name: 'Gate',
+          fullName: 'Amlos.Fixtures.Gate',
+          uriPath: '/Project/Assets/Gate.cs',
+          range: {
+            start: { line: 1, character: 13 },
+            end: { line: 1, character: 17 }
+          }
+        }];
+      },
+      async findTargetMethodPosition() {
+        targetLookupCount += 1;
+        if (targetLookupCount === 1) {
+          throw new Error('C# document symbol provider returned namespace-only symbols for target method Amlos.Fixtures.Gate.CanInteract.');
+        }
+
+        return [{ line: 4, character: 14 }];
+      }
+    };
+
+    await showReferenceLocations({
+      runtimeVscode: runtime.runtime,
+      logger: createTestLogger(),
+      metadataIndex: lazyIndex,
+      findAssetFiles: async () => [],
+      findCSharpFiles: async () => [],
+      readTextFile: async () => '',
+      getCacheVersion: () => 0,
+      csharpLanguageService
+    }, index, {
+      kind: 'fieldTarget',
+      scriptPath: gateScriptPath,
+      symbolName: 'OnCheckEnable',
+      typeName: 'Gate',
+      position: new FakePosition(3, 20) as unknown as vscode.Position
+    }, () => undefined, () => true);
+
+    assert.strictEqual(targetLookupCount, 2);
+    assert.strictEqual(runtime.referenceCommands.length, 1);
+    assert.strictEqual(runtime.referenceCommands[0].locations[0].uri.fsPath, '/Project/Assets/Gate.cs');
+    assert.deepStrictEqual(runtime.referenceCommands[0].locations[0].range.start, new FakePosition(4, 14));
   });
 
   it('deduplicates UnityEvent field target C# method declarations across normal and override assets', async () => {
@@ -2768,6 +2968,11 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
     },
     async findTypes(uri) {
       return typesByPath[uri.fsPath] ?? [];
+    },
+    async findTypesByName(typeName) {
+      return Object.values(typesByPath)
+        .flat()
+        .filter(type => type.fullName === typeName || type.name === typeName.split('.').at(-1));
     },
     async findUnityEventFields() {
       return [];

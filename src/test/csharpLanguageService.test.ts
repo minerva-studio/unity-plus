@@ -199,4 +199,25 @@ describe('csharpLanguageService', () => {
     assert.strictEqual(fields[0]?.name, 'OnCheckEnable');
   });
 
+  it('finds target types by provider workspace symbols and keeps their source URI', async () => {
+    const queries: string[] = [];
+    const service = createServiceWithSymbols([], {
+      queries,
+      workspaceSymbols: {
+        'Amlos.Fixtures.UpgradeAltar': [],
+        UpgradeAltar: [
+          fakeSymbolInformation('UpgradeAltar', symbolKind.Class, 'Amlos.Fixtures.', fakeRange(2, 13, 25), '/Project/Assets/UpgradeAltar.cs'),
+          fakeSymbolInformation('UpgradeAltar', symbolKind.Class, 'Other.Namespace.', fakeRange(2, 13, 25), '/Project/Assets/OtherUpgradeAltar.cs')
+        ]
+      }
+    });
+
+    const types = await service.findTypesByName('Amlos.Fixtures.UpgradeAltar');
+
+    assert.deepStrictEqual(queries, ['Amlos.Fixtures.UpgradeAltar', 'UpgradeAltar']);
+    assert.strictEqual(types.length, 1);
+    assert.strictEqual(types[0].fullName, 'Amlos.Fixtures.UpgradeAltar');
+    assert.strictEqual(types[0].uriPath, '/Project/Assets/UpgradeAltar.cs');
+  });
+
 });
