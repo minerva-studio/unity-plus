@@ -1,7 +1,7 @@
 import type * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
 import type { LazyUnityMetadataIndex, UnityMetadataIndex } from '../../unity/metadataIndex';
-import type { UnityTextSearchFileResult } from '../../unity/textSearch';
+import type { UnityAssetTextSearchResult, UnityYamlAssetHandler } from '../unity-yaml-assets/handler';
 import type {
   UnitySerializedInstanceBuildContext,
   UnitySerializedInstanceIndex,
@@ -13,7 +13,7 @@ export interface SerializedInstancesFeatureOptions {
   runtimeVscode?: typeof vscode;
   isEnabled?: () => boolean;
   findAssetFiles?: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
-  findAssetFilesContainingText?: (root: vscode.Uri, runtimeVscode: typeof vscode, text: readonly string[], cancellationToken?: vscode.CancellationToken) => Promise<UnityTextSearchFileResult>;
+  findAssetFilesContainingText?: (root: vscode.Uri, runtimeVscode: typeof vscode, text: readonly string[], cancellationToken?: vscode.CancellationToken) => Promise<UnityAssetTextSearchResult>;
   readTextFile?: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
   getCacheVersion?: () => number;
 }
@@ -25,6 +25,7 @@ export interface SerializedInstancesRuntime {
   findAssetFiles: (root: vscode.Uri, runtimeVscode: typeof vscode) => Promise<readonly vscode.Uri[]>;
   searchAssetFilesContainingText?: UnityAssetTextSearch;
   readTextFile: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
+  yamlAssets?: UnityYamlAssetHandler;
   getCacheVersion: () => number;
   scanStatus?: UnitySerializedInstanceScanStatusReporter;
 }
@@ -34,11 +35,12 @@ export type UnityAssetTextSearch = (
   runtimeVscode: typeof vscode,
   texts: readonly string[],
   cancellationToken?: vscode.CancellationToken
-) => Promise<UnityTextSearchFileResult>;
+) => Promise<UnityAssetTextSearchResult>;
 
 export interface SerializedInstanceLocationTarget {
   kind: 'serializedInstance';
   scriptPath: string;
+  scriptGuid?: string;
   typeName?: string;
   serializedInstances?: readonly import('./model').UnitySerializedInstanceLocation[];
   position: vscode.Position;

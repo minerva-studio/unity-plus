@@ -102,6 +102,13 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
 
       const fields: CSharpFieldSymbolSnapshot[] = [];
       collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
+      if (fields.length === 0 && containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+        const workspaceFields = await findUnityEventFieldsFromWorkspaceSymbols(runtimeVscode, uri);
+        if (workspaceFields.length > 0) {
+          return workspaceFields;
+        }
+      }
+
       throwIfNamespaceOnlyDocumentSymbols(runtimeVscode, uri, symbols, fields.length, 'UnityEvent fields');
       return fields;
     },
@@ -365,6 +372,138 @@ function collectUnityEventFieldSymbols(
   }
 }
 
+/** Uses provider-backed workspace symbols as a fallback when document symbols are namespace-only. */
+async function findUnityEventFieldsFromWorkspaceSymbols(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<CSharpFieldSymbolSnapshot[]> {
+  const symbols = await getWorkspaceSymbolsForExactUri(runtimeVscode, uri);
+  const fields: CSharpFieldSymbolSnapshot[] = [];
+
+  for (const symbol of symbols) {
+    if (symbol.kind !== runtimeVscode.SymbolKind.Field) {
+      continue;
+    }
+
+    if (!await isWorkspaceSymbolUnityEventField(runtimeVscode, symbol)) {
+      continue;
+    }
+
+    fields.push({
+      name: normalizeCSharpSymbolName(symbol.name),
+      typeName: normalizeCSharpQualifiedName(symbol.containerName),
+      range: toCSharpRange(symbol.location.range)
+    });
+  }
+
+  return dedupeFieldSnapshots(fields);
+}
+
+/** Finds workspace symbols and keeps only exact URI matches from the C# provider. */
+async function getWorkspaceSymbolsForExactUri(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri
+): Promise<vscode.SymbolInformation[]> {
+  const uriKey = csharpUriKey(uri);
+  const queryNames = createWorkspaceSymbolFallbackQueries(uri);
+  const symbolsByKey = new Map<string, vscode.SymbolInformation>();
+
+  for (const query of queryNames) {
+    const symbols = await runtimeVscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>(
+      'vscode.executeWorkspaceSymbolProvider',
+      query
+    );
+
+    for (const symbol of symbols ?? []) {
+      if (csharpUriKey(symbol.location.uri) !== uriKey) {
+        continue;
+      }
+
+      const key = `${symbol.kind}:${symbol.name}:${symbol.location.range.start.line}:${symbol.location.range.start.character}`;
+      symbolsByKey.set(key, symbol);
+    }
+  }
+
+  return [...symbolsByKey.values()];
+}
+
+/** Creates bounded provider queries used only after document symbols prove namespace-only. */
+function createWorkspaceSymbolFallbackQueries(uri: vscode.Uri): readonly string[] {
+  const fileName = uri.fsPath.split(/[\\/]/).pop()?.replace(/\.cs$/i, '') ?? '';
+  return [
+    fileName,
+    'UnityEvent',
+    'Event',
+    'On',
+    ...'abcdefghijklmnopqrstuvwxyz'.split('')
+  ].filter(query => query.length > 0);
+}
+
+/** Proves a workspace field candidate is UnityEvent-typed using provider hover data. */
+async function isWorkspaceSymbolUnityEventField(
+  runtimeVscode: typeof vscode,
+  symbol: vscode.SymbolInformation
+): Promise<boolean> {
+  const hoverText = await readProviderHoverText(runtimeVscode, symbol.location.uri, symbol.location.range.start);
+  return isUnityEventTypeText(hoverText) || isUnityEventTypeText(symbol.containerName ?? '');
+}
+
+/** Reads hover text at a provider-backed symbol position without parsing C# source text. */
+async function readProviderHoverText(
+  runtimeVscode: typeof vscode,
+  uri: vscode.Uri,
+  position: vscode.Position
+): Promise<string> {
+  const hovers = await runtimeVscode.commands.executeCommand<vscode.Hover[] | undefined>(
+    'vscode.executeHoverProvider',
+    uri,
+    position
+  );
+
+  return (hovers ?? [])
+    .flatMap(hover => hover.contents.map(content => markdownContentToString(content)))
+    .join('\n');
+}
+
+/** Converts VS Code hover payload variants into plain diagnostic text. */
+function markdownContentToString(content: vscode.MarkdownString | vscode.MarkedString): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if ('value' in content) {
+    return content.value;
+  }
+
+  const marked = content as { language?: string; value: string };
+  return marked.language
+    ? `${marked.language}\n${marked.value}`
+    : marked.value;
+}
+
+/** Checks provider hover/detail text for UnityEvent or UnityEvent<T> type evidence. */
+function isUnityEventTypeText(value: string): boolean {
+  return /(?:^|[^A-Za-z0-9_.])(?:UnityEngine\.Events\.)?UnityEvent(?:\s*<|\b)/.test(value);
+}
+
+/** Removes duplicate field snapshots emitted by broad workspace symbol queries. */
+function dedupeFieldSnapshots(fields: readonly CSharpFieldSymbolSnapshot[]): CSharpFieldSymbolSnapshot[] {
+  const seen = new Set<string>();
+  const deduped: CSharpFieldSymbolSnapshot[] = [];
+
+  for (const field of fields) {
+    const key = `${field.name}:${field.range.start.line}:${field.range.start.character}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(field);
+  }
+
+  return deduped;
+}
+
 /** Collects ALL matching method positions inside the type named by Unity YAML
  *  metadata.  Avoiding the first overload / partial candidate prevents false
  *  locations when the target type declares multiple same-name methods. */
@@ -434,9 +573,10 @@ function throwIfNamespaceOnlyDocumentSymbols(
   }
 
   const providerNames = flattenProviderSymbolNames(symbols).join(', ') || '<none>';
+  const providerShape = describeProviderSymbolShape(symbols);
   throw new Error(
     `C# document symbol provider returned namespace-only symbols for ${semanticName} in ${uri.fsPath}. ` +
-    `Provider symbols: ${providerNames}.`
+    `Provider symbols: ${providerNames}. Raw shape: ${providerShape}.`
   );
 }
 
@@ -475,6 +615,33 @@ function flattenProviderSymbolNames(symbols: readonly (vscode.DocumentSymbol | v
   }
 
   return names;
+}
+
+/** Formats provider symbol shape for logs without dumping source code. */
+function describeProviderSymbolShape(symbols: readonly (vscode.DocumentSymbol | vscode.SymbolInformation)[]): string {
+  return JSON.stringify(symbols.map(symbol => ({
+    name: symbol.name,
+    kind: symbol.kind,
+    range: isSymbolInformation(symbol)
+      ? toPlainRange(symbol.location.range)
+      : toPlainRange(symbol.selectionRange),
+    children: isSymbolInformation(symbol)
+      ? undefined
+      : symbol.children.length
+  })));
+}
+
+/** Converts a VS Code range into a stable JSON-ready diagnostic object. */
+function toPlainRange(range: vscode.Range): { start: CSharpPosition; end: CSharpPosition } {
+  return {
+    start: toCSharpPosition(range.start),
+    end: toCSharpPosition(range.end)
+  };
+}
+
+/** Normalizes a provider URI for exact file matching. */
+function csharpUriKey(uri: vscode.Uri): string {
+  return uri.fsPath.replace(/\\/g, '/').toLowerCase();
 }
 
 /** Finds the nearest type ancestor for method and field symbols. */

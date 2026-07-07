@@ -4,7 +4,7 @@ import { eventReferenceCandidateTexts, getAssetKind } from './assetDiscovery';
 import { countUnfinishedAssets, createEmptyDiagnostics, incrementAssetCount, mergeDiagnostics } from './diagnostics';
 import type { UnityEventCandidateSearchBackend, UnityEventReference, UnityEventReferenceBuildContext, UnitySerializedAssetReferenceIndex } from './model';
 import { createReferenceIndex } from './referenceIndex';
-import { parseUnityEventReferencesWithDiagnostics } from './parser';
+import { parseUnityEventReferencesFromParsedDocuments, parseUnityEventReferencesWithDiagnostics } from './parser';
 import { buildDefaultCSharpTypeIndex } from './typeIndex';
 import type { CSharpTypeIndex, EventReferenceRuntime } from './runtime';
 import { backgroundScanYieldEvery, defaultAssetScanConcurrency, progressReportInterval, scanYieldEvery } from './runtime';
@@ -60,14 +60,15 @@ export async function buildUnityEventReferenceIndex(
 
     try {
       const assetPath = toProjectPath(runtime.metadataIndex.root, assetUri);
-      const assetKind = getAssetKind(assetUri);
+      const parsedAsset = await runtime.yamlAssets?.getParsedAsset(assetUri, 'eventReferences');
+      const assetKind = parsedAsset?.assetKind ?? getAssetKind(assetUri);
 
       if (!assetKind) {
         diagnostics.skippedAssetCount += 1;
         return;
       }
 
-      const content = await runtime.readTextFile(assetUri, runtime.runtimeVscode);
+      const content = parsedAsset?.content ?? await runtime.readTextFile(assetUri, runtime.runtimeVscode);
       diagnostics.assetReadCount += 1;
       throwIfCancellationRequested(context.cancellationToken);
 
@@ -77,7 +78,22 @@ export async function buildUnityEventReferenceIndex(
       }
 
       incrementAssetCount(diagnostics, assetKind);
-      const parsed = await parseUnityEventReferencesWithDiagnostics(content, assetPath, assetKind, metadataIndex, resolveCSharpType);
+      const parsed = parsedAsset
+        ? await parseUnityEventReferencesFromParsedDocuments(
+          content,
+          parsedAsset.parsed.documents,
+          assetPath,
+          assetKind,
+          metadataIndex,
+          resolveCSharpType
+        )
+        : await parseUnityEventReferencesWithDiagnostics(
+          content,
+          assetPath,
+          assetKind,
+          metadataIndex,
+          resolveCSharpType
+        );
       throwIfCancellationRequested(context.cancellationToken);
 
       mergeDiagnostics(diagnostics, parsed.diagnostics);
@@ -247,6 +263,16 @@ async function findUnityEventCandidateAssetFiles(
   context: UnityEventReferenceBuildContext
 ): Promise<{ files: readonly vscode.Uri[]; backend: UnityEventCandidateSearchBackend; textSearchCount: number }> {
   throwIfCancellationRequested(context.cancellationToken);
+  if (runtime.yamlAssets) {
+    const result = await runtime.yamlAssets.findAssetsContainingText(eventReferenceCandidateTexts, context.cancellationToken);
+
+    return {
+      files: result.files,
+      backend: result.backend,
+      textSearchCount: result.searchCount
+    };
+  }
+
   if (runtime.searchAssetFilesContainingText) {
     const result = await runtime.searchAssetFilesContainingText(
       runtime.metadataIndex.root,
@@ -292,6 +318,15 @@ export async function findCurrentScriptCandidateAssetFiles(
   token: vscode.CancellationToken
 ): Promise<{ files: readonly vscode.Uri[]; backend: UnityEventCandidateSearchBackend; textSearchCount: number }> {
   throwIfCancellationRequested(token);
+
+  if (runtime.yamlAssets) {
+    const result = await runtime.yamlAssets.findAssetsContainingGuid(scriptGuid, token);
+    return {
+      files: result.files,
+      backend: result.backend,
+      textSearchCount: result.searchCount
+    };
+  }
 
   if (runtime.searchAssetFilesContainingText) {
     const result = await runtime.searchAssetFilesContainingText(

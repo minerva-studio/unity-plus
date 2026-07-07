@@ -11,6 +11,7 @@ import { buildUnityEventReferenceIndex } from './scanner';
 import { createUnityEventReferenceScanStatus } from './scanStatus';
 import { buildDefaultCSharpTypeIndex } from './typeIndex';
 import { readDefaultTextFile } from './utils';
+import { createSharedUnityYamlAssetHandler } from '../unity-yaml-assets/handler';
 import type { EventReferenceFeatureOptions, EventReferenceRuntime, UnityEventReferenceIndexController } from './runtime';
 
 export type {
@@ -43,15 +44,44 @@ export function registerEventReferenceFeature(
       !options.findAssetFilesContainingText &&
       !options.searchAssetFilesContainingText;
     const scanStatus = createUnityEventReferenceScanStatus(runtimeVscode, logger, formatDiagnostics);
+    const searchAssetFilesContainingText = options.searchAssetFilesContainingText ??
+      (options.findAssetFilesContainingText
+        ? async (root: vscode.Uri, searchRuntimeVscode: typeof vscode, texts: readonly string[]) => {
+          const startedAt = Date.now();
+          const candidates = new Map<string, vscode.Uri>();
+          for (const text of texts) {
+            const files = await options.findAssetFilesContainingText?.(root, searchRuntimeVscode, text) ?? [];
+            for (const uri of files) {
+              candidates.set(uri.fsPath.replace(/\\/g, '/').toLowerCase(), uri);
+            }
+          }
+
+          return {
+            files: [...candidates.values()],
+            backend: 'injectedTextSearch' as const,
+            searchCount: texts.length,
+            elapsedMilliseconds: Date.now() - startedAt
+          };
+        }
+        : (useDefaultAssetSearch ? findDefaultAssetFilesContainingText : undefined));
+    const yamlAssets = createSharedUnityYamlAssetHandler({
+      root: options.metadataIndex.root,
+      runtimeVscode,
+      logger,
+      findAssetFiles: options.findAssetFiles ?? findDefaultAssetFiles,
+      searchAssetFilesContainingText,
+      readTextFile: options.readTextFile ?? readDefaultTextFile
+    });
     const featureRuntime: EventReferenceRuntime = {
       runtimeVscode,
       logger,
       metadataIndex: options.metadataIndex,
       findAssetFiles: options.findAssetFiles ?? findDefaultAssetFiles,
       findAssetFilesContainingText: options.findAssetFilesContainingText,
-      searchAssetFilesContainingText: options.searchAssetFilesContainingText ?? (useDefaultAssetSearch ? findDefaultAssetFilesContainingText : undefined),
+      searchAssetFilesContainingText,
       findCSharpFiles: options.findCSharpFiles ?? findDefaultCSharpFiles,
       readTextFile: options.readTextFile ?? readDefaultTextFile,
+      yamlAssets,
       getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion,
       resolveCSharpType: options.resolveCSharpType,
       buildCSharpTypeIndex: options.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex,
@@ -65,6 +95,7 @@ export function registerEventReferenceFeature(
       scanStatus,
       watchUnitySerializedAssetFiles(runtimeVscode, options.metadataIndex.root, uri => {
         serializedAssetCacheVersion += 1;
+        yamlAssets.invalidate(uri);
         logger.debug(`UnityEvent reference cache invalidated by serialized asset change: ${uri.fsPath}`);
         indexController?.notifyCodeLensesChanged();
       }),

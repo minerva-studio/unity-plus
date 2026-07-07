@@ -21,7 +21,7 @@ interface SerializedObjectRecord {
 interface SerializedScriptIdentity {
   scriptPath?: string;
   typeName?: string;
-  source?: 'guid' | 'editorClassIdentifier';
+  source?: 'guid';
 }
 
 /** Parses serialized MonoBehaviour instance locations from one Unity YAML asset. */
@@ -49,13 +49,26 @@ export async function parseSerializedInstancesWithDiagnostics(
   return { serializedInstances, diagnostics };
 }
 
+/** Collects serialized instances from an already parsed Unity YAML asset. */
+export function collectSerializedInstancesFromParsedDocuments(
+  documents: readonly UnityYamlDocument[],
+  assetPath: string,
+  assetKind: UnitySerializedAssetKind,
+  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
+  diagnostics: UnitySerializedInstanceDiagnostics,
+  target?: { scriptGuid: string; scriptPath: string; typeName?: string }
+): UnitySerializedInstanceLocation[] {
+  return collectSerializedInstancesFromDocuments(documents, assetPath, assetKind, metadataIndex, diagnostics, target);
+}
+
 /** Collects serialized script instances from vendored parser AST documents. */
 function collectSerializedInstancesFromDocuments(
   documents: readonly UnityYamlDocument[],
   assetPath: string,
   assetKind: UnitySerializedAssetKind,
   metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
-  diagnostics: UnitySerializedInstanceDiagnostics
+  diagnostics: UnitySerializedInstanceDiagnostics,
+  target?: { scriptGuid: string; scriptPath: string; typeName?: string }
 ): UnitySerializedInstanceLocation[] {
   const locations: UnitySerializedInstanceLocation[] = [];
   const seen = new Set<string>();
@@ -67,7 +80,7 @@ function collectSerializedInstancesFromDocuments(
       diagnostics.serializedInstanceScriptTextHitCount += 1;
     }
 
-    const identity = resolveSerializedDocumentScriptIdentity(candidate, metadataIndex);
+    const identity = resolveSerializedDocumentScriptIdentity(candidate, metadataIndex, target);
     if (guid && identity.scriptPath) {
       diagnostics.serializedInstanceScriptResolvedTextHitCount += 1;
     } else if (guid) {
@@ -75,7 +88,7 @@ function collectSerializedInstancesFromDocuments(
     }
 
     trackSerializedDocumentScriptIdentity(diagnostics, candidate, identity);
-    if (!identity.scriptPath && !identity.typeName) {
+    if (!identity.scriptPath) {
       continue;
     }
 
@@ -119,9 +132,22 @@ function collectSerializedObjects(documents: readonly UnityYamlDocument[]): Read
 /** Resolves a serialized document to a script path first, then an editor-class type fallback. */
 function resolveSerializedDocumentScriptIdentity(
   candidate: UnityYamlSerializedScriptDocument,
-  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>
+  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
+  target?: { scriptGuid: string; scriptPath: string; typeName?: string }
 ): SerializedScriptIdentity {
   if (candidate.scriptReference) {
+    if (target) {
+      if (candidate.scriptReference.guid.toLowerCase() !== target.scriptGuid.toLowerCase()) {
+        return {};
+      }
+
+      return {
+        scriptPath: target.scriptPath,
+        typeName: target.typeName,
+        source: 'guid'
+      };
+    }
+
     const scriptPath = metadataIndex.getAssetPath(candidate.scriptReference.guid);
     if (scriptPath) {
       return {
@@ -132,15 +158,7 @@ function resolveSerializedDocumentScriptIdentity(
     }
   }
 
-  if (!candidate.editorTypeName) {
-    return {};
-  }
-
-  // Keep editor class identifiers as type-only evidence without waking C# providers.
-  return {
-    typeName: candidate.editorTypeName,
-    source: 'editorClassIdentifier'
-  };
+  return {};
 }
 
 /** Records how a serialized script document identity was resolved for diagnostics. */
@@ -151,8 +169,6 @@ function trackSerializedDocumentScriptIdentity(
 ): void {
   if (identity.source === 'guid') {
     diagnostics.resolvedSerializedInstanceScriptGuidCount += 1;
-  } else if (identity.source === 'editorClassIdentifier') {
-    diagnostics.resolvedSerializedInstanceEditorClassIdentifierCount += 1;
   } else if (candidate.scriptReference || candidate.editorTypeName) {
     diagnostics.unresolvedSerializedInstanceScriptCount += 1;
   }

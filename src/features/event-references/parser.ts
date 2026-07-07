@@ -60,6 +60,28 @@ export async function parseUnityEventReferencesWithDiagnostics(
   return await parseUnityEventReferencesCore(content, assetPath, assetKind, metadataIndex, resolveCSharpType);
 }
 
+/** Parses references from an already parsed Unity YAML document snapshot. */
+export async function parseUnityEventReferencesFromParsedDocuments(
+  content: string,
+  documents: readonly UnityYamlDocument[],
+  assetPath: string,
+  assetKind: UnitySerializedAssetKind,
+  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
+  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
+): Promise<{
+  references: UnityEventReference[];
+  diagnostics: UnityEventReferenceDiagnostics;
+}> {
+  return await collectUnityEventReferencesFromDocuments(
+    content,
+    documents,
+    assetPath,
+    assetKind,
+    metadataIndex,
+    resolveCSharpType
+  );
+}
+
 /** Shares YAML parsing between the public parser and diagnostics-aware index path. */
 async function parseUnityEventReferencesCore(
   content: string,
@@ -71,8 +93,23 @@ async function parseUnityEventReferencesCore(
   references: UnityEventReference[];
   diagnostics: UnityEventReferenceDiagnostics;
 }> {
-  const diagnostics = createEmptyDiagnostics();
   const documents = parseUnityYamlAsset(content, { profile: 'eventReferences' }).documents;
+  return await collectUnityEventReferencesFromDocuments(content, documents, assetPath, assetKind, metadataIndex, resolveCSharpType);
+}
+
+/** Collects UnityEvent references from parsed YAML documents without reparsing text. */
+async function collectUnityEventReferencesFromDocuments(
+  content: string,
+  documents: readonly UnityYamlDocument[],
+  assetPath: string,
+  assetKind: UnitySerializedAssetKind,
+  metadataIndex: Pick<UnityMetadataIndex, 'getAssetPath'>,
+  resolveCSharpType: (fullTypeName: string) => Promise<string | undefined>
+): Promise<{
+  references: UnityEventReference[];
+  diagnostics: UnityEventReferenceDiagnostics;
+}> {
+  const diagnostics = createEmptyDiagnostics();
   const objects = new Map<string, SerializedObjectRecord>();
   const callsByDocument = new Map<string, PersistentCallSnapshot[]>();
   const shouldParseUnityEventCalls = needsHeavyUnityEventParsing(content);

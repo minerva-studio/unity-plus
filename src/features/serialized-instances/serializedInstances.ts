@@ -7,6 +7,7 @@ import {
   watchUnitySerializedAssetFiles
 } from '../serialized-assets/assetDiscovery';
 import { readDefaultTextFile } from '../serialized-assets/utils';
+import { createSharedUnityYamlAssetHandler } from '../unity-yaml-assets/handler';
 import {
   formatSerializedInstanceDiagnostics
 } from './diagnostics';
@@ -42,6 +43,14 @@ export function registerSerializedInstancesFeature(
 
   if (options.metadataIndex) {
     const scanStatus = createSerializedInstanceScanStatus(runtimeVscode, logger, formatSerializedInstanceDiagnostics);
+    const yamlAssets = createSharedUnityYamlAssetHandler({
+      root: options.metadataIndex.root,
+      runtimeVscode,
+      logger,
+      findAssetFiles: options.findAssetFiles ?? findDefaultAssetFiles,
+      searchAssetFilesContainingText: options.findAssetFilesContainingText ?? findDefaultAssetFilesContainingText,
+      readTextFile: options.readTextFile ?? readDefaultTextFile
+    });
     const featureRuntime: SerializedInstancesRuntime = {
       runtimeVscode,
       logger,
@@ -49,6 +58,7 @@ export function registerSerializedInstancesFeature(
       findAssetFiles: options.findAssetFiles ?? findDefaultAssetFiles,
       searchAssetFilesContainingText: options.findAssetFilesContainingText ?? findDefaultAssetFilesContainingText,
       readTextFile: options.readTextFile ?? readDefaultTextFile,
+      yamlAssets,
       getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion,
       scanStatus
     };
@@ -59,6 +69,7 @@ export function registerSerializedInstancesFeature(
       scanStatus,
       watchUnitySerializedAssetFiles(runtimeVscode, options.metadataIndex.root, uri => {
         serializedAssetCacheVersion += 1;
+        yamlAssets.invalidate(uri);
         logger.debug(`Unity serialized instance cache invalidated by serialized asset change: ${uri.fsPath}`);
         controller.notifyCodeLensesChanged();
       }),

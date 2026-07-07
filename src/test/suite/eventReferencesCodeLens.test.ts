@@ -11,6 +11,7 @@ import { createSerializedInstanceProvider } from '../../features/serialized-inst
 import type { SerializedInstanceIndexController, SerializedInstancesRuntime } from '../../features/serialized-instances/runtime';
 import type { UnitySerializedInstanceIndex } from '../../features/serialized-instances/model';
 import { readDefaultTextFile } from '../../features/event-references/utils';
+import { createSharedUnityYamlAssetHandler } from '../../features/unity-yaml-assets/handler';
 import type { CSharpFieldSymbolSnapshot, CSharpMethodSymbolSnapshot, CSharpSymbolLanguageService, CSharpTypeSymbolSnapshot } from '../../unity/csharpLanguageService';
 import { createLazyUnityMetadataIndex } from '../../unity/metadataIndex';
 import type { UnityPlusLogger } from '../../unity/logger';
@@ -95,6 +96,7 @@ function createSerializedFixtureRuntime(runtime: EventReferenceRuntime): Seriali
     metadataIndex: runtime.metadataIndex,
     findAssetFiles: runtime.findAssetFiles,
     readTextFile: runtime.readTextFile,
+    yamlAssets: runtime.yamlAssets,
     getCacheVersion: runtime.getCacheVersion
   };
 }
@@ -109,13 +111,21 @@ function createFixtureRuntime(
   metadataIndex: EventReferenceRuntime['metadataIndex'],
   csharpLanguageService: CSharpSymbolLanguageService
 ): EventReferenceRuntime {
+  const logger = createMemoryLogger();
   return {
     runtimeVscode: vscode,
-    logger: createMemoryLogger(),
+    logger,
     metadataIndex,
     findAssetFiles: findDefaultAssetFiles,
     findCSharpFiles: findDefaultCSharpFiles,
     readTextFile: readDefaultTextFile,
+    yamlAssets: createSharedUnityYamlAssetHandler({
+      root: metadataIndex.root,
+      runtimeVscode: vscode,
+      logger,
+      findAssetFiles: findDefaultAssetFiles,
+      readTextFile: readDefaultTextFile
+    }),
     getCacheVersion: () => 0,
     csharpLanguageService,
     resolveCSharpType: async fullTypeName => {

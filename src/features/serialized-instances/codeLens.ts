@@ -35,8 +35,37 @@ export function createSerializedInstanceCodeLensesFromIndex(
   ];
 }
 
+/** Converts a MonoScript GUID occurrence count into one class-level CodeLens entry. */
+export function createSerializedInstanceCodeLensFromGuidCount(
+  runtime: SerializedInstancesRuntime,
+  document: vscode.TextDocument,
+  scriptPath: string,
+  scriptGuid: string,
+  count: number
+): vscode.CodeLens[] {
+  if (count === 0) {
+    return [];
+  }
+
+  const typeName = getScriptTypeNameFromPath(scriptPath);
+  const typeRange = findSerializedInstanceCodeLensRange(runtime.runtimeVscode, document, scriptPath);
+  return [
+    new runtime.runtimeVscode.CodeLens(typeRange, {
+      title: runtime.runtimeVscode.l10n.t('{count} Unity serialized instances', { count }),
+      command: 'unityPlus.showUnitySerializedInstanceLocations',
+      arguments: [{
+        kind: 'serializedInstance',
+        scriptPath,
+        scriptGuid,
+        typeName,
+        position: typeRange.start
+      } satisfies SerializedInstanceLocationTarget]
+    })
+  ];
+}
+
 /** Finds a cheap visual anchor for serialized-instance CodeLens without C# server calls. */
-function findSerializedInstanceCodeLensRange(
+export function findSerializedInstanceCodeLensRange(
   runtimeVscode: typeof vscode,
   document: vscode.TextDocument,
   scriptPath: string
