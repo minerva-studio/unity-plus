@@ -7,8 +7,9 @@ import * as dgram from "node:dgram";
 import * as net from "node:net";
 
 const PROJECT_ROOT = process.argv[2];
+const TEST_FILTER = process.argv[3] || '';
 if (!PROJECT_ROOT) {
-  console.error('Usage: node probe.js "C:/path/to/UnityProject"');
+  console.error('Usage: node probe.js "C:/path/to/UnityProject" [testNameFilter]');
   process.exit(1);
 }
 
@@ -52,9 +53,7 @@ function typeName(t: number): string {
   return TYPE_NAME[t] ?? `UNKNOWN(${t})`;
 }
 function preview(val: string): string {
-  return val.length > 500
-    ? val.substring(0, 500) + `... (${val.length} chars)`
-    : val;
+  return val;
 }
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -192,12 +191,22 @@ async function main() {
     try {
       const tests: TestNode[] = JSON.parse(json).TestAdaptors || [];
       console.log(`[PARSE] ${mode}: ${tests.length} nodes`);
-      for (const t of tests) {
-        if (t.Method && t.FullName.includes('.') && !t.FullName.endsWith('.dll')) {
-          leafFullName = t.FullName;
-          leafMode = mode;
-          console.log(`[PICK] ${mode} leaf: "${t.FullName}" (Name="${t.Name}" Method="${t.Method}")`);
-          break;
+      if (TEST_FILTER) {
+        for (const t of tests) {
+          if (t.Method && t.FullName.toLowerCase().includes(TEST_FILTER.toLowerCase())) {
+            leafFullName = t.FullName; leafMode = mode;
+            console.log(`[PICK] ${mode} matched: "${t.FullName}"`);
+            break;
+          }
+        }
+      }
+      if (!leafFullName) {
+        for (const t of tests) {
+          if (t.Method && t.FullName.includes('.') && !t.FullName.endsWith('.dll')) {
+            leafFullName = t.FullName; leafMode = mode;
+            console.log(`[PICK] ${mode} leaf: "${t.FullName}"`);
+            break;
+          }
         }
       }
     } catch {}

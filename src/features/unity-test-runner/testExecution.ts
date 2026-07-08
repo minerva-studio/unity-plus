@@ -116,9 +116,9 @@ function handleTestFinished(
     switch (status) {
       case 'passed': run.passed(item); break;
       case 'failed': {
-        const msg = payload.ResultState || payload.StackTrace || 'Test failed.';
-        const stack = payload.StackTrace && payload.StackTrace !== msg ? `\n${payload.StackTrace}` : '';
-        run.failed(item, new vscode.TestMessage(`${msg}${stack}`));
+        const reason = payload.ResultState || `TestStatus=${payload.TestStatus}`;
+        const stack = payload.StackTrace ? '\n' + payload.StackTrace.trim() : '';
+        run.failed(item, new vscode.TestMessage(`${payload.FullName}: ${reason}${stack}`));
         break;
       }
       case 'skipped': run.skipped(item); break;

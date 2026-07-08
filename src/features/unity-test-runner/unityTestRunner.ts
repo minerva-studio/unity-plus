@@ -35,27 +35,25 @@ export function registerUnityTestRunnerFeature(
     return bridge;
   }
 
-  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri, retries = 3): Promise<void> {
+  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri, attempt = 0): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        const client = await getBridge(root.fsPath);
-        log.info('Discovering Unity tests...');
-        const { editModeTests, playModeTests } = await discoverUnityTests(client);
-        // Only update tree AFTER successful discovery — never clear on failure.
-        testLookup.clear();
-        editTests = editModeTests; playTests = playModeTests;
-        for (const t of editModeTests) testLookup.set(t.Id, t);
-        for (const t of playModeTests) testLookup.set(t.Id, t);
-        updateTestTree(editModeTests, playModeTests);
-        log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
-        return;
-      } catch (error) {
-        log.warn(`Unity test discovery attempt ${attempt}/${retries} failed: ${errorMessage(error)}`);
-        if (attempt < retries) await new Promise(r => setTimeout(r, 2000));
-      }
+    attempt++;
+    try {
+      const client = await getBridge(root.fsPath);
+      log.info('Discovering Unity tests...');
+      const { editModeTests, playModeTests } = await discoverUnityTests(client);
+      testLookup.clear();
+      editTests = editModeTests; playTests = playModeTests;
+      for (const t of editModeTests) testLookup.set(t.Id, t);
+      for (const t of playModeTests) testLookup.set(t.Id, t);
+      updateTestTree(editModeTests, playModeTests);
+      log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
+      return;
+    } catch (error) {
+      log.warn(`Unity test discovery attempt ${attempt} failed: ${errorMessage(error)}`);
+      await new Promise(r => setTimeout(r, 5000));
+      refreshTests(log, root, attempt);
     }
-    vscode.window.showWarningMessage('Unity Plus: Could not discover Unity tests. Is Unity Editor open with this project?');
   }
 
   async function runTests(
