@@ -29,14 +29,10 @@ export async function executeUnityTests(
   // fullNames: what we send to Unity. pendingNames: what we wait for in results.
   // When running a parent (class), fullNames=[parent], pendingNames=[all leaf children].
   const pending = new Set(pendingNames ?? fullNames);
-  const sendCount = fullNames.length;
-  log?.info(`executeTests mode=${mode} pending=${pending.size} names=[${[...pending].slice(0, 3).join(', ')}...]`);
+  log?.info(`executeTests mode=${mode} send=${fullNames.length} pending=${pending.size}`);
   let done = false;
 
-  const cancelListener = token.onCancellationRequested(() => {
-    done = true;
-    run.end();
-  });
+  const cancelListener = token.onCancellationRequested(() => { done = true; run.end(); });
 
   const messageHandler = (message: { type: number; value: string }): void => {
     if (done) return;
@@ -58,6 +54,7 @@ export async function executeUnityTests(
       case unityIdeMessageTypeTestFinished:
         handleTestFinished(run, message.value, pending, () => {
           if (pending.size === 0) { done = true; run.end(); }
+          else log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
         }, log, itemByFullName);
         break;
       case unityIdeMessageTypeRunFinished:
@@ -77,14 +74,6 @@ export async function executeUnityTests(
     }
   } finally {
     cancelListener.dispose();
-    // Safety: end the run after 180s (scaled for large batches)
-    const timeoutMs = Math.max(60000, fullNames.length * 15000);
-    setTimeout(() => {
-      if (!done) {
-        done = true;
-        run.end();
-      }
-    }, 60000);
   }
 }
 
@@ -102,8 +91,19 @@ function handleTestFinished(
   try { container = JSON.parse(raw); } catch { return; }
 
   for (const payload of container.TestResultAdaptors ?? []) {
-    log?.info(`TestFinished: FullName="${payload.FullName}" TestStatus=${payload.TestStatus}(${typeof payload.TestStatus}) pending=${pending.has(payload.FullName)}`);
-    if (!pending.has(payload.FullName)) continue;
+    const matched = pending.has(payload.FullName);
+    log?.info(`TestFinished: "${payload.FullName}" status=${payload.TestStatus} match=${matched}`);
+    if (!matched) {
+      // Also try to report parent items that were enqueued
+      const parentItem = itemByFullName?.get(payload.FullName);
+      if (parentItem && payload.TestStatus !== undefined) {
+        const st = mapTestStatus(payload.TestStatus);
+        if (st === 'passed') run.passed(parentItem);
+        else if (st === 'failed') run.failed(parentItem, new vscode.TestMessage(payload.ResultState || ''));
+        else if (st === 'skipped') run.skipped(parentItem);
+      }
+      continue;
+    }
 
     pending.delete(payload.FullName);
 
@@ -116,7 +116,9 @@ function handleTestFinished(
     switch (status) {
       case 'passed': run.passed(item); break;
       case 'failed': {
-        run.failed(item, new vscode.TestMessage(payload.ResultState || payload.StackTrace || 'Test failed.'));
+        const msg = payload.ResultState || payload.StackTrace || 'Test failed.';
+        const stack = payload.StackTrace && payload.StackTrace !== msg ? `\n${payload.StackTrace}` : '';
+        run.failed(item, new vscode.TestMessage(`${msg}${stack}`));
         break;
       }
       case 'skipped': run.skipped(item); break;
