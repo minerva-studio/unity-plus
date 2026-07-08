@@ -10,6 +10,8 @@ Unity developers using VS Code have been left with a second-class workflow for t
 
 Unity Plus exists because this should not be every Unity developer's private maintenance burden.
 
+While building Unity Plus, we surveyed the Unity-for-VS-Code extension ecosystem. We found dozens of small plugins — many abandoned, many overlapping, each solving one narrow piece of the puzzle. Unity Plus consolidates the most essential of those capabilities into a single, actively maintained extension.
+
 ## Features
 
 ### Rename Sync

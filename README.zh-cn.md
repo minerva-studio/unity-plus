@@ -12,6 +12,8 @@ Unity Technologies 和 Microsoft 对 Unity + VS Code 工作流的维护长期不
 
 Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠的 VS Code 工作流，而各自重复承担这些零散而隐性的维护工作。
 
+在构建 Unity Plus 的过程中，我们调研了 Unity + VS Code 的扩展生态。结果发现了数十个小插件——大量已停止维护，功能彼此重叠，每个只解决拼图的一小块。Unity Plus 将其中最核心的能力整合进一个持续维护的扩展中。
+
 ## 功能特性
 
 ### 重命名同步
