@@ -57,7 +57,7 @@ export interface UnityTestResultPayload {
   SkipCount: number;
   ResultState: string;
   StackTrace: string;
-  TestStatus: number;
+  TestStatus: number | string;
   Parent: number;
 }
 
@@ -112,14 +112,12 @@ export function buildUnityTestTree(tests: UnityTestInfo[]): UnityTestTree {
   return { roots, byId, childrenByParent, childrenById };
 }
 
-/** Maps Unity TestResultAdaptor.TestStatus integer to a VS Code-friendly status label. */
-export function mapTestStatus(status: number): 'passed' | 'failed' | 'skipped' | 'errored' {
-  // 0=Passed, 1=Skipped, 2=Inconclusive, 3=Failed
-  switch (status) {
-    case 0: return 'passed';
-    case 1: return 'skipped';
-    case 2: return 'skipped'; // Inconclusive → skipped in VS Code
-    case 3: return 'failed';
-    default: return 'errored';
-  }
+/** Maps Unity TestResultAdaptor.TestStatus to a VS Code-friendly status label. */
+export function mapTestStatus(status: unknown): 'passed' | 'failed' | 'skipped' | 'errored' {
+  const n = Number(status);
+  if (n === 0) return 'passed';
+  if (n === 1) return 'skipped';
+  if (n === 2) return 'skipped'; // Inconclusive
+  if (n === 3) return 'failed';
+  return 'errored';
 }

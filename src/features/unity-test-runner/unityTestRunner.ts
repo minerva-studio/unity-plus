@@ -14,6 +14,7 @@ export function registerUnityTestRunnerFeature(
 ): vscode.Disposable {
   const disposables: vscode.Disposable[] = [];
   const testLookup = new Map<string, UnityTestInfo>();
+  const fullNameToId = new Map<string, string>();
   let bridge: UnityTestBridgeClient | undefined;
 
   const { controller, updateTestTree, createTestRun, dispose: disposeController } =
@@ -40,8 +41,9 @@ export function registerUnityTestRunnerFeature(
       log.info('Discovering Unity tests...');
       const { editModeTests, playModeTests } = await discoverUnityTests(client);
       testLookup.clear();
-      for (const t of editModeTests) testLookup.set(t.Id, t);
-      for (const t of playModeTests) testLookup.set(t.Id, t);
+      fullNameToId.clear();
+      for (const t of editModeTests) { testLookup.set(t.Id, t); fullNameToId.set(t.FullName, t.Id); }
+      for (const t of playModeTests) { testLookup.set(t.Id, t); fullNameToId.set(t.FullName, t.Id); }
       updateTestTree(editModeTests, playModeTests);
       log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
     } catch (error) {
@@ -74,8 +76,13 @@ export function registerUnityTestRunnerFeature(
       }
 
       const run = createTestRun(request, `Unity ${mode} Tests`);
-      for (const item of testItems) run.enqueued(item);
-      await executeUnityTests(client, run, mode, fullNames, token);
+      const itemByFullName = new Map<string, vscode.TestItem>();
+      for (const item of testItems) {
+        run.enqueued(item);
+        const info = testLookup.get(item.id.startsWith('unity:') ? item.id.slice(6) : item.id);
+        if (info) itemByFullName.set(info.FullName, item);
+      }
+      await executeUnityTests(client, run, mode, fullNames, token, logger, itemByFullName);
     } catch (error) {
       log.warn(`Unity test execution failed: ${errorMessage(error)}`);
     }
