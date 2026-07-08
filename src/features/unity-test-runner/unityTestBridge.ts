@@ -5,11 +5,12 @@ import {
   encodeUnityIdeMessage,
   findUnityIdeMessagingEndpoint,
   unityIdeMessageTypeTcp,
+  unityIdeMessageTypePing,
   type UnityIdeMessage
 } from '../../unity/visualStudioMessaging';
 
-/** Maximum bytes for a single UDP datagram payload before TCP fallback kicks in. */
 const maxUdpPayload = 50000;
+const pingIntervalMs = 3000;
 
 export type BridgeMessageHandler = (message: UnityIdeMessage) => void;
 export type BridgeErrorHandler = (error: Error) => void;
@@ -39,7 +40,14 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
   let port: number | undefined;
   let messageHandler: BridgeMessageHandler | undefined;
   let errorHandler: BridgeErrorHandler | undefined;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
   let binding = false;
+
+  function startPing(): void {
+    stopPing();
+    pingTimer = setInterval(() => { try { sendRaw(unityIdeMessageTypePing, ''); } catch { /* ignore */ } }, pingIntervalMs);
+  }
+  function stopPing(): void { if (pingTimer) { clearInterval(pingTimer); pingTimer = undefined; } }
 
   function sendRaw(type: number, value: string): void {
     if (!socket || port === undefined) {
@@ -162,6 +170,7 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
         });
 
         (this as { connected: boolean }).connected = true;
+        startPing();
       } finally {
         binding = false;
       }
@@ -180,6 +189,7 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
     },
 
     disconnect(): void {
+      stopPing();
       if (socket) {
         try { socket.close(); } catch { /* already closed */ }
         socket = undefined;

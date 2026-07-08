@@ -11,8 +11,7 @@ export function createUnityTestController(
 ) {
   const controller = vscode.tests.createTestController(testControllerId, testControllerLabel);
 
-  const editModeProfile = controller.createRunProfile('EditMode', vscode.TestRunProfileKind.Run, (r, t) => onRun(r, t), true);
-  const playModeProfile = controller.createRunProfile('PlayMode', vscode.TestRunProfileKind.Run, (r, t) => onRun(r, t), false);
+  controller.createRunProfile('Run', vscode.TestRunProfileKind.Run, (r, t) => onRun(r, t), true);
 
   controller.resolveHandler = async (item) => {
     if (item) return; // children pre-built
@@ -26,7 +25,7 @@ export function createUnityTestController(
   }
 
   return {
-    controller, editModeProfile, playModeProfile, updateTestTree,
+    controller, updateTestTree,
     createTestRun: (r: vscode.TestRunRequest, n: string) => controller.createTestRun(r, n),
     dispose: () => controller.dispose(),
   };
