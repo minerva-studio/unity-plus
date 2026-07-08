@@ -114,9 +114,9 @@ describe('testModel', () => {
   describe('buildUnityTestTree', () => {
     it('builds a tree from flat test list', () => {
       const tests: UnityTestInfo[] = [
-        { Id: '1', Name: 'RootSuite', FullName: 'RootSuite', Type: '', Method: '', Assembly: 'Test.dll', Parent: '' },
-        { Id: '2', Name: 'ChildTest', FullName: 'RootSuite.ChildTest', Type: '', Method: 'ChildTest', Assembly: 'Test.dll', Parent: '1' },
-        { Id: '3', Name: 'LeafTest', FullName: 'RootSuite.ChildTest.LeafTest', Type: '', Method: 'LeafTest', Assembly: 'Test.dll', Parent: '2' }
+        { Id: '1', Name: 'RootSuite', FullName: 'RootSuite', Type: '', Method: '', Assembly: 'Test.dll', Parent: -1 },
+        { Id: '2', Name: 'ChildTest', FullName: 'RootSuite.ChildTest', Type: '', Method: 'ChildTest', Assembly: 'Test.dll', Parent: 0 },
+        { Id: '3', Name: 'LeafTest', FullName: 'RootSuite.ChildTest.LeafTest', Type: '', Method: 'LeafTest', Assembly: 'Test.dll', Parent: 1 }
       ];
 
       const tree = buildUnityTestTree(tests);
@@ -124,25 +124,25 @@ describe('testModel', () => {
       assert.strictEqual(tree.roots.length, 1);
       assert.strictEqual(tree.roots[0].Id, '1');
       assert.strictEqual(tree.byId.size, 3);
-      assert.strictEqual(tree.childrenByParent.get('1')?.length, 1);
-      assert.strictEqual(tree.childrenByParent.get('1')?.[0].Id, '2');
-      assert.strictEqual(tree.childrenByParent.get('2')?.length, 1);
-      assert.strictEqual(tree.childrenByParent.get('2')?.[0].Id, '3');
+      assert.strictEqual(tree.childrenByParent.get(0)?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get(0)?.[0].Id, '2');
+      assert.strictEqual(tree.childrenByParent.get(1)?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get(1)?.[0].Id, '3');
     });
 
     it('handles multiple root items', () => {
       const tests: UnityTestInfo[] = [
-        { Id: '1', Name: 'SuiteA', FullName: 'SuiteA', Type: '', Method: '', Assembly: 'Test.dll', Parent: '' },
-        { Id: '2', Name: 'SuiteB', FullName: 'SuiteB', Type: '', Method: '', Assembly: 'Test.dll', Parent: '' },
-        { Id: '3', Name: 'TestA', FullName: 'SuiteA.TestA', Type: '', Method: 'TestA', Assembly: 'Test.dll', Parent: '1' },
-        { Id: '4', Name: 'TestB', FullName: 'SuiteB.TestB', Type: '', Method: 'TestB', Assembly: 'Test.dll', Parent: '2' }
+        { Id: '1', Name: 'SuiteA', FullName: 'SuiteA', Type: '', Method: '', Assembly: 'Test.dll', Parent: -1 },
+        { Id: '2', Name: 'SuiteB', FullName: 'SuiteB', Type: '', Method: '', Assembly: 'Test.dll', Parent: -1 },
+        { Id: '3', Name: 'TestA', FullName: 'SuiteA.TestA', Type: '', Method: 'TestA', Assembly: 'Test.dll', Parent: 0 },
+        { Id: '4', Name: 'TestB', FullName: 'SuiteB.TestB', Type: '', Method: 'TestB', Assembly: 'Test.dll', Parent: 1 }
       ];
 
       const tree = buildUnityTestTree(tests);
 
       assert.strictEqual(tree.roots.length, 2);
-      assert.strictEqual(tree.childrenByParent.get('1')?.length, 1);
-      assert.strictEqual(tree.childrenByParent.get('2')?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get(0)?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get(1)?.length, 1);
     });
 
     it('handles empty list', () => {
@@ -151,9 +151,9 @@ describe('testModel', () => {
       assert.strictEqual(tree.byId.size, 0);
     });
 
-    it('handles orphan items (parent Id not found) by placing them at root', () => {
+    it('handles orphan items (out-of-range parent index) by placing them at root', () => {
       const tests: UnityTestInfo[] = [
-        { Id: '1', Name: 'Orphan', FullName: 'Orphan', Type: '', Method: '', Assembly: 'Test.dll', Parent: 'nonexistent' }
+        { Id: '1', Name: 'Orphan', FullName: 'Orphan', Type: '', Method: '', Assembly: 'Test.dll', Parent: 999 }
       ];
 
       const tree = buildUnityTestTree(tests);
@@ -167,11 +167,11 @@ describe('testModel', () => {
 describe('testDiscovery', () => {
   describe('parseTestListResponse', () => {
     const sampleTests: UnityTestInfo[] = [
-      { Id: '1', Name: 'MyTest', FullName: 'NS.MyClass.MyTest', Type: 'NS.MyClass', Method: 'MyTest', Assembly: 'Test.dll', Parent: '' }
+      { Id: '1', Name: 'MyTest', FullName: 'NS.MyClass.MyTest', Type: 'NS.MyClass', Method: 'MyTest', Assembly: 'Test.dll', Parent: -1 }
     ];
 
     it('parses a valid EditMode response', () => {
-      const value = `EditMode:${JSON.stringify({ tests: sampleTests })}`;
+      const value = `EditMode:${JSON.stringify({ TestAdaptors: sampleTests })}`;
       const result = parseTestListResponse(value);
 
       assert.ok(result);
@@ -181,7 +181,7 @@ describe('testDiscovery', () => {
     });
 
     it('parses a valid PlayMode response', () => {
-      const value = `PlayMode:${JSON.stringify({ tests: sampleTests })}`;
+      const value = `PlayMode:${JSON.stringify({ TestAdaptors: sampleTests })}`;
       const result = parseTestListResponse(value);
 
       assert.ok(result);
@@ -190,7 +190,7 @@ describe('testDiscovery', () => {
     });
 
     it('returns undefined for unknown mode', () => {
-      const value = `Unknown:${JSON.stringify({ tests: sampleTests })}`;
+      const value = `Unknown:${JSON.stringify({ TestAdaptors: sampleTests })}`;
       assert.strictEqual(parseTestListResponse(value), undefined);
     });
 
@@ -205,7 +205,7 @@ describe('testDiscovery', () => {
     });
 
     it('handles empty tests array', () => {
-      const value = 'EditMode:{"tests":[]}';
+      const value = 'EditMode:{"TestAdaptors":[]}';
       const result = parseTestListResponse(value);
 
       assert.ok(result);
@@ -218,8 +218,8 @@ describe('RunStarted / RunFinished encoding', () => {
   it('round-trips RunStarted payload', () => {
     const payload = JSON.stringify({
       TestMode: 'EditMode',
-      Tests: [
-        { Id: '1', Name: 'MyTest', FullName: 'NS.MyTest', Type: 'NS', Method: 'MyTest', Assembly: 'Asm.dll', Parent: '' }
+      TestAdaptors: [
+        { Id: '1', Name: 'MyTest', FullName: 'NS.MyTest', Type: 'NS', Method: 'MyTest', Assembly: 'Asm.dll', Parent: -1 }
       ]
     });
 
@@ -231,7 +231,7 @@ describe('RunStarted / RunFinished encoding', () => {
 
     const parsed = JSON.parse(decoded!.value);
     assert.strictEqual(parsed.TestMode, 'EditMode');
-    assert.strictEqual(parsed.Tests.length, 1);
+    assert.strictEqual(parsed.TestAdaptors.length, 1);
   });
 
   it('round-trips RunFinished payload', () => {
@@ -258,12 +258,16 @@ describe('RunStarted / RunFinished encoding', () => {
 
   it('round-trips TestFinished payload', () => {
     const payload = JSON.stringify({
-      Id: '42',
+      Name: 'Method',
       FullName: 'NS.Class.Method',
-      Result: 'Passed',
-      Duration: 100,
-      Message: '',
-      StackTrace: ''
+      PassCount: 1,
+      FailCount: 0,
+      InconclusiveCount: 0,
+      SkipCount: 0,
+      ResultState: 'Passed',
+      StackTrace: '',
+      TestStatus: 0,
+      Parent: -1
     });
 
     const buffer = encodeUnityIdeMessage(unityIdeMessageTypeTestFinished, payload);

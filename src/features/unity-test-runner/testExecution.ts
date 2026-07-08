@@ -9,15 +9,10 @@ import {
 import type { UnityTestBridgeClient } from './unityTestBridge';
 import type {
   UnityTestMode,
-  UnityTestRunStartedPayload,
   UnityTestRunFinishedPayload,
   UnityTestResultPayload
 } from './testModel';
-
-/** Test result statuses that map to VS Code TestResult states. */
-const passedStatuses = new Set(['Passed']);
-const failedStatuses = new Set(['Failed']);
-const skippedStatuses = new Set(['Skipped', 'Inconclusive']);
+import { mapTestStatus } from './testModel';
 
 /**
  * Executes Unity tests via the bridge.
@@ -49,12 +44,11 @@ export async function executeUnityTests(
 
     switch (message.type) {
       case unityIdeMessageTypeRunStarted:
-        handleRunStarted(run, message.value);
-        break;
+        break; // TestAdaptors tree — informational, not needed mid-run
       case unityIdeMessageTypeTestStarted: {
-        const testId = extractTestIdFromJson(message.value);
-        if (testId) {
-          run.started(createTestItemForRun(testId));
+        const name = extractFieldFromJson(message.value, 'Name');
+        if (name) {
+          run.started({ id: `unity:${name}`, label: name } as vscode.TestItem);
         }
         break;
       }
@@ -85,16 +79,6 @@ export async function executeUnityTests(
 
 // --- Internal helpers ---
 
-function handleRunStarted(run: vscode.TestRun, raw: string): void {
-  try {
-    const payload: UnityTestRunStartedPayload = JSON.parse(raw);
-    // The test tree can be used to pre-enqueue items if desired.
-    void payload;
-  } catch {
-    // Best-effort parsing; ignore malformed payloads.
-  }
-}
-
 function handleTestFinished(run: vscode.TestRun, raw: string): void {
   let payload: UnityTestResultPayload;
   try {
@@ -103,24 +87,26 @@ function handleTestFinished(run: vscode.TestRun, raw: string): void {
     return;
   }
 
-  const item = createTestItemForRun(payload.Id);
-  const duration = Math.max(0, payload.Duration);
+  const item = { id: `unity:${payload.FullName}`, label: payload.Name } as vscode.TestItem;
+  const status = mapTestStatus(payload.TestStatus);
 
-  if (passedStatuses.has(payload.Result)) {
-    run.passed(item, duration);
-  } else if (failedStatuses.has(payload.Result)) {
-    const message = vscode.TestMessage
-      ? new vscode.TestMessage(payload.Message || 'Test failed.')
-      : new vscode.MarkdownString(payload.Message || 'Test failed.') as unknown as vscode.TestMessage;
-    run.failed(item, message, duration);
-  } else if (skippedStatuses.has(payload.Result)) {
-    run.skipped(item);
-  } else {
-    // Unknown status — treat as errored.
-    const message = vscode.TestMessage
-      ? new vscode.TestMessage(payload.Message || 'Unknown test result.')
-      : new vscode.MarkdownString(payload.Message || 'Unknown test result.') as unknown as vscode.TestMessage;
-    run.errored(item, message, duration);
+  switch (status) {
+    case 'passed':
+      run.passed(item);
+      break;
+    case 'failed': {
+      const msg = new vscode.TestMessage(payload.ResultState || payload.StackTrace || 'Test failed.');
+      run.failed(item, msg);
+      break;
+    }
+    case 'skipped':
+      run.skipped(item);
+      break;
+    case 'errored': {
+      const msg = new vscode.TestMessage(payload.StackTrace || payload.ResultState || 'Unknown error.');
+      run.errored(item, msg);
+      break;
+    }
   }
 }
 
@@ -129,42 +115,16 @@ function handleRunFinished(run: vscode.TestRun, raw: string): void {
     const payload: UnityTestRunFinishedPayload = JSON.parse(raw);
     void payload;
   } catch {
-    // Best-effort parsing.
+    // Best-effort.
   }
   run.end();
 }
 
-function extractTestIdFromJson(raw: string): string | undefined {
+function extractFieldFromJson(raw: string, field: string): string | undefined {
   try {
-    const parsed: { Id?: string } = JSON.parse(raw);
-    return parsed.Id;
+    const parsed: Record<string, unknown> = JSON.parse(raw);
+    return typeof parsed[field] === 'string' ? (parsed[field] as string) : undefined;
   } catch {
     return undefined;
   }
-}
-
-function createTestItemForRun(id: string): vscode.TestItem {
-  // We use a simple TestItem with the Unity test Id.
-  // The TestController will match it against the tree by ID.
-  return {
-    id: `unity:${id}`,
-    label: id,
-    uri: undefined,
-    range: undefined,
-    canResolveChildren: false,
-    parent: undefined,
-    children: {
-      add: () => { /* noop */ },
-      delete: () => { /* noop */ },
-      forEach: () => { /* noop */ },
-      get: () => undefined,
-      replace: () => { /* noop */ },
-      size: 0
-    },
-    error: undefined,
-    busy: false,
-    tags: [],
-    description: undefined,
-    sortText: undefined
-  } as unknown as vscode.TestItem;
 }

@@ -2,7 +2,8 @@
  * Data model types for Unity test discovery and execution.
  *
  * Mirrors the JSON structures that com.unity.ide.visualstudio's
- * TestRunnerApiListener serializes from UnityEditor.TestTools.TestRunner.Api.
+ * TestRunnerCallbacks serializes via TestAdaptor / TestResultAdaptor.
+ * Source: Editor/Testing/TestAdaptor.cs and TestResultAdaptor.cs
  */
 
 /** Test execution mode matching Unity Test Framework's TestMode enum. */
@@ -10,7 +11,7 @@ export type UnityTestMode = 'EditMode' | 'PlayMode';
 
 /**
  * A single test node as serialized by Unity's TestAdaptor.
- * The tree is flattened; ParentId links child to parent.
+ * The tree is flattened; Parent is the index into the flat array (-1 for root).
  */
 export interface UnityTestInfo {
   Id: string;
@@ -19,43 +20,46 @@ export interface UnityTestInfo {
   Type: string;
   Method: string;
   Assembly: string;
-  Parent: string; // parent test Id, empty for root nodes
+  /** Index into the flat TestAdaptors array (-1 for root nodes). */
+  Parent: number;
 }
 
-/** Payload of a TestListRetrieved message. */
-export interface UnityTestListPayload {
-  tests: UnityTestInfo[];
+/** Payload wrapper for a TestListRetrieved or RunStarted message. */
+export interface UnityTestAdaptorContainer {
+  TestAdaptors: UnityTestInfo[];
 }
 
-/** A built test tree keyed by Id for O(1) lookup. */
+/** A built test tree with O(1) lookup by Id. */
 export interface UnityTestTree {
   roots: UnityTestInfo[];
   byId: Map<string, UnityTestInfo>;
-  childrenByParent: Map<string, UnityTestInfo[]>;
+  childrenByParent: Map<number, UnityTestInfo[]>;
+  /** Children keyed by parent Id (string) for recursive tree walking. */
+  childrenById: Map<string, UnityTestInfo[]>;
 }
 
 /** Describes the scope of a test run received in RunStarted. */
 export interface UnityTestRunStartedPayload {
   TestMode: UnityTestMode;
-  // The test tree that is about to run (may be a subset for filtered runs).
-  Tests: UnityTestInfo[];
+  TestAdaptors: UnityTestInfo[];
 }
 
-/** A single test result received in TestFinished. */
+/**
+ * A single test result as serialized by Unity's TestResultAdaptor.
+ * TestStatus: 0=Passed, 1=Skipped, 2=Inconclusive, 3=Failed
+ */
 export interface UnityTestResultPayload {
-  Id: string;
+  Name: string;
   FullName: string;
-  Result: UnityTestResultStatus;
-  Duration: number; // milliseconds
-  Message: string;
+  PassCount: number;
+  FailCount: number;
+  InconclusiveCount: number;
+  SkipCount: number;
+  ResultState: string;
   StackTrace: string;
+  TestStatus: number;
+  Parent: number;
 }
-
-export type UnityTestResultStatus =
-  | 'Passed'
-  | 'Failed'
-  | 'Skipped'
-  | 'Inconclusive';
 
 /** Summary received in RunFinished. */
 export interface UnityTestRunFinishedPayload {
@@ -67,25 +71,50 @@ export interface UnityTestRunFinishedPayload {
   Duration: number;
 }
 
-/** Builds a look-up tree from a flat array of UnityTestInfo items. */
+/** Builds a look-up tree from a flat array of UnityTestInfo items.
+ *  Parent is an integer index into the array; -1 marks a root. */
 export function buildUnityTestTree(tests: UnityTestInfo[]): UnityTestTree {
   const byId = new Map<string, UnityTestInfo>();
-  const childrenByParent = new Map<string, UnityTestInfo[]>();
+  const childrenByParent = new Map<number, UnityTestInfo[]>();
+  const childrenById = new Map<string, UnityTestInfo[]>();
   const roots: UnityTestInfo[] = [];
 
-  for (const test of tests) {
+  for (let i = 0; i < tests.length; i++) {
+    const test = tests[i];
     byId.set(test.Id, test);
   }
 
-  for (const test of tests) {
-    if (test.Parent && byId.has(test.Parent)) {
-      const siblings = childrenByParent.get(test.Parent) ?? [];
-      siblings.push(test);
-      childrenByParent.set(test.Parent, siblings);
-    } else {
+  for (let i = 0; i < tests.length; i++) {
+    const test = tests[i];
+    const parentIndex = test.Parent;
+
+    if (parentIndex < 0 || parentIndex >= tests.length) {
       roots.push(test);
+    } else {
+      // Index-based lookup
+      const siblings = childrenByParent.get(parentIndex) ?? [];
+      siblings.push(test);
+      childrenByParent.set(parentIndex, siblings);
+
+      // Id-based lookup (for recursive tree walking)
+      const parentId = tests[parentIndex].Id;
+      const idSiblings = childrenById.get(parentId) ?? [];
+      idSiblings.push(test);
+      childrenById.set(parentId, idSiblings);
     }
   }
 
-  return { roots, byId, childrenByParent };
+  return { roots, byId, childrenByParent, childrenById };
+}
+
+/** Maps Unity TestResultAdaptor.TestStatus integer to a VS Code-friendly status label. */
+export function mapTestStatus(status: number): 'passed' | 'failed' | 'skipped' | 'errored' {
+  // 0=Passed, 1=Skipped, 2=Inconclusive, 3=Failed
+  switch (status) {
+    case 0: return 'passed';
+    case 1: return 'skipped';
+    case 2: return 'skipped'; // Inconclusive → skipped in VS Code
+    case 3: return 'failed';
+    default: return 'errored';
+  }
 }

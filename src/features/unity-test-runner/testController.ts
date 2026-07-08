@@ -106,7 +106,7 @@ function createTestItemRecursive(
     undefined // no source file URI — Unity doesn't provide it in TestAdaptor
   );
 
-  const children = tree.childrenByParent.get(info.Id);
+  const children = tree.childrenById.get(info.Id);
   if (children) {
     for (const child of children) {
       item.children.add(createTestItemRecursive(controller, child, tree));

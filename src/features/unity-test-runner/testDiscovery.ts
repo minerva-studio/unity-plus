@@ -3,14 +3,7 @@ import {
   unityIdeMessageTypeTestListRetrieved
 } from '../../unity/visualStudioMessaging';
 import type { UnityTestBridgeClient } from './unityTestBridge';
-import type { UnityTestInfo, UnityTestListPayload } from './testModel';
-
-/** Sent to Unity to request the test list for one mode. */
-export function requestTestList(bridge: UnityTestBridgeClient, modes: ('EditMode' | 'PlayMode')[]): void {
-  for (const mode of modes) {
-    bridge.send(unityIdeMessageTypeRetrieveTestList, mode);
-  }
-}
+import type { UnityTestInfo, UnityTestAdaptorContainer } from './testModel';
 
 /**
  * Parses a TestListRetrieved message body.
@@ -30,10 +23,10 @@ export function parseTestListResponse(value: string):
   }
 
   try {
-    const payload: UnityTestListPayload = JSON.parse(value.substring(colonIndex + 1));
+    const payload: UnityTestAdaptorContainer = JSON.parse(value.substring(colonIndex + 1));
     return {
       mode,
-      tests: payload.tests ?? []
+      tests: payload.TestAdaptors ?? []
     };
   } catch {
     return undefined;
@@ -41,10 +34,11 @@ export function parseTestListResponse(value: string):
 }
 
 /**
- * Waits for both EditMode and PlayMode test lists from Unity.
- * Returns a merged result once both are received (or after timeout).
+ * Sends RetrieveTestList to Unity and waits for both EditMode and PlayMode
+ * test lists.  The message handler is registered BEFORE sending to avoid the
+ * race where Unity responds faster than we can subscribe.
  */
-export function collectTestLists(
+export function discoverUnityTests(
   bridge: UnityTestBridgeClient,
   timeoutMs = 8000
 ): Promise<{ editModeTests: UnityTestInfo[]; playModeTests: UnityTestInfo[] }> {
@@ -67,7 +61,6 @@ export function collectTestLists(
       }
       settled = true;
       clearTimeout(timeout);
-      bridge.onMessage(() => undefined); // clear handler
     }
 
     function checkDone(): void {
@@ -77,7 +70,13 @@ export function collectTestLists(
       }
     }
 
+    // IMPORTANT: register the message handler BEFORE sending requests.
+    // UDP responses can arrive before the send() call completes.
     bridge.onMessage((message) => {
+      if (settled) {
+        return;
+      }
+
       if (message.type !== unityIdeMessageTypeTestListRetrieved) {
         return;
       }
@@ -102,13 +101,9 @@ export function collectTestLists(
       cleanup();
       reject(error);
     });
-  });
-}
 
-/** Discovers Unity tests by sending RetrieveTestList and collecting responses. */
-export async function discoverUnityTests(
-  bridge: UnityTestBridgeClient
-): Promise<{ editModeTests: UnityTestInfo[]; playModeTests: UnityTestInfo[] }> {
-  requestTestList(bridge, ['EditMode', 'PlayMode']);
-  return await collectTestLists(bridge);
+    // Now send — handler is already listening.
+    bridge.send(unityIdeMessageTypeRetrieveTestList, 'EditMode');
+    bridge.send(unityIdeMessageTypeRetrieveTestList, 'PlayMode');
+  });
 }

@@ -6,6 +6,14 @@ import {
   findUnityIdeMessagingEndpoint,
   unityIdeMessageTypeTcp,
   unityIdeMessageTypePing,
+  unityIdeMessageTypePong,
+  unityIdeMessageTypeRetrieveTestList,
+  unityIdeMessageTypeTestListRetrieved,
+  unityIdeMessageTypeExecuteTests,
+  unityIdeMessageTypeRunStarted,
+  unityIdeMessageTypeRunFinished,
+  unityIdeMessageTypeTestStarted,
+  unityIdeMessageTypeTestFinished,
   type UnityIdeMessage
 } from '../../unity/visualStudioMessaging';
 
@@ -17,6 +25,12 @@ const maxUdpPayload = 50000;
 
 export type BridgeMessageHandler = (message: UnityIdeMessage) => void;
 export type BridgeErrorHandler = (error: Error) => void;
+export type BridgeTraceHandler = (direction: 'send' | 'recv', type: number, typeName: string, valuePreview: string) => void;
+
+export interface UnityTestBridgeOptions {
+  /** Called for every message sent/received — useful for debugging the protocol. */
+  trace?: BridgeTraceHandler;
+}
 
 export interface UnityTestBridgeClient {
   /** Start the connection to Unity's messaging port. Resolves once the port is found. */
@@ -45,9 +59,6 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let messageHandler: BridgeMessageHandler | undefined;
   let errorHandler: BridgeErrorHandler | undefined;
-
-  // Accumulate partial UDP reads for TCP-fallback reassembly.
-  let tcpFallbackBuffer: Buffer | undefined;
 
   function startPing(): void {
     stopPing();
@@ -102,23 +113,21 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
 
   function receiveTcpFallback(host: string, tcpPort: number, length: number): void {
     const tcpSocket = net.createConnection({ host, port: tcpPort });
-    tcpFallbackBuffer = Buffer.alloc(0);
+    let buffer = Buffer.alloc(0);  // local — no shared state across concurrent fallbacks
 
     tcpSocket.on('data', (chunk: Buffer) => {
-      tcpFallbackBuffer = Buffer.concat([tcpFallbackBuffer!, chunk]);
-      if (tcpFallbackBuffer.length >= length) {
-        const decoded = decodeUnityIdeMessage(tcpFallbackBuffer);
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length >= length) {
+        const decoded = decodeUnityIdeMessage(buffer);
         if (decoded) {
           messageHandler?.(decoded);
         }
-        tcpFallbackBuffer = undefined;
         tcpSocket.end();
       }
     });
 
     tcpSocket.on('error', err => {
       errorHandler?.(err);
-      tcpFallbackBuffer = undefined;
     });
   }
 
@@ -153,7 +162,6 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
         socket = undefined;
       }
       port = undefined;
-      tcpFallbackBuffer = undefined;
 
       const discoveredPort = await findUnityIdeMessagingEndpoint(projectRoot);
       if (discoveredPort === undefined) {
@@ -201,7 +209,6 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
         socket = undefined;
       }
       port = undefined;
-      tcpFallbackBuffer = undefined;
       (this as { connected: boolean }).connected = false;
     }
   };
