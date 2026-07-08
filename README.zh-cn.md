@@ -85,3 +85,7 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 - 运行 `npm run package:vsix` 构建 `dist/unity-plus-<version>.vsix`。
 - 运行 `npm run package:install` 构建 VSIX 并安装到 VS Code 中进行本地测试。
 - 如果 `code` 不在 `PATH` 中，可设置 `CODE_CLI` 为自定义 VS Code CLI 路径。
+
+## 免责声明
+
+Unity Plus 是一个独立的社区驱动项目，与 Unity Technologies 或 Microsoft 无任何关联、 endorsement 或赞助关系。Unity 及 Unity 徽标是 Unity Technologies 的商标。Visual Studio、VS Code 和 Microsoft 是 Microsoft Corporation 的商标。

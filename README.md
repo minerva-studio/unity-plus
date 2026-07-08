@@ -83,3 +83,7 @@ Issues and pull requests are welcome. The issue tracker is the source of truth f
 - Run `npm run package:vsix` to build `dist/unity-plus-<version>.vsix`.
 - Run `npm run package:install` to build the VSIX and install it into VS Code for local testing.
 - Set `CODE_CLI` to a custom VS Code CLI path if `code` is not available on `PATH`.
+
+## Disclaimer
+
+Unity Plus is an independent, community-driven project. It is not affiliated with, endorsed by, or sponsored by Unity Technologies or Microsoft. Unity and the Unity logo are trademarks of Unity Technologies. Visual Studio, VS Code, and Microsoft are trademarks of Microsoft Corporation.

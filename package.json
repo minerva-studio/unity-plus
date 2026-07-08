@@ -6,6 +6,7 @@
   "private": true,
   "l10n": "./l10n",
   "publisher": "minerva-game-studio",
+  "icon": "resources/logo.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/minerva-studio/unity-plus"
