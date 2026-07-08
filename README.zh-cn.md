@@ -16,6 +16,27 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 
 ## 功能特性
 
+| 功能 | 说明 |
+|---|---|
+| [Unity Test Runner](#unity-test-runner) | 在 VS Code Testing 面板中浏览、运行和查看 Unity 测试 |
+| [重命名同步](#重命名同步) | 顶层 C# 类型重命名时自动同步 `.cs` 文件名 |
+| [项目同步](#项目同步) | 脚本创建/移动/删除时自动刷新 `.csproj` |
+| [事件引用](#事件引用) | UnityEvent CodeLens、悬停提示和引用位置 |
+| [序列化实例](#序列化实例) | 每个脚本的 MonoBehaviour/ScriptableObject 实例计数 |
+| [Unity YAML CodeLens](#unity-yaml-codelens) | YAML 资源到 C# 脚本的 CodeLens 链接 |
+| [元文件与 Unity 集成](#元文件与-unity-集成) | 打开 Meta 文件、在 Unity 中打开、隐藏 Explorer 中的 .meta |
+| [C# 脚本创建](#c-脚本创建) | 从资源管理器创建 C# 脚本 / ScriptableObject |
+
+---
+
+### Unity Test Runner
+- 通过 `com.unity.ide.visualstudio` 的 IDE 消息桥接发现 Unity 的所有 EditMode 和 PlayMode 测试。
+- 在 VS Code 内置 Testing 面板中以树形层级（项目 → 程序集 → 命名空间 → 类 → 方法）查看测试。
+- 一键运行单个测试、类、命名空间或整个测试套件。
+- 测试结果（通过 / 失败 / 跳过）内联显示在 Testing 面板中。
+- 通过 `unityPlus.refreshUnityTests` 命令或 Testing 面板工具栏按钮手动刷新，桥接重连时自动刷新。
+- 需要 Unity Editor 开启并启用 Visual Studio Editor 包 (`com.unity.ide.visualstudio`)。
+
 ### 重命名同步
 - 当顶层 C# 类型（`class`、`struct`、`enum`、`interface`、`record`）被重命名时，自动同步重命名 `.cs` 文件 —— 包括 `MonoBehaviour` 和 `ScriptableObject`。
 - 安全预览：应用重命名前显示受影响的类、脚本文件和 `.meta` 文件。
@@ -68,13 +89,12 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 - `v0.2 重命名安全`：顶层 C# 类型（`class`、`struct`、`enum`、`interface`、`record`）的类/文件同步。✅
 - `v0.3 项目同步`：手动和自动 Unity 项目文件刷新。✅
 - `v0.4 事件引用`：场景和预制体 UnityEvent CodeLens、悬停、序列化实例和 Unity YAML CodeLens。✅
+- `v0.5 Unity Test Runner`：通过 VS Code Testing API 进行测试发现与执行。✅
 
 ## 已知限制
 
-- Unity Plus 目前仅作为 VS Code 扩展运行。
-- 首个私有原型阶段不包含 Unity Editor 配套包。
-- 不针对 Rider 和 Visual Studio 工作流。
 - Unity Plus 依赖 Microsoft C# 和 C# Dev Kit 扩展提供语言服务功能。Unity 项目还需要在编辑器端启用 `Visual Studio Editor` 包以进行项目文件生成和 Unity IDE 消息通信。
+- **测试失败堆栈跟踪**：`com.unity.ide.visualstudio` 的 `TestResultAdaptor` 从 Unity 的 `ITestResultAdaptor` 拷贝了 `ResultState` 和 `StackTrace`，但未拷贝 `Message`（NUnit 存放实际断言失败文本的字段）。因此失败测试可能仅显示其 FullName 和 TestStatus，而无法显示详细失败原因。这是 Unity 侧桥接包的自身限制。
 
 ## 参与贡献
 

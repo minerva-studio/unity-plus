@@ -14,6 +14,27 @@ While building Unity Plus, we surveyed the Unity-for-VS-Code extension ecosystem
 
 ## Features
 
+| Feature | Description |
+|---|---|
+| [Unity Test Runner](#unity-test-runner) | Discover, run, and view Unity tests in VS Code Testing panel |
+| [Rename Sync](#rename-sync) | Auto-rename `.cs` file when top-level C# type is renamed |
+| [Project Sync](#project-sync) | Auto-refresh `.csproj` on script create/move/delete |
+| [Event References](#event-references) | UnityEvent CodeLens, hover, and reference locations |
+| [Serialized Instances](#serialized-instances) | MonoBehaviour/ScriptableObject instance counts per script |
+| [Unity YAML CodeLens](#unity-yaml-codelens) | CodeLens links from YAML assets to C# scripts |
+| [Meta Files & Unity Integration](#meta-files--unity-integration) | Open Meta File, Open In Unity, hide `.meta` in Explorer |
+| [C# Script Creation](#c-script-creation) | Create C# Script / ScriptableObject from Explorer |
+
+---
+
+### Unity Test Runner
+- Discover all EditMode and PlayMode tests from Unity via `com.unity.ide.visualstudio`'s IDE messaging bridge.
+- View tests in VS Code's built-in Testing panel with a tree hierarchy (project → assembly → namespace → class → method).
+- Run individual tests, classes, namespaces, or entire test suites with a single click.
+- Test results (passed / failed / skipped) displayed inline in the Testing panel.
+- Manual refresh via `unityPlus.refreshUnityTests` command or Testing panel toolbar button, plus auto-refresh on bridge reconnect.
+- Requires Unity Editor to be open with the Visual Studio Editor package (`com.unity.ide.visualstudio`) enabled.
+
 ### Rename Sync
 - Auto rename `.cs` file when a top-level C# type (`class`, `struct`, `enum`, `interface`, `record`) is renamed — including `MonoBehaviour` and `ScriptableObject`.
 - Safety preview shows the affected class, script file, and `.meta` file before applying the rename.
@@ -66,13 +87,12 @@ While building Unity Plus, we surveyed the Unity-for-VS-Code extension ecosystem
 - `v0.2 Rename Safety`: class/file sync for top-level C# types (`class`, `struct`, `enum`, `interface`, `record`). ✅
 - `v0.3 Project Sync`: manual and automatic Unity project file refresh. ✅
 - `v0.4 Event References`: scene and prefab UnityEvent CodeLens, hover, serialized instances, and Unity YAML CodeLens. ✅
+- `v0.5 Unity Test Runner`: test discovery and execution via VS Code Testing API. ✅
 
 ## Known Limitations
 
-- Unity Plus starts as a VS Code extension only.
-- A Unity Editor companion package is intentionally out of scope for the first private prototype.
-- Rider and Visual Studio workflows are not targeted by this extension.
 - Unity Plus depends on the Microsoft C# and C# Dev Kit extensions for language-service features. Unity projects also need the Unity `Visual Studio Editor` package enabled on the Editor side for project-file generation and Unity IDE messaging.
+- **Test failure stack traces**: `com.unity.ide.visualstudio`'s `TestResultAdaptor` copies `ResultState` and `StackTrace` from Unity's `ITestResultAdaptor`, but does not copy `Message` where NUnit stores the actual assertion failure text. As a result, failed tests may show only their FullName and TestStatus without the detailed failure reason. This is a limitation of the Unity-side bridge package.
 
 ## Contributing
 
