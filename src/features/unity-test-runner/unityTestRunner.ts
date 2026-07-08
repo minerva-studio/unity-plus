@@ -14,7 +14,8 @@ export function registerUnityTestRunnerFeature(
 ): vscode.Disposable {
   const disposables: vscode.Disposable[] = [];
   const testLookup = new Map<string, UnityTestInfo>();
-  const fullNameToId = new Map<string, string>();
+  let editTests: UnityTestInfo[] = [];
+  let playTests: UnityTestInfo[] = [];
   let bridge: UnityTestBridgeClient | undefined;
 
   const { controller, updateTestTree, createTestRun, dispose: disposeController } =
@@ -34,21 +35,27 @@ export function registerUnityTestRunnerFeature(
     return bridge;
   }
 
-  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri): Promise<void> {
+  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri, retries = 3): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
-    try {
-      const client = await getBridge(root.fsPath);
-      log.info('Discovering Unity tests...');
-      const { editModeTests, playModeTests } = await discoverUnityTests(client);
-      testLookup.clear();
-      fullNameToId.clear();
-      for (const t of editModeTests) { testLookup.set(t.Id, t); fullNameToId.set(t.FullName, t.Id); }
-      for (const t of playModeTests) { testLookup.set(t.Id, t); fullNameToId.set(t.FullName, t.Id); }
-      updateTestTree(editModeTests, playModeTests);
-      log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
-    } catch (error) {
-      log.warn(`Unity test discovery failed: ${errorMessage(error)}`);
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const client = await getBridge(root.fsPath);
+        log.info('Discovering Unity tests...');
+        const { editModeTests, playModeTests } = await discoverUnityTests(client);
+        // Only update tree AFTER successful discovery — never clear on failure.
+        testLookup.clear();
+        editTests = editModeTests; playTests = playModeTests;
+        for (const t of editModeTests) testLookup.set(t.Id, t);
+        for (const t of playModeTests) testLookup.set(t.Id, t);
+        updateTestTree(editModeTests, playModeTests);
+        log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
+        return;
+      } catch (error) {
+        log.warn(`Unity test discovery attempt ${attempt}/${retries} failed: ${errorMessage(error)}`);
+        if (attempt < retries) await new Promise(r => setTimeout(r, 2000));
+      }
     }
+    vscode.window.showWarningMessage('Unity Plus: Could not discover Unity tests. Is Unity Editor open with this project?');
   }
 
   async function runTests(
@@ -58,20 +65,60 @@ export function registerUnityTestRunnerFeature(
     token: vscode.CancellationToken
   ): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
+    if (!bridge?.connected) {
+      log.warn('Unity not connected — compiling or reloading?');
+      vscode.window.showWarningMessage('Unity Plus: Cannot run tests while Unity is compiling or reloading.');
+      return;
+    }
     try {
       const client = await getBridge(root.fsPath);
       const testItems = collectTestItems(request);
       let mode: UnityTestMode = 'EditMode';
-      const fullNames: string[] = [];
+      const sendNames: string[] = [];
+      const pendingNames: string[] = [];
 
-      for (const item of testItems) {
+      // Keep only top-level selections: if a parent and its child are both selected,
+      // skip the child. Sending the parent FullName to Unity runs all children via NUnit prefix match.
+      const topItems = testItems.filter(item => {
+        const p = item.parent;
+        return !p || !testItems.includes(p);
+      });
+
+      for (const item of topItems) {
         const unityId = item.id.startsWith('unity:') ? item.id.slice(6) : item.id;
         const info = testLookup.get(unityId);
-        if (info) { fullNames.push(info.FullName); mode = inferMode(item); }
+        if (!info) continue;
+        mode = inferMode(item);
+        const tests = mode === 'EditMode' ? editTests : playTests;
+        const idx = tests.indexOf(info);
+        if (idx < 0) continue;
+
+        if (info.Method) {
+          sendNames.push(info.FullName);
+          pendingNames.push(info.FullName);
+        } else {
+          // Class level: immediate children are test methods → send class FullName (one call)
+          let childIsMethod = false;
+          for (let i = 0; i < tests.length && !childIsMethod; i++) {
+            if (tests[i].Parent === idx && tests[i].Method) childIsMethod = true;
+          }
+          if (childIsMethod) {
+            sendNames.push(info.FullName);
+            collectLeafFullNames(tests, idx, pendingNames);
+          } else {
+            // Namespace/assembly: expand to immediate children
+            for (let i = 0; i < tests.length; i++) {
+              if (tests[i].Parent === idx) {
+                sendNames.push(tests[i].FullName);
+                collectLeafFullNames(tests, i, pendingNames);
+              }
+            }
+          }
+        }
       }
-      if (fullNames.length === 0) {
+      if (sendNames.length === 0) {
         for (const info of testLookup.values()) {
-          if (info.Method) fullNames.push(info.FullName);
+          if (info.Method) { sendNames.push(info.FullName); pendingNames.push(info.FullName); }
         }
       }
 
@@ -82,7 +129,7 @@ export function registerUnityTestRunnerFeature(
         const info = testLookup.get(item.id.startsWith('unity:') ? item.id.slice(6) : item.id);
         if (info) itemByFullName.set(info.FullName, item);
       }
-      await executeUnityTests(client, run, mode, fullNames, token, logger, itemByFullName);
+      await executeUnityTests(client, run, mode, sendNames, token, logger, itemByFullName, pendingNames);
     } catch (error) {
       log.warn(`Unity test execution failed: ${errorMessage(error)}`);
     }
@@ -123,6 +170,15 @@ function collectChildren(parent: vscode.TestItem, out: vscode.TestItem[]): void 
     out.push(child);
     collectChildren(child, out);
   });
+}
+
+function collectLeafFullNames(tests: UnityTestInfo[], parentIdx: number, out: string[]): void {
+  for (let i = 0; i < tests.length; i++) {
+    if (tests[i].Parent === parentIdx) {
+      if (tests[i].Method) out.push(tests[i].FullName);
+      else collectLeafFullNames(tests, i, out);
+    }
+  }
 }
 
 function errorMessage(error: unknown): string {

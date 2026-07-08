@@ -108,9 +108,24 @@
         "command": "unityPlus.syncClassName",
         "key": "f2",
         "when": "editorTextFocus && editorLangId == csharp && config.unityPlus.rename.overrideF2"
+      },
+      {
+        "command": "unityPlus.refreshUnityTests",
+        "key": "ctrl+shift+u r"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "unityPlus.refreshUnityTests"
+        }
+      ],
+      "testing/view/title": [
+        {
+          "command": "unityPlus.refreshUnityTests",
+          "group": "navigation"
+        }
+      ],
       "explorer/context": [
         {
           "command": "unityPlus.createCSharpScript",

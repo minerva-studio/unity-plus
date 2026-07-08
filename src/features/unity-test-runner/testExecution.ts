@@ -22,9 +22,14 @@ export async function executeUnityTests(
   token: vscode.CancellationToken,
   log?: UnityPlusLogger,
   /** FullName → real TestItem from the controller tree for result reporting. */
-  itemByFullName?: Map<string, vscode.TestItem>
+  itemByFullName?: Map<string, vscode.TestItem>,
+  /** FullNames to match in TestFinished (defaults to fullNames if omitted). */
+  pendingNames?: string[]
 ): Promise<void> {
-  const pending = new Set(fullNames);
+  // fullNames: what we send to Unity. pendingNames: what we wait for in results.
+  // When running a parent (class), fullNames=[parent], pendingNames=[all leaf children].
+  const pending = new Set(pendingNames ?? fullNames);
+  const sendCount = fullNames.length;
   log?.info(`executeTests mode=${mode} pending=${pending.size} names=[${[...pending].slice(0, 3).join(', ')}...]`);
   let done = false;
 
@@ -72,7 +77,8 @@ export async function executeUnityTests(
     }
   } finally {
     cancelListener.dispose();
-    // Safety: end the run after 60s if some tests never report back.
+    // Safety: end the run after 180s (scaled for large batches)
+    const timeoutMs = Math.max(60000, fullNames.length * 15000);
     setTimeout(() => {
       if (!done) {
         done = true;
