@@ -12,6 +12,8 @@
   "command.openInUnity.title": "Open In Unity",
   "command.rescanUnityProject.title": "Rescan Unity Project",
   "command.openUnityYamlMonoBehaviourScript.title": "Open Unity YAML MonoBehaviour Script",
+  "command.refreshUnityTests.title": "Refresh Unity Tests",
+  "command.runAllUnityTests.title": "Run All Unity Tests",
   "configuration.title": "Unity Plus",
   "configuration.rename.overrideF2.description": "Controls whether F2 in C# files uses Unity Plus class/script rename before falling back to VS Code Rename Symbol.",
   "configuration.rename.classFileSyncMode.description": "Controls automatic C# top-level type/file name synchronization. Use on for safe single-type C# files or off to disable sync.",
@@ -27,5 +29,6 @@
   "configuration.metaFiles.hideInExplorer.description": "Hide Unity .meta files in the VS Code Explorer while keeping Unity Plus meta file actions available.",
   "configuration.metaFiles.moveWithAsset.description": "Move Unity .meta files with their asset files when assets are renamed or moved.",
   "configuration.scan.includeScenesOutsideBuildSettings.description": "Scan scenes outside Unity Build Settings when looking for event references.",
-  "configuration.logging.level.description": "Controls the verbosity of the Unity Plus output channel."
+  "configuration.logging.level.description": "Controls the verbosity of the Unity Plus output channel.",
+  "configuration.testRunner.autoRefresh.description": "Automatically refresh the Unity test list when the Testing panel is opened."
 }

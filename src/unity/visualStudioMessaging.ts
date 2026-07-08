@@ -2,6 +2,18 @@ import * as dgram from 'node:dgram';
 
 export const unityIdeMessageTypeProjectPath = 16;
 export const unityIdeMessageTypeShowUsage = 25;
+
+// Test runner message types used by com.unity.ide.visualstudio's TestRunnerApiListener.
+export const unityIdeMessageTypePing = 1;
+export const unityIdeMessageTypePong = 2;
+export const unityIdeMessageTypeTcp = 17;
+export const unityIdeMessageTypeRunStarted = 18;
+export const unityIdeMessageTypeRunFinished = 19;
+export const unityIdeMessageTypeTestStarted = 20;
+export const unityIdeMessageTypeTestFinished = 21;
+export const unityIdeMessageTypeTestListRetrieved = 22;
+export const unityIdeMessageTypeRetrieveTestList = 23;
+export const unityIdeMessageTypeExecuteTests = 24;
 export const unityIdeMessagingPortStart = 56002;
 export const unityIdeMessagingPortEnd = 57001;
 

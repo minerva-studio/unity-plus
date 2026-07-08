@@ -12,6 +12,8 @@
   "command.openInUnity.title": "在 Unity 中打开",
   "command.rescanUnityProject.title": "重新扫描 Unity 项目",
   "command.openUnityYamlMonoBehaviourScript.title": "打开 Unity YAML MonoBehaviour 脚本",
+  "command.refreshUnityTests.title": "刷新 Unity 测试",
+  "command.runAllUnityTests.title": "运行所有 Unity 测试",
   "configuration.title": "Unity Plus",
   "configuration.rename.overrideF2.description": "控制在 C# 文件中按 F2 时，是否先使用 Unity Plus 的类/脚本重命名，再回退到 VS Code 的重命名符号。",
   "configuration.rename.classFileSyncMode.description": "控制 C# 顶层类型和文件名的自动同步。使用 on 为安全的单类型 C# 文件启用同步，使用 off 禁用同步。",
@@ -27,5 +29,6 @@
   "configuration.metaFiles.hideInExplorer.description": "在 VS Code 资源管理器中隐藏 Unity .meta 文件，同时保留 Unity Plus meta 文件操作。",
   "configuration.metaFiles.moveWithAsset.description": "重命名或移动资源文件时，同时移动 Unity .meta 文件。",
   "configuration.scan.includeScenesOutsideBuildSettings.description": "查找事件引用时扫描 Unity Build Settings 之外的场景。",
-  "configuration.logging.level.description": "控制 Unity Plus 输出通道的详细程度。"
+  "configuration.logging.level.description": "控制 Unity Plus 输出通道的详细程度。",
+  "configuration.testRunner.autoRefresh.description": "打开 Testing 面板时自动刷新 Unity 测试列表。"
 }

@@ -32,7 +32,8 @@
     "onCommand:unityPlus.showUnityEventReferences",
     "onCommand:unityPlus.openMetaFile",
     "onCommand:unityPlus.openInUnity",
-    "onCommand:unityPlus.rescanUnityProject"
+    "onCommand:unityPlus.rescanUnityProject",
+    "onCommand:unityPlus.refreshUnityTests"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -88,6 +89,18 @@
         "command": "unityPlus.openUnityYamlMonoBehaviourScript",
         "title": "%command.openUnityYamlMonoBehaviourScript.title%",
         "category": "%command.category%"
+      },
+      {
+        "command": "unityPlus.refreshUnityTests",
+        "title": "%command.refreshUnityTests.title%",
+        "category": "%command.category%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "unityPlus.runAllUnityTests",
+        "title": "%command.runAllUnityTests.title%",
+        "category": "%command.category%",
+        "icon": "$(run-all)"
       }
     ],
     "keybindings": [
@@ -228,6 +241,11 @@
             "error"
           ],
           "description": "%configuration.logging.level.description%"
+        },
+        "unityPlus.testRunner.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "%configuration.testRunner.autoRefresh.description%"
         }
       }
     }

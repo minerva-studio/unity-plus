@@ -1,0 +1,275 @@
+import * as assert from 'assert';
+import {
+  unityIdeMessageTypePing,
+  unityIdeMessageTypePong,
+  unityIdeMessageTypeTcp,
+  unityIdeMessageTypeRunStarted,
+  unityIdeMessageTypeRunFinished,
+  unityIdeMessageTypeTestStarted,
+  unityIdeMessageTypeTestFinished,
+  unityIdeMessageTypeTestListRetrieved,
+  unityIdeMessageTypeRetrieveTestList,
+  unityIdeMessageTypeExecuteTests,
+  encodeUnityIdeMessage,
+  decodeUnityIdeMessage
+} from '../unity/visualStudioMessaging';
+import { buildUnityTestTree, type UnityTestInfo } from '../features/unity-test-runner/testModel';
+import { parseTestListResponse } from '../features/unity-test-runner/testDiscovery';
+
+describe('unityTestBridge', () => {
+  describe('message type constants', () => {
+    it('has the correct values matching com.unity.ide.visualstudio MessageType enum', () => {
+      assert.strictEqual(unityIdeMessageTypePing, 1);
+      assert.strictEqual(unityIdeMessageTypePong, 2);
+      assert.strictEqual(unityIdeMessageTypeTcp, 17);
+      assert.strictEqual(unityIdeMessageTypeRunStarted, 18);
+      assert.strictEqual(unityIdeMessageTypeRunFinished, 19);
+      assert.strictEqual(unityIdeMessageTypeTestStarted, 20);
+      assert.strictEqual(unityIdeMessageTypeTestFinished, 21);
+      assert.strictEqual(unityIdeMessageTypeTestListRetrieved, 22);
+      assert.strictEqual(unityIdeMessageTypeRetrieveTestList, 23);
+      assert.strictEqual(unityIdeMessageTypeExecuteTests, 24);
+    });
+  });
+
+  describe('ping/pong encoding', () => {
+    it('encodes a Ping message correctly', () => {
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypePing, '');
+
+      assert.strictEqual(buffer.readInt32LE(0), 1); // Ping type
+      assert.strictEqual(buffer.readInt32LE(4), 0); // empty payload
+      assert.strictEqual(buffer.length, 8); // header only
+    });
+
+    it('round-trips Ping through decode', () => {
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypePing, '');
+      const decoded = decodeUnityIdeMessage(buffer);
+
+      assert.ok(decoded);
+      assert.strictEqual(decoded!.type, unityIdeMessageTypePing);
+      assert.strictEqual(decoded!.value, '');
+    });
+  });
+
+  describe('RetrieveTestList encoding', () => {
+    it('encodes EditMode request', () => {
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypeRetrieveTestList, 'EditMode');
+
+      assert.strictEqual(buffer.readInt32LE(0), unityIdeMessageTypeRetrieveTestList);
+      assert.strictEqual(buffer.readInt32LE(4), 'EditMode'.length);
+
+      const decoded = decodeUnityIdeMessage(buffer);
+      assert.ok(decoded);
+      assert.strictEqual(decoded!.type, unityIdeMessageTypeRetrieveTestList);
+      assert.strictEqual(decoded!.value, 'EditMode');
+    });
+
+    it('encodes PlayMode request', () => {
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypeRetrieveTestList, 'PlayMode');
+
+      const decoded = decodeUnityIdeMessage(buffer);
+      assert.ok(decoded);
+      assert.strictEqual(decoded!.type, unityIdeMessageTypeRetrieveTestList);
+      assert.strictEqual(decoded!.value, 'PlayMode');
+    });
+  });
+
+  describe('ExecuteTests encoding', () => {
+    it('encodes EditMode:FullName format', () => {
+      const value = 'EditMode:MyNamespace.MyClass.MyMethod';
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypeExecuteTests, value);
+
+      assert.strictEqual(buffer.readInt32LE(0), unityIdeMessageTypeExecuteTests);
+      const decoded = decodeUnityIdeMessage(buffer);
+      assert.ok(decoded);
+      assert.strictEqual(decoded!.value, value);
+    });
+
+    it('encodes PlayMode:FullName format', () => {
+      const value = 'PlayMode:MyNamespace.MyClass.MyMethod';
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypeExecuteTests, value);
+
+      const decoded = decodeUnityIdeMessage(buffer);
+      assert.ok(decoded);
+      assert.strictEqual(decoded!.value, value);
+    });
+  });
+
+  describe('TCP fallback marker', () => {
+    it('encodes Tcp marker message with port:length format', () => {
+      const value = '56042:12345';
+      const buffer = encodeUnityIdeMessage(unityIdeMessageTypeTcp, value);
+
+      assert.strictEqual(buffer.readInt32LE(0), unityIdeMessageTypeTcp);
+
+      const decoded = decodeUnityIdeMessage(buffer);
+      assert.ok(decoded);
+      assert.strictEqual(decoded!.type, unityIdeMessageTypeTcp);
+      assert.strictEqual(decoded!.value, value);
+    });
+  });
+});
+
+describe('testModel', () => {
+  describe('buildUnityTestTree', () => {
+    it('builds a tree from flat test list', () => {
+      const tests: UnityTestInfo[] = [
+        { Id: '1', Name: 'RootSuite', FullName: 'RootSuite', Type: '', Method: '', Assembly: 'Test.dll', Parent: '' },
+        { Id: '2', Name: 'ChildTest', FullName: 'RootSuite.ChildTest', Type: '', Method: 'ChildTest', Assembly: 'Test.dll', Parent: '1' },
+        { Id: '3', Name: 'LeafTest', FullName: 'RootSuite.ChildTest.LeafTest', Type: '', Method: 'LeafTest', Assembly: 'Test.dll', Parent: '2' }
+      ];
+
+      const tree = buildUnityTestTree(tests);
+
+      assert.strictEqual(tree.roots.length, 1);
+      assert.strictEqual(tree.roots[0].Id, '1');
+      assert.strictEqual(tree.byId.size, 3);
+      assert.strictEqual(tree.childrenByParent.get('1')?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get('1')?.[0].Id, '2');
+      assert.strictEqual(tree.childrenByParent.get('2')?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get('2')?.[0].Id, '3');
+    });
+
+    it('handles multiple root items', () => {
+      const tests: UnityTestInfo[] = [
+        { Id: '1', Name: 'SuiteA', FullName: 'SuiteA', Type: '', Method: '', Assembly: 'Test.dll', Parent: '' },
+        { Id: '2', Name: 'SuiteB', FullName: 'SuiteB', Type: '', Method: '', Assembly: 'Test.dll', Parent: '' },
+        { Id: '3', Name: 'TestA', FullName: 'SuiteA.TestA', Type: '', Method: 'TestA', Assembly: 'Test.dll', Parent: '1' },
+        { Id: '4', Name: 'TestB', FullName: 'SuiteB.TestB', Type: '', Method: 'TestB', Assembly: 'Test.dll', Parent: '2' }
+      ];
+
+      const tree = buildUnityTestTree(tests);
+
+      assert.strictEqual(tree.roots.length, 2);
+      assert.strictEqual(tree.childrenByParent.get('1')?.length, 1);
+      assert.strictEqual(tree.childrenByParent.get('2')?.length, 1);
+    });
+
+    it('handles empty list', () => {
+      const tree = buildUnityTestTree([]);
+      assert.strictEqual(tree.roots.length, 0);
+      assert.strictEqual(tree.byId.size, 0);
+    });
+
+    it('handles orphan items (parent Id not found) by placing them at root', () => {
+      const tests: UnityTestInfo[] = [
+        { Id: '1', Name: 'Orphan', FullName: 'Orphan', Type: '', Method: '', Assembly: 'Test.dll', Parent: 'nonexistent' }
+      ];
+
+      const tree = buildUnityTestTree(tests);
+
+      assert.strictEqual(tree.roots.length, 1);
+      assert.strictEqual(tree.roots[0].Id, '1');
+    });
+  });
+});
+
+describe('testDiscovery', () => {
+  describe('parseTestListResponse', () => {
+    const sampleTests: UnityTestInfo[] = [
+      { Id: '1', Name: 'MyTest', FullName: 'NS.MyClass.MyTest', Type: 'NS.MyClass', Method: 'MyTest', Assembly: 'Test.dll', Parent: '' }
+    ];
+
+    it('parses a valid EditMode response', () => {
+      const value = `EditMode:${JSON.stringify({ tests: sampleTests })}`;
+      const result = parseTestListResponse(value);
+
+      assert.ok(result);
+      assert.strictEqual(result!.mode, 'EditMode');
+      assert.strictEqual(result!.tests.length, 1);
+      assert.strictEqual(result!.tests[0].FullName, 'NS.MyClass.MyTest');
+    });
+
+    it('parses a valid PlayMode response', () => {
+      const value = `PlayMode:${JSON.stringify({ tests: sampleTests })}`;
+      const result = parseTestListResponse(value);
+
+      assert.ok(result);
+      assert.strictEqual(result!.mode, 'PlayMode');
+      assert.strictEqual(result!.tests.length, 1);
+    });
+
+    it('returns undefined for unknown mode', () => {
+      const value = `Unknown:${JSON.stringify({ tests: sampleTests })}`;
+      assert.strictEqual(parseTestListResponse(value), undefined);
+    });
+
+    it('returns undefined for missing colon', () => {
+      const value = 'InvalidFormat';
+      assert.strictEqual(parseTestListResponse(value), undefined);
+    });
+
+    it('returns undefined for malformed JSON', () => {
+      const value = 'EditMode:{broken json';
+      assert.strictEqual(parseTestListResponse(value), undefined);
+    });
+
+    it('handles empty tests array', () => {
+      const value = 'EditMode:{"tests":[]}';
+      const result = parseTestListResponse(value);
+
+      assert.ok(result);
+      assert.strictEqual(result!.tests.length, 0);
+    });
+  });
+});
+
+describe('RunStarted / RunFinished encoding', () => {
+  it('round-trips RunStarted payload', () => {
+    const payload = JSON.stringify({
+      TestMode: 'EditMode',
+      Tests: [
+        { Id: '1', Name: 'MyTest', FullName: 'NS.MyTest', Type: 'NS', Method: 'MyTest', Assembly: 'Asm.dll', Parent: '' }
+      ]
+    });
+
+    const buffer = encodeUnityIdeMessage(unityIdeMessageTypeRunStarted, payload);
+    const decoded = decodeUnityIdeMessage(buffer);
+
+    assert.ok(decoded);
+    assert.strictEqual(decoded!.type, unityIdeMessageTypeRunStarted);
+
+    const parsed = JSON.parse(decoded!.value);
+    assert.strictEqual(parsed.TestMode, 'EditMode');
+    assert.strictEqual(parsed.Tests.length, 1);
+  });
+
+  it('round-trips RunFinished payload', () => {
+    const payload = JSON.stringify({
+      TestMode: 'EditMode',
+      PassCount: 5,
+      FailCount: 1,
+      SkipCount: 0,
+      InconclusiveCount: 0,
+      Duration: 1234
+    });
+
+    const buffer = encodeUnityIdeMessage(unityIdeMessageTypeRunFinished, payload);
+    const decoded = decodeUnityIdeMessage(buffer);
+
+    assert.ok(decoded);
+    assert.strictEqual(decoded!.type, unityIdeMessageTypeRunFinished);
+
+    const parsed = JSON.parse(decoded!.value);
+    assert.strictEqual(parsed.PassCount, 5);
+    assert.strictEqual(parsed.FailCount, 1);
+    assert.strictEqual(parsed.Duration, 1234);
+  });
+
+  it('round-trips TestFinished payload', () => {
+    const payload = JSON.stringify({
+      Id: '42',
+      FullName: 'NS.Class.Method',
+      Result: 'Passed',
+      Duration: 100,
+      Message: '',
+      StackTrace: ''
+    });
+
+    const buffer = encodeUnityIdeMessage(unityIdeMessageTypeTestFinished, payload);
+    const decoded = decodeUnityIdeMessage(buffer);
+
+    assert.ok(decoded);
+    assert.strictEqual(decoded!.type, unityIdeMessageTypeTestFinished);
+  });
+});

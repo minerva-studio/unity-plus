@@ -17,7 +17,8 @@ describe('package manifest', () => {
       'onCommand:unityPlus.showUnityEventReferences',
       'onCommand:unityPlus.openMetaFile',
       'onCommand:unityPlus.openInUnity',
-      'onCommand:unityPlus.rescanUnityProject'
+      'onCommand:unityPlus.rescanUnityProject',
+      'onCommand:unityPlus.refreshUnityTests'
     ]);
   });
 
