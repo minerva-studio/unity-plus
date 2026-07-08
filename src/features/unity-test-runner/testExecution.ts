@@ -9,8 +9,7 @@ import {
 import type { UnityTestBridgeClient } from './unityTestBridge';
 import type {
   UnityTestMode,
-  UnityTestRunFinishedPayload,
-  UnityTestResultPayload
+  UnityTestResultContainer
 } from './testModel';
 import { mapTestStatus } from './testModel';
 
@@ -27,38 +26,40 @@ export async function executeUnityTests(
   fullNames: string[],
   token: vscode.CancellationToken
 ): Promise<void> {
-  // Build a set of requested test IDs for quick lookup during results.
-  // We don't know IDs ahead of time so we track by FullName.
-  const requestedNames = new Set(fullNames);
-  let active = true;
+  // Track which tests are still waiting for results.
+  // Unity sends a cascade of TestFinished for ancestors too — we only count exact FullName matches.
+  const pending = new Set(fullNames);
+  let done = false;
 
   const cancelListener = token.onCancellationRequested(() => {
-    active = false;
+    done = true;
     run.end();
   });
 
   const messageHandler = (message: { type: number; value: string }): void => {
-    if (!active) {
-      return;
-    }
+    if (done) return;
 
     switch (message.type) {
       case unityIdeMessageTypeRunStarted:
-        break; // TestAdaptors tree — informational, not needed mid-run
+        break;
       case unityIdeMessageTypeTestStarted: {
-        const name = extractFieldFromJson(message.value, 'Name');
-        if (name) {
-          run.started({ id: `unity:${name}`, label: name } as vscode.TestItem);
+        // Only report started for leaf tests we actually requested.
+        const name = extractFieldFromJson(message.value, 'FullName');
+        if (name && pending.has(name)) {
+          run.started({ id: `unity:${name}`, label: name.split('.').pop() || name } as vscode.TestItem);
         }
         break;
       }
       case unityIdeMessageTypeTestFinished:
-        handleTestFinished(run, message.value);
+        handleTestFinished(run, message.value, pending, () => {
+          if (pending.size === 0) {
+            done = true;
+            run.end();
+          }
+        });
         break;
       case unityIdeMessageTypeRunFinished:
-        handleRunFinished(run, message.value);
-        active = false;
-        break;
+        break; // Cascade; end is driven by pending set exhaustion
     }
   };
 
@@ -74,50 +75,51 @@ export async function executeUnityTests(
     }
   } finally {
     cancelListener.dispose();
+    // Safety: end the run after 60s if some tests never report back.
+    setTimeout(() => {
+      if (!done) {
+        done = true;
+        run.end();
+      }
+    }, 60000);
   }
 }
 
 // --- Internal helpers ---
 
-function handleTestFinished(run: vscode.TestRun, raw: string): void {
-  let payload: UnityTestResultPayload;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    return;
-  }
+function handleTestFinished(
+  run: vscode.TestRun,
+  raw: string,
+  pending: Set<string>,
+  onAllDone: () => void
+): void {
+  let container: UnityTestResultContainer;
+  try { container = JSON.parse(raw); } catch { return; }
 
-  const item = { id: `unity:${payload.FullName}`, label: payload.Name } as vscode.TestItem;
-  const status = mapTestStatus(payload.TestStatus);
+  for (const payload of container.TestResultAdaptors ?? []) {
+    // Only report results for tests we actually requested.
+    if (!pending.has(payload.FullName)) continue;
 
-  switch (status) {
-    case 'passed':
-      run.passed(item);
-      break;
-    case 'failed': {
-      const msg = new vscode.TestMessage(payload.ResultState || payload.StackTrace || 'Test failed.');
-      run.failed(item, msg);
-      break;
+    pending.delete(payload.FullName);
+
+    const item = { id: `unity:${payload.FullName}`, label: payload.Name } as vscode.TestItem;
+    const status = mapTestStatus(payload.TestStatus);
+
+    switch (status) {
+      case 'passed': run.passed(item); break;
+      case 'failed': {
+        run.failed(item, new vscode.TestMessage(payload.ResultState || payload.StackTrace || 'Test failed.'));
+        break;
+      }
+      case 'skipped': run.skipped(item); break;
+      case 'errored': {
+        run.errored(item, new vscode.TestMessage(payload.StackTrace || payload.ResultState || 'Unknown error.'));
+        break;
+      }
     }
-    case 'skipped':
-      run.skipped(item);
-      break;
-    case 'errored': {
-      const msg = new vscode.TestMessage(payload.StackTrace || payload.ResultState || 'Unknown error.');
-      run.errored(item, msg);
-      break;
-    }
   }
-}
 
-function handleRunFinished(run: vscode.TestRun, raw: string): void {
-  try {
-    const payload: UnityTestRunFinishedPayload = JSON.parse(raw);
-    void payload;
-  } catch {
-    // Best-effort.
-  }
-  run.end();
+  onAllDone();
 }
 
 function extractFieldFromJson(raw: string, field: string): string | undefined {

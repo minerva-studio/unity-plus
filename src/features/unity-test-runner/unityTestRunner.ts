@@ -4,88 +4,46 @@ import { createUnityTestBridge, type UnityTestBridgeClient } from './unityTestBr
 import { createUnityTestController } from './testController';
 import { discoverUnityTests } from './testDiscovery';
 import { executeUnityTests } from './testExecution';
-import type { UnityTestMode } from './testModel';
+import type { UnityTestInfo, UnityTestMode } from './testModel';
 
-export interface UnityTestRunnerFeatureOptions {
-  /** The root URI of the Unity project workspace. */
-  root?: vscode.Uri;
-}
+export interface UnityTestRunnerFeatureOptions { root?: vscode.Uri; }
 
-/**
- * Registers the Unity Test Runner feature.
- *
- * Creates a persistent UDP bridge to com.unity.ide.visualstudio, hooks into
- * the VS Code Testing API, and exposes commands for test discovery / execution.
- */
 export function registerUnityTestRunnerFeature(
   logger: UnityPlusLogger,
   options: UnityTestRunnerFeatureOptions = {}
 ): vscode.Disposable {
   const disposables: vscode.Disposable[] = [];
+  const testLookup = new Map<string, UnityTestInfo>();
   let bridge: UnityTestBridgeClient | undefined;
 
-  // --- Test Controller ---
-  const { controller, editModeProfile, updateTestTree, createTestRun, dispose: disposeController } =
+  const { controller, updateTestTree, createTestRun, dispose: disposeController } =
     createUnityTestController(
       () => refreshTests(logger, options.root),
       (request, token) => runTests(logger, options.root, request, token)
     );
-
   disposables.push({ dispose: disposeController });
 
-  // --- Commands ---
-  disposables.push(
-    vscode.commands.registerCommand('unityPlus.refreshUnityTests', async () => {
-      await refreshTests(logger, options.root);
-    })
-  );
+  disposables.push(vscode.commands.registerCommand('unityPlus.refreshUnityTests', () => refreshTests(logger, options.root)));
 
-  disposables.push(
-    vscode.commands.registerCommand('unityPlus.runAllUnityTests', async () => {
-      // Trigger the EditMode run profile.
-      await controller.refreshHandler?.(new vscode.CancellationTokenSource().token);
-      const runReq = new vscode.TestRunRequest();
-      await editModeProfile.runHandler(runReq, new vscode.CancellationTokenSource().token);
-    })
-  );
-
-  // --- Bridge lifecycle ---
-  async function ensureBridge(): Promise<UnityTestBridgeClient> {
-    if (bridge?.connected) {
-      return bridge;
-    }
-
+  async function getBridge(projectRoot: string): Promise<UnityTestBridgeClient> {
+    if (bridge?.connected) return bridge;
     bridge = createUnityTestBridge();
-
-    bridge.onError(err => {
-      logger.warn(`Unity test bridge error: ${err.message}`);
-    });
-
+    bridge.onError(err => logger.warn(`Unity test bridge: ${err.message}`));
+    await bridge.connect(projectRoot);
     return bridge;
   }
 
-  async function refreshTests(
-    log: UnityPlusLogger,
-    root?: vscode.Uri
-  ): Promise<void> {
-    if (!root) {
-      log.warn('Cannot refresh Unity tests: no Unity project root detected.');
-      return;
-    }
-
-    const projectRoot = root.fsPath;
-
+  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri): Promise<void> {
+    if (!root) { log.warn('No Unity root'); return; }
     try {
-      const client = await ensureBridge();
-      await client.connect(projectRoot);
-
+      const client = await getBridge(root.fsPath);
       log.info('Discovering Unity tests...');
       const { editModeTests, playModeTests } = await discoverUnityTests(client);
-
+      testLookup.clear();
+      for (const t of editModeTests) testLookup.set(t.Id, t);
+      for (const t of playModeTests) testLookup.set(t.Id, t);
       updateTestTree(editModeTests, playModeTests);
-      log.info(
-        `Unity test discovery complete: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode tests.`
-      );
+      log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
     } catch (error) {
       log.warn(`Unity test discovery failed: ${errorMessage(error)}`);
     }
@@ -97,71 +55,48 @@ export function registerUnityTestRunnerFeature(
     request: vscode.TestRunRequest,
     token: vscode.CancellationToken
   ): Promise<void> {
-    if (!root) {
-      log.warn('Cannot run Unity tests: no Unity project root detected.');
-      return;
-    }
-
-    const projectRoot = root.fsPath;
-
+    if (!root) { log.warn('No Unity root'); return; }
     try {
-      const client = await ensureBridge();
-      await client.connect(projectRoot);
-
-      // Determine mode from profile tags or default to EditMode.
-      // VS Code Testing API attaches the profile info to the request indirectly.
-      // We infer mode from which items are requested. For now, default to EditMode.
-      const mode: UnityTestMode = 'EditMode';
-
-      // Collect test FullNames from the request.
+      const client = await getBridge(root.fsPath);
       const testItems = collectTestItems(request);
-      const run = createTestRun(request, `Unity ${mode} Tests`);
+      let mode: UnityTestMode = 'EditMode';
+      const fullNames: string[] = [];
 
-      if (testItems.length === 0) {
-        // If no specific items are requested, discover all and run all.
-        const { editModeTests } = await discoverUnityTests(client);
-        const allNames = editModeTests.map(t => t.FullName);
-
-        // Enqueue all items.
-        for (const test of editModeTests) {
-          run.enqueued({
-            id: `unity:${test.Id}`,
-            label: test.Name
-          } as vscode.TestItem);
-        }
-
-        await executeUnityTests(client, run, mode, allNames, token);
-      } else {
-        // Enqueue the requested items.
-        for (const item of testItems) {
-          run.enqueued(item);
-        }
-
-        const fullNames = testItems
-          .map(item => item.id.replace(/^unity:/, ''))
-          .filter(Boolean);
-
-        // Also discover to get FullName mapping if needed.
-        await discoverUnityTests(client);
-
-        await executeUnityTests(client, run, mode, fullNames, token);
+      for (const item of testItems) {
+        const unityId = item.id.startsWith('unity:') ? item.id.slice(6) : item.id;
+        const info = testLookup.get(unityId);
+        if (info) { fullNames.push(info.FullName); mode = inferMode(item); }
       }
+      if (fullNames.length === 0) {
+        for (const info of testLookup.values()) {
+          if (info.Method) fullNames.push(info.FullName);
+        }
+      }
+
+      const run = createTestRun(request, `Unity ${mode} Tests`);
+      for (const item of testItems) run.enqueued(item);
+      await executeUnityTests(client, run, mode, fullNames, token);
     } catch (error) {
       log.warn(`Unity test execution failed: ${errorMessage(error)}`);
     }
   }
 
-  // --- Cleanup ---
-  disposables.push({
-    dispose: () => {
-      bridge?.disconnect();
-    }
-  });
-
+  disposables.push({ dispose: () => bridge?.disconnect() });
   return vscode.Disposable.from(...disposables);
 }
 
 // --- Internal helpers ---
+
+/** Walk up the TestItem tree to find if it belongs to EditMode or PlayMode root. */
+function inferMode(item: vscode.TestItem): UnityTestMode {
+  let current: vscode.TestItem | undefined = item;
+  while (current) {
+    if (current.id === 'unity:EditMode') return 'EditMode';
+    if (current.id === 'unity:PlayMode') return 'PlayMode';
+    current = current.parent;
+  }
+  return 'EditMode';
+}
 
 function collectTestItems(request: vscode.TestRunRequest): vscode.TestItem[] {
   const items: vscode.TestItem[] = [];

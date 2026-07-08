@@ -61,6 +61,11 @@ export interface UnityTestResultPayload {
   Parent: number;
 }
 
+/** TestFinished / RunFinished wrap results in this container. */
+export interface UnityTestResultContainer {
+  TestResultAdaptors: UnityTestResultPayload[];
+}
+
 /** Summary received in RunFinished. */
 export interface UnityTestRunFinishedPayload {
   TestMode: UnityTestMode;

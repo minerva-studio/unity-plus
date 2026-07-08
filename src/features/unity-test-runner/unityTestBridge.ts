@@ -5,32 +5,14 @@ import {
   encodeUnityIdeMessage,
   findUnityIdeMessagingEndpoint,
   unityIdeMessageTypeTcp,
-  unityIdeMessageTypePing,
-  unityIdeMessageTypePong,
-  unityIdeMessageTypeRetrieveTestList,
-  unityIdeMessageTypeTestListRetrieved,
-  unityIdeMessageTypeExecuteTests,
-  unityIdeMessageTypeRunStarted,
-  unityIdeMessageTypeRunFinished,
-  unityIdeMessageTypeTestStarted,
-  unityIdeMessageTypeTestFinished,
   type UnityIdeMessage
 } from '../../unity/visualStudioMessaging';
-
-/** Interval in ms between keep-alive Ping messages. */
-const pingIntervalMs = 1500;
 
 /** Maximum bytes for a single UDP datagram payload before TCP fallback kicks in. */
 const maxUdpPayload = 50000;
 
 export type BridgeMessageHandler = (message: UnityIdeMessage) => void;
 export type BridgeErrorHandler = (error: Error) => void;
-export type BridgeTraceHandler = (direction: 'send' | 'recv', type: number, typeName: string, valuePreview: string) => void;
-
-export interface UnityTestBridgeOptions {
-  /** Called for every message sent/received — useful for debugging the protocol. */
-  trace?: BridgeTraceHandler;
-}
 
 export interface UnityTestBridgeClient {
   /** Start the connection to Unity's messaging port. Resolves once the port is found. */
@@ -48,35 +30,16 @@ export interface UnityTestBridgeClient {
 }
 
 /**
- * Creates a persistent UDP client that talks to com.unity.ide.visualstudio's
- * messaging bridge.  It keeps the socket open, sends periodic Ping messages
- * so Unity doesn't drop the client from its broadcast list, and implements
- * TCP fallback for messages that exceed the UDP datagram size.
+ * Creates a UDP client that talks to com.unity.ide.visualstudio's
+ * messaging bridge — minimal, probe-style: connect once, never ping,
+ * TCP fallback for large messages.
  */
 export function createUnityTestBridge(): UnityTestBridgeClient {
   let socket: dgram.Socket | undefined;
   let port: number | undefined;
-  let pingTimer: ReturnType<typeof setInterval> | undefined;
   let messageHandler: BridgeMessageHandler | undefined;
   let errorHandler: BridgeErrorHandler | undefined;
-
-  function startPing(): void {
-    stopPing();
-    pingTimer = setInterval(() => {
-      try {
-        sendRaw(unityIdeMessageTypePing, '');
-      } catch {
-        // Ping failures are non-fatal; Unity may have closed.
-      }
-    }, pingIntervalMs);
-  }
-
-  function stopPing(): void {
-    if (pingTimer !== undefined) {
-      clearInterval(pingTimer);
-      pingTimer = undefined;
-    }
-  }
+  let binding = false;
 
   function sendRaw(type: number, value: string): void {
     if (!socket || port === undefined) {
@@ -113,11 +76,17 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
 
   function receiveTcpFallback(host: string, tcpPort: number, length: number): void {
     const tcpSocket = net.createConnection({ host, port: tcpPort });
-    let buffer = Buffer.alloc(0);  // local — no shared state across concurrent fallbacks
+    let buffer = Buffer.alloc(0);
+
+    // Safety timeout: abort TCP read after 30s to prevent hanging connections.
+    const safety = setTimeout(() => {
+      try { tcpSocket.end(); } catch { /* ignore */ }
+    }, 30000);
 
     tcpSocket.on('data', (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
       if (buffer.length >= length) {
+        clearTimeout(safety);
         const decoded = decodeUnityIdeMessage(buffer);
         if (decoded) {
           messageHandler?.(decoded);
@@ -127,6 +96,7 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
     });
 
     tcpSocket.on('error', err => {
+      clearTimeout(safety);
       errorHandler?.(err);
     });
   }
@@ -155,35 +125,46 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
     connected: false,
 
     async connect(projectRoot: string): Promise<void> {
-      // Tear down any previous connection before establishing a new one.
-      stopPing();
-      if (socket) {
-        try { socket.close(); } catch { /* already closed */ }
-        socket = undefined;
+      // Already connected — reuse existing socket (probe-style: one socket per session).
+      if (socket && port !== undefined) {
+        return;
       }
-      port = undefined;
-
-      const discoveredPort = await findUnityIdeMessagingEndpoint(projectRoot);
-      if (discoveredPort === undefined) {
-        throw new Error(
-          'Could not find Unity IDE messaging endpoint. Make sure Unity Editor is open with this project.'
-        );
+      // Prevent concurrent connect() calls from creating duplicate sockets.
+      if (binding) {
+        throw new Error('Bridge connection already in progress.');
       }
+      binding = true;
 
-      socket = dgram.createSocket('udp4');
-      port = discoveredPort;
+      try {
+        // Tear down any previous partial connection
+        if (socket) {
+          try { socket.close(); } catch { /* ignore */ }
+          socket = undefined;
+        }
+        port = undefined;
 
-      socket.on('message', (msg: Buffer) => handleMessage(msg));
-      socket.on('error', err => errorHandler?.(err));
+        const discoveredPort = await findUnityIdeMessagingEndpoint(projectRoot);
+        if (discoveredPort === undefined) {
+          throw new Error(
+            'Could not find Unity IDE messaging endpoint. Make sure Unity Editor is open with this project.'
+          );
+        }
 
-      // Bind to an ephemeral port so we can receive responses.
-      await new Promise<void>((resolve, reject) => {
-        socket!.bind(() => resolve());
-        socket!.once('error', reject);
-      });
+        socket = dgram.createSocket('udp4');
+        port = discoveredPort;
 
-      (this as { connected: boolean }).connected = true;
-      startPing();
+        socket.on('message', (msg: Buffer) => handleMessage(msg));
+        socket.on('error', err => errorHandler?.(err));
+
+        await new Promise<void>((resolve, reject) => {
+          socket!.bind(() => resolve());
+          socket!.once('error', reject);
+        });
+
+        (this as { connected: boolean }).connected = true;
+      } finally {
+        binding = false;
+      }
     },
 
     send(type: number, value = ''): void {
@@ -199,21 +180,12 @@ export function createUnityTestBridge(): UnityTestBridgeClient {
     },
 
     disconnect(): void {
-      stopPing();
       if (socket) {
-        try {
-          socket.close();
-        } catch {
-          // Socket may already be closed.
-        }
+        try { socket.close(); } catch { /* already closed */ }
         socket = undefined;
       }
       port = undefined;
       (this as { connected: boolean }).connected = false;
     }
   };
-}
-
-function disconnect(client: UnityTestBridgeClient): void {
-  client.disconnect();
 }
