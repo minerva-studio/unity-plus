@@ -61,19 +61,9 @@ export interface UnityTestResultPayload {
   Parent: number;
 }
 
-/** TestFinished / RunFinished wrap results in this container. */
+/** TestFinished and RunFinished both wrap flattened result trees in this container. */
 export interface UnityTestResultContainer {
   TestResultAdaptors: UnityTestResultPayload[];
-}
-
-/** Summary received in RunFinished. */
-export interface UnityTestRunFinishedPayload {
-  TestMode: UnityTestMode;
-  PassCount: number;
-  FailCount: number;
-  SkipCount: number;
-  InconclusiveCount: number;
-  Duration: number;
 }
 
 /** Builds a look-up tree from a flat array of UnityTestInfo items.

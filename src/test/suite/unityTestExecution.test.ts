@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { executeUnityTests, UnityTestStartTimeoutError } from '../../features/unity-test-runner/testExecution';
 import type { UnityTestBridgeClient } from '../../features/unity-test-runner/unityTestBridge';
 import {
+  unityIdeMessageTypeRunFinished,
   unityIdeMessageTypeRunStarted,
   unityIdeMessageTypeTestFinished
 } from '../../unity/visualStudioMessaging';
@@ -126,6 +127,39 @@ suite('unityTestExecution - protocol fixture', () => {
 
       assert.strictEqual(state.ended, 1);
       assert.deepStrictEqual(state.errored, []);
+    } finally {
+      cancellation.dispose();
+    }
+  });
+
+  test('accepts a successful RunFinished tree when the start signal was lost', async () => {
+    const bridge = new MockExecutionBridge();
+    const cancellation = new vscode.CancellationTokenSource();
+    const state: MockRunState = { ended: 0, errored: [], passed: [] };
+    const name = 'Tests.Sample.FinishedWithoutStart';
+    const item = createTestItem(name);
+
+    try {
+      const execution = executeUnityTests(
+        bridge,
+        createMockRun(state),
+        'EditMode',
+        [name],
+        cancellation.token,
+        undefined,
+        new Map([[name, item]]),
+        [name],
+        1000
+      );
+
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: name, Name: 'FinishedWithoutStart', TestStatus: 0 }]
+      }));
+      await execution;
+
+      assert.deepStrictEqual(state.passed, [item.id]);
+      assert.deepStrictEqual(state.errored, []);
+      assert.strictEqual(state.ended, 1);
     } finally {
       cancellation.dispose();
     }

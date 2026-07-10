@@ -98,13 +98,18 @@ export async function executeUnityTests(
           break;
         }
         case unityIdeMessageTypeTestFinished:
+          // A completion callback proves Unity started even if its UDP start message was lost.
+          markStarted();
           handleTestFinished(run, message.value, pending, () => {
             if (pending.size === 0) settle();
             else log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
           }, log, itemByFullName);
           break;
         case unityIdeMessageTypeRunFinished:
-          // Unity has completed the run; any unreported requested result is an error.
+          // Unity serializes RunFinished as the same complete result tree as TestFinished.
+          markStarted();
+          handleTestFinished(run, message.value, pending, () => undefined, log, itemByFullName);
+          // Only results absent even from the final tree remain genuinely unreported.
           markPendingErrored(run, pending, itemByFullName, 'Unity finished without reporting this test result.');
           settle();
           break;
