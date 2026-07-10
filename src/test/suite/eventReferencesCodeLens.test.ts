@@ -115,6 +115,35 @@ suite('eventReferences - VS Code CodeLens Provider', () => {
         assert.strictEqual(methodLens?.range.start.character, 16);
         assert.strictEqual(invokerLens?.range.start.line, 6);
         assert.strictEqual(invokerLens?.range.start.character, 16);
+
+        // Verify cached provider ranges are invalidated for both insert and delete edits.
+        const cannonDocument = await vscode.workspace.openTextDocument(cannonUri);
+        const insertEdit = new vscode.WorkspaceEdit();
+        insertEdit.insert(cannonUri, new vscode.Position(0, 0), '\n');
+        assert.strictEqual(await vscode.workspace.applyEdit(insertEdit), true);
+        try {
+          const shiftedLenses = await waitForUnityEventCodeLenses(cannonUri, {
+            method: true,
+            methodInvokerField: true,
+            field: false,
+            fieldTarget: false
+          });
+          const shiftedMethodLens = shiftedLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+          assert.strictEqual(shiftedMethodLens?.range.start.line, 7);
+        } finally {
+          const deleteEdit = new vscode.WorkspaceEdit();
+          deleteEdit.delete(cannonUri, new vscode.Range(0, 0, 1, 0));
+          assert.strictEqual(await vscode.workspace.applyEdit(deleteEdit), true);
+        }
+
+        const restoredLenses = await waitForUnityEventCodeLenses(cannonDocument.uri, {
+          method: true,
+          methodInvokerField: true,
+          field: false,
+          fieldTarget: false
+        });
+        const restoredMethodLens = restoredLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+        assert.strictEqual(restoredMethodLens?.range.start.line, 6);
       } finally {
         disposable.dispose();
       }

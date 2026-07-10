@@ -58,5 +58,10 @@
   "resolved {count} UnityEvent target script path(s) by type name": "resolved {count} UnityEvent target script path(s) by type name",
   "owner scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved": "owner 脚本：{guidCount} 个 GUID、{editorCount} 个 editor class、{unresolvedCount} 个未解析",
   "serialized instance scripts: {guidCount} GUID, {editorCount} editor class, {unresolvedCount} unresolved": "序列化实例脚本：{guidCount} 个 GUID、{editorCount} 个 editor class、{unresolvedCount} 个未解析",
-  "serialized instance text hits: {hitCount} found, {resolvedCount} metadata-resolved, {unresolvedCount} unresolved, {dedupedCount} deduped": "序列化实例文本命中：找到 {hitCount} 个，metadata 解析 {resolvedCount} 个，未解析 {unresolvedCount} 个，去重 {dedupedCount} 个"
+  "serialized instance text hits: {hitCount} found, {resolvedCount} metadata-resolved, {unresolvedCount} unresolved, {dedupedCount} deduped": "序列化实例文本命中：找到 {hitCount} 个，metadata 解析 {resolvedCount} 个，未解析 {unresolvedCount} 个，去重 {dedupedCount} 个",
+  "Unity Plus: refreshing Unity tests": "Unity Plus: 正在刷新 Unity 测试",
+  "Connecting to Unity": "正在连接 Unity",
+  "Discovering EditMode and PlayMode tests": "正在发现 EditMode 和 PlayMode 测试",
+  "Unity Plus: found {editModeCount} EditMode and {playModeCount} PlayMode tests.": "Unity Plus: 找到 {editModeCount} 个 EditMode 测试和 {playModeCount} 个 PlayMode 测试。",
+  "Unity Plus: Unity is not responding; it may be refreshing, compiling, reloading the script domain, or the project may not be open.": "Unity Plus: Unity 未响应；可能正在刷新、编译、重载脚本域，或者项目未打开。"
 }

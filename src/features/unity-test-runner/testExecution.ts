@@ -14,6 +14,16 @@ import type {
 import { mapTestStatus } from './testModel';
 import type { UnityPlusLogger } from '../../unity/logger';
 
+const defaultTestStartTimeoutMs = 8000;
+
+export class UnityTestStartTimeoutError extends Error {
+  /** Creates the explicit failure used when Unity accepts no test-run activity. */
+  constructor() {
+    super('Unity did not report that the test run started.');
+    this.name = 'UnityTestStartTimeoutError';
+  }
+}
+
 export async function executeUnityTests(
   bridge: UnityTestBridgeClient,
   run: vscode.TestRun,
@@ -24,57 +34,103 @@ export async function executeUnityTests(
   /** FullName → real TestItem from the controller tree for result reporting. */
   itemByFullName?: Map<string, vscode.TestItem>,
   /** FullNames to match in TestFinished (defaults to fullNames if omitted). */
-  pendingNames?: string[]
+  pendingNames?: string[],
+  /** Startup timeout override used by the protocol mock fixture. */
+  startTimeoutMs = defaultTestStartTimeoutMs
 ): Promise<void> {
   // fullNames: what we send to Unity. pendingNames: what we wait for in results.
   // When running a parent (class), fullNames=[parent], pendingNames=[all leaf children].
   const pending = new Set(pendingNames ?? fullNames);
   log?.info(`executeTests mode=${mode} send=${fullNames.length} pending=${pending.size}`);
-  let done = false;
+  await new Promise<void>((resolve, reject) => {
+    let done = false;
+    let started = false;
+    let startTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const cancelListener = token.onCancellationRequested(() => { done = true; run.end(); });
-
-  const messageHandler = (message: { type: number; value: string }): void => {
-    if (done) return;
-
-    const tname = ['','Ping','Pong','','','','','','','','','','','','','','','Tcp','RunStarted','RunFinished','TestStarted','TestFinished','TestListRetrieved','RetrieveTestList','ExecuteTests'][message.type] || `?${message.type}`;
-    log?.info(`recv ${tname}(${message.type}) len=${message.value.length}`);
-
-    switch (message.type) {
-      case unityIdeMessageTypeRunStarted:
-        break;
-      case unityIdeMessageTypeTestStarted: {
-        // Only report started for leaf tests we actually requested.
-        const name = extractFieldFromJson(message.value, 'FullName');
-        if (name && pending.has(name)) {
-          run.started({ id: `unity:${name}`, label: name.split('.').pop() || name } as vscode.TestItem);
-        }
-        break;
+    /** Ends the VS Code run exactly once and releases its cancellation listener. */
+    function settle(error?: Error): void {
+      if (done) {
+        return;
       }
-      case unityIdeMessageTypeTestFinished:
-        handleTestFinished(run, message.value, pending, () => {
-          if (pending.size === 0) { done = true; run.end(); }
-          else log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
-        }, log, itemByFullName);
-        break;
-      case unityIdeMessageTypeRunFinished:
-        break; // Cascade; end is driven by pending set exhaustion
+
+      done = true;
+      if (startTimer) {
+        clearTimeout(startTimer);
+      }
+      cancelListener.dispose();
+      run.end();
+      if (error) reject(error); else resolve();
     }
-  };
 
-  bridge.onMessage(messageHandler);
+    /** Records the first protocol activity that proves Unity started the run. */
+    function markStarted(): void {
+      if (started) {
+        return;
+      }
 
-  try {
-    // Send execute commands for every requested test.
+      started = true;
+      if (startTimer) {
+        clearTimeout(startTimer);
+        startTimer = undefined;
+      }
+    }
+
+    const cancelListener = token.onCancellationRequested(() => queueMicrotask(settle));
+    const messageHandler = (message: { type: number; value: string }): void => {
+      if (done) return;
+
+      const tname = ['','Ping','Pong','','','','','','','','','','','','','','','Tcp','RunStarted','RunFinished','TestStarted','TestFinished','TestListRetrieved','RetrieveTestList','ExecuteTests'][message.type] || `?${message.type}`;
+      log?.info(`recv ${tname}(${message.type}) len=${message.value.length}`);
+
+      switch (message.type) {
+        case unityIdeMessageTypeRunStarted:
+          markStarted();
+          break;
+        case unityIdeMessageTypeTestStarted: {
+          markStarted();
+          // Only report started for leaf tests we actually requested.
+          const name = extractFieldFromJson(message.value, 'FullName');
+          if (name && pending.has(name)) {
+            const item = itemByFullName?.get(name)
+              ?? { id: `unity:${name}`, label: name.split('.').pop() || name } as vscode.TestItem;
+            run.started(item);
+          }
+          break;
+        }
+        case unityIdeMessageTypeTestFinished:
+          handleTestFinished(run, message.value, pending, () => {
+            if (pending.size === 0) settle();
+            else log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
+          }, log, itemByFullName);
+          break;
+        case unityIdeMessageTypeRunFinished:
+          // Unity has completed the run; any unreported requested result is an error.
+          markPendingErrored(run, pending, itemByFullName, 'Unity finished without reporting this test result.');
+          settle();
+          break;
+      }
+    };
+
+    bridge.onMessage(messageHandler);
+    startTimer = setTimeout(() => {
+      const error = new UnityTestStartTimeoutError();
+      markPendingErrored(run, pending, itemByFullName, error.message);
+      settle(error);
+    }, startTimeoutMs);
+
+    // Send after handlers and timeout are installed so fast responses cannot race setup.
     for (const fullName of fullNames) {
       if (token.isCancellationRequested) {
+        settle();
         break;
       }
       bridge.send(unityIdeMessageTypeExecuteTests, `${mode}:${fullName}`);
     }
-  } finally {
-    cancelListener.dispose();
-  }
+
+    if (fullNames.length === 0) {
+      settle();
+    }
+  });
 }
 
 // --- Internal helpers ---
@@ -139,4 +195,19 @@ function extractFieldFromJson(raw: string, field: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Marks every pending leaf as errored before a failed or incomplete run ends. */
+function markPendingErrored(
+  run: vscode.TestRun,
+  pending: Set<string>,
+  itemByFullName: Map<string, vscode.TestItem> | undefined,
+  message: string
+): void {
+  for (const name of pending) {
+    const item = itemByFullName?.get(name)
+      ?? { id: `unity:${name}`, label: name.split('.').pop() || name } as vscode.TestItem;
+    run.errored(item, new vscode.TestMessage(message));
+  }
+  pending.clear();
 }

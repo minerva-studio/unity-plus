@@ -17,6 +17,8 @@ export function createUnityTestController(
     if (item) return; // children pre-built
     await onRefresh();
   };
+  // Route the Testing view's native refresh action through the same visible workflow.
+  controller.refreshHandler = onRefresh;
 
   function updateTestTree(editModeTests: UnityTestInfo[], playModeTests: UnityTestInfo[]): void {
     controller.items.replace([]);

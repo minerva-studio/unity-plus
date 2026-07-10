@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import { EventEmitter } from 'node:events';
 import {
   unityIdeMessageTypePing,
   unityIdeMessageTypePong,
@@ -15,8 +16,57 @@ import {
 } from '../unity/visualStudioMessaging';
 import { buildUnityTestTree, type UnityTestInfo } from '../features/unity-test-runner/testModel';
 import { parseTestListResponse } from '../features/unity-test-runner/testDiscovery';
+import { discoverUnityTests } from '../features/unity-test-runner/testDiscovery';
+import { createUnityTestBridge, type UnityTestBridgeClient } from '../features/unity-test-runner/unityTestBridge';
+
+class MockPersistentSocket extends EventEmitter {
+  readonly sends: Array<{ port: number; value: Buffer }> = [];
+  closed = false;
+
+  /** Simulates an immediately bound UDP socket. */
+  bind(callback?: () => void): void {
+    callback?.();
+  }
+
+  /** Records that the persistent bridge socket was closed. */
+  close(): void {
+    this.closed = true;
+  }
+
+  /** Records UDP payloads and their destination ports. */
+  send(message: Buffer, port: number, _address: string, callback?: (error: Error | null) => void): void {
+    this.sends.push({ port, value: message });
+    callback?.(null);
+  }
+}
 
 describe('unityTestBridge', () => {
+  it('rebuilds the persistent socket when endpoint validation finds a new port', async () => {
+    const ports = [56002, 56003];
+    const sockets: MockPersistentSocket[] = [];
+    const bridge = createUnityTestBridge({
+      findEndpoint: async () => ports.shift(),
+      createSocket: () => {
+        const socket = new MockPersistentSocket();
+        sockets.push(socket);
+        return socket as unknown as import('node:dgram').Socket;
+      }
+    });
+
+    try {
+      await bridge.connect('C:/Project');
+      await bridge.connect('C:/Project');
+      bridge.send(unityIdeMessageTypePing);
+
+      assert.strictEqual(sockets.length, 2);
+      assert.strictEqual(sockets[0].closed, true);
+      assert.strictEqual(sockets[1].closed, false);
+      assert.strictEqual(sockets[1].sends.at(-1)?.port, 56003);
+    } finally {
+      bridge.disconnect();
+    }
+  });
+
   describe('message type constants', () => {
     it('has the correct values matching com.unity.ide.visualstudio MessageType enum', () => {
       assert.strictEqual(unityIdeMessageTypePing, 1);
@@ -210,6 +260,19 @@ describe('testDiscovery', () => {
 
       assert.ok(result);
       assert.strictEqual(result!.tests.length, 0);
+    });
+
+    it('rejects when Unity sends no test-list response before the timeout', async () => {
+      const bridge: UnityTestBridgeClient = {
+        connected: true,
+        connect: async () => undefined,
+        send: () => undefined,
+        onMessage: () => undefined,
+        onError: () => undefined,
+        disconnect: () => undefined
+      };
+
+      await assert.rejects(discoverUnityTests(bridge, 5), /did not respond/i);
     });
   });
 });

@@ -18,7 +18,7 @@ export function registerUnityTestRunnerFeature(
   let playTests: UnityTestInfo[] = [];
   let bridge: UnityTestBridgeClient | undefined;
 
-  const { controller, updateTestTree, createTestRun, dispose: disposeController } =
+  const { updateTestTree, createTestRun, dispose: disposeController } =
     createUnityTestController(
       () => refreshTests(logger, options.root),
       (request, token) => runTests(logger, options.root, request, token)
@@ -28,32 +28,46 @@ export function registerUnityTestRunnerFeature(
   disposables.push(vscode.commands.registerCommand('unityPlus.refreshUnityTests', () => refreshTests(logger, options.root)));
 
   async function getBridge(projectRoot: string): Promise<UnityTestBridgeClient> {
-    if (bridge?.connected) return bridge;
-    bridge = createUnityTestBridge();
-    bridge.onError(err => logger.warn(`Unity test bridge: ${err.message}`));
+    if (!bridge) {
+      bridge = createUnityTestBridge();
+      bridge.onError(err => logger.warn(`Unity test bridge: ${err.message}`));
+    }
+
+    // ProjectPath validation runs before every refresh and test run, including connected sockets.
     await bridge.connect(projectRoot);
     return bridge;
   }
 
-  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri, attempt = 0): Promise<void> {
+  async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
-    attempt++;
-    try {
-      const client = await getBridge(root.fsPath);
-      log.info('Discovering Unity tests...');
-      const { editModeTests, playModeTests } = await discoverUnityTests(client);
-      testLookup.clear();
-      editTests = editModeTests; playTests = playModeTests;
-      for (const t of editModeTests) testLookup.set(t.Id, t);
-      for (const t of playModeTests) testLookup.set(t.Id, t);
-      updateTestTree(editModeTests, playModeTests);
-      log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
-      return;
-    } catch (error) {
-      log.warn(`Unity test discovery attempt ${attempt} failed: ${errorMessage(error)}`);
-      await new Promise(r => setTimeout(r, 5000));
-      refreshTests(log, root, attempt);
-    }
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: vscode.l10n.t('Unity Plus: refreshing Unity tests'),
+      cancellable: false
+    }, async progress => {
+      try {
+        progress.report({ message: vscode.l10n.t('Connecting to Unity') });
+        const client = await getBridge(root.fsPath);
+        progress.report({ message: vscode.l10n.t('Discovering EditMode and PlayMode tests') });
+        log.info('Discovering Unity tests...');
+        const { editModeTests, playModeTests } = await discoverUnityTests(client);
+
+        // Replace the visible tree only after discovery returns a valid response.
+        testLookup.clear();
+        editTests = editModeTests; playTests = playModeTests;
+        for (const t of editModeTests) testLookup.set(t.Id, t);
+        for (const t of playModeTests) testLookup.set(t.Id, t);
+        updateTestTree(editModeTests, playModeTests);
+        log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
+        void vscode.window.showInformationMessage(vscode.l10n.t(
+          'Unity Plus: found {editModeCount} EditMode and {playModeCount} PlayMode tests.',
+          { editModeCount: editModeTests.length, playModeCount: playModeTests.length }
+        ));
+      } catch (error) {
+        log.warn(`Unity test discovery failed: ${errorMessage(error)}`);
+        showUnityUnavailableWarning();
+      }
+    });
   }
 
   async function runTests(
@@ -63,12 +77,8 @@ export function registerUnityTestRunnerFeature(
     token: vscode.CancellationToken
   ): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
-    if (!bridge?.connected) {
-      log.warn('Unity not connected — compiling or reloading?');
-      vscode.window.showWarningMessage('Unity Plus: Cannot run tests while Unity is compiling or reloading.');
-      return;
-    }
     try {
+      // Do not send ExecuteTests until ProjectPath confirms a responsive Unity endpoint.
       const client = await getBridge(root.fsPath);
       const testItems = collectTestItems(request);
       let mode: UnityTestMode = 'EditMode';
@@ -130,7 +140,15 @@ export function registerUnityTestRunnerFeature(
       await executeUnityTests(client, run, mode, sendNames, token, logger, itemByFullName, pendingNames);
     } catch (error) {
       log.warn(`Unity test execution failed: ${errorMessage(error)}`);
+      showUnityUnavailableWarning();
     }
+  }
+
+  /** Shows one honest warning for protocol phases where Unity cannot report its exact busy state. */
+  function showUnityUnavailableWarning(): void {
+    void vscode.window.showWarningMessage(vscode.l10n.t(
+      'Unity Plus: Unity is not responding; it may be refreshing, compiling, reloading the script domain, or the project may not be open.'
+    ));
   }
 
   disposables.push({ dispose: () => bridge?.disconnect() });

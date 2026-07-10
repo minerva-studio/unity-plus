@@ -381,6 +381,71 @@ describe('eventReferences', () => {
     assert.deepStrictEqual(runtime.referenceCommands[2].locations[0].range.start, new FakePosition(4, 14));
   });
 
+  it('does not let an older asynchronous symbol request overwrite newer document ranges', async () => {
+    const pendingSymbolReads: Array<() => void> = [];
+    const runtime = createEventReferenceRuntime({
+      executeDocumentSymbols: async (_uri, symbols) => await new Promise<vscode.DocumentSymbol[]>(resolve => {
+        // The test controls completion order while preserving provider-shaped symbol results.
+        pendingSymbolReads.push(() => resolve(symbols));
+      })
+    });
+    const prefabUri = createUri('/Project/Assets/Gate.prefab');
+    const originalDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract() => true;',
+      '}'
+    ].join('\n'), 1);
+    const editedDocument = createTextDocument('/Project/Assets/Gate.cs', [
+      '',
+      'using UnityEngine.Events;',
+      'public class Gate',
+      '{',
+      '  public UnityEvent OnCheckEnable;',
+      '  public bool CanInteract() => true;',
+      '}'
+    ].join('\n'), 2);
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => [prefabUri],
+      readTextFile: async uri => uri.fsPath.endsWith('.cs') ? editedDocument.getText() : createPrefabYaml(2),
+      resolveCSharpType: async typeName => createTypeResolver()(typeName)
+    });
+
+    await runtime.provideCodeLenses(originalDocument);
+    await runtime.waitForCodeLensChange();
+    await runtime.provideCodeLenses(originalDocument);
+    await runtime.provideCodeLenses(editedDocument);
+    assert.strictEqual(pendingSymbolReads.length, 4);
+
+    const refreshCount = runtime.codeLensChangeCount;
+    pendingSymbolReads[2]();
+    pendingSymbolReads[3]();
+    await runtime.waitForCodeLensChangeAfter(refreshCount);
+    await Promise.resolve();
+    const currentLenses = await runtime.provideCodeLenses(editedDocument);
+    const currentMethodLens = currentLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+    assert.strictEqual(currentMethodLens?.range.start.line, 5);
+
+    pendingSymbolReads[0]();
+    pendingSymbolReads[1]();
+    await Promise.resolve();
+    await Promise.resolve();
+    const finalLenses = await runtime.provideCodeLenses(editedDocument);
+    const finalMethodLens = finalLenses.find(lens => lens.command?.arguments?.[0]?.kind === 'method');
+    assert.strictEqual(finalMethodLens?.range.start.line, 5);
+  });
+
   it('keeps UnityEvent field CodeLens when method symbols are unavailable', async () => {
     const runtime = createEventReferenceRuntime();
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
@@ -2050,6 +2115,10 @@ interface EventReferenceRuntimeOptions {
   throwTypeHierarchy?: boolean;
   emptyTypeHierarchy?: boolean;
   unityObjectTypes?: Record<string, boolean>;
+  executeDocumentSymbols?: (
+    uri: vscode.Uri,
+    symbols: vscode.DocumentSymbol[]
+  ) => Promise<vscode.DocumentSymbol[]>;
 }
 
 function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {}): EventReferenceRuntime {
@@ -2089,7 +2158,10 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
 
           const [uri] = args as [vscode.Uri];
           const document = textDocuments.get(uri.fsPath);
-          return document ? createFakeDocumentSymbols(runtime as unknown as typeof vscode, document) : [];
+          const symbols = document ? createFakeDocumentSymbols(runtime as unknown as typeof vscode, document) : [];
+          return options.executeDocumentSymbols
+            ? await options.executeDocumentSymbols(uri, symbols)
+            : symbols;
         }
 
         if (command === 'vscode.executeWorkspaceSymbolProvider') {
@@ -2734,7 +2806,7 @@ function createTestLogger() {
   });
 }
 
-function createTextDocument(fsPath: string, text: string): vscode.TextDocument {
+function createTextDocument(fsPath: string, text: string, version = 0): vscode.TextDocument {
   const lineStarts = [0];
   for (let index = 0; index < text.length; index += 1) {
     if (text[index] === '\n') {
@@ -2744,6 +2816,7 @@ function createTextDocument(fsPath: string, text: string): vscode.TextDocument {
 
   return {
     uri: createUri(fsPath),
+    version,
     getText: () => text,
     positionAt: (offset: number) => {
       let line = 0;

@@ -51,7 +51,12 @@ export function discoverUnityTests(
 
     const timeout = setTimeout(() => {
       cleanup();
-      // Resolve with whatever we received — partial results are better than none.
+      if (!editReceived && !playReceived) {
+        reject(new Error('Unity did not respond with a test list.'));
+        return;
+      }
+
+      // Preserve a valid partial response if only one test mode is available.
       resolve({ editModeTests, playModeTests });
     }, timeoutMs);
 

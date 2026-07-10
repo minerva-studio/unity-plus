@@ -209,7 +209,9 @@ async function main() {
           }
         }
       }
-    } catch {}
+    } catch {
+      // Ignore malformed diagnostic payloads while probing other test-list responses.
+    }
     if (leafFullName) break;
   }
 
@@ -224,7 +226,9 @@ async function main() {
         tests.slice(0, 10).forEach(t => {
           console.log(`  Id=${t.Id} FullName="${t.FullName}" Method="${t.Method}" Parent=${t.Parent}`);
         });
-      } catch {}
+      } catch {
+        // Ignore malformed diagnostic payloads while dumping the remaining samples.
+      }
     }
   }
 

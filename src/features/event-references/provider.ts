@@ -11,6 +11,10 @@ import { errorMessage, isCancellationRequested, toProjectPath } from './utils';
 const csharpRetryInitialDelayMilliseconds = 1000;
 const csharpRetryMaximumDelayMilliseconds = 60000;
 type CSharpCodeLensSymbolKind = 'methods' | 'fields';
+interface VersionedCSharpSymbols<T> {
+  documentVersion: number;
+  symbols: readonly T[];
+}
 
 /** Creates the VS Code provider facade that delegates scanning, rendering, and location display. */
 export function createEventReferenceProvider(
@@ -19,13 +23,14 @@ export function createEventReferenceProvider(
   isEnabled: () => boolean
 ): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
   const csharpRetryMemory = new Map<string, {
+    documentVersion: number;
     delayMilliseconds: number;
     logCount: number;
     nextAllowedAt: number;
     refreshTimer?: ReturnType<typeof setTimeout>;
   }>();
-  const lastMethodSymbolsByScriptPath = new Map<string, readonly CSharpMethodSymbolSnapshot[]>();
-  const lastFieldSymbolsByScriptPath = new Map<string, readonly CSharpFieldSymbolSnapshot[]>();
+  const lastMethodSymbolsByScriptPath = new Map<string, VersionedCSharpSymbols<CSharpMethodSymbolSnapshot>>();
+  const lastFieldSymbolsByScriptPath = new Map<string, VersionedCSharpSymbols<CSharpFieldSymbolSnapshot>>();
   const csharpRefreshInFlight = new Set<string>();
 
   /** Creates a retry key so one script or symbol kind cannot block another. */
@@ -55,12 +60,19 @@ export function createEventReferenceProvider(
   }
 
   /** Checks whether a previous provider failure should render cached placeholders. */
-  function hasCSharpUnavailableState(scriptPath: string, kind: CSharpCodeLensSymbolKind): boolean {
-    return csharpRetryMemory.has(csharpRetryKey(scriptPath, kind));
+  function hasCSharpUnavailableState(scriptPath: string, kind: CSharpCodeLensSymbolKind, documentVersion?: number): boolean {
+    const memory = csharpRetryMemory.get(csharpRetryKey(scriptPath, kind));
+    return memory !== undefined && (documentVersion === undefined || memory.documentVersion === documentVersion);
   }
 
   /** Records C# provider unavailability without actively polling the C# server. */
-  function recordCSharpCodeLensUnavailable(scriptPath: string, kind: CSharpCodeLensSymbolKind, error: unknown, canPlacePlaceholder: boolean): void {
+  function recordCSharpCodeLensUnavailable(
+    scriptPath: string,
+    kind: CSharpCodeLensSymbolKind,
+    documentVersion: number,
+    error: unknown,
+    canPlacePlaceholder: boolean
+  ): void {
     const key = csharpRetryKey(scriptPath, kind);
     const previousLogCount = getCSharpRetryLogCount(scriptPath, kind);
     const logCount = previousLogCount + 1;
@@ -83,6 +95,7 @@ export function createEventReferenceProvider(
     // The timer only asks VS Code to request CodeLens again; it does not call C# directly.
     const refreshTimer = setTimeout(() => controller.notifyCodeLensesChanged(), delayMilliseconds);
     csharpRetryMemory.set(key, {
+      documentVersion,
       delayMilliseconds: Math.min(csharpRetryMaximumDelayMilliseconds, delayMilliseconds * 2),
       logCount,
       nextAllowedAt: Date.now() + delayMilliseconds,
@@ -103,14 +116,43 @@ export function createEventReferenceProvider(
   function rememberCSharpSymbols(
     scriptPath: string,
     kind: CSharpCodeLensSymbolKind,
+    documentVersion: number,
     symbols: readonly CSharpMethodSymbolSnapshot[] | readonly CSharpFieldSymbolSnapshot[]
   ): void {
     if (kind === 'methods') {
-      lastMethodSymbolsByScriptPath.set(scriptPath, symbols as readonly CSharpMethodSymbolSnapshot[]);
+      lastMethodSymbolsByScriptPath.set(scriptPath, {
+        documentVersion,
+        symbols: symbols as readonly CSharpMethodSymbolSnapshot[]
+      });
       return;
     }
 
-    lastFieldSymbolsByScriptPath.set(scriptPath, symbols as readonly CSharpFieldSymbolSnapshot[]);
+    lastFieldSymbolsByScriptPath.set(scriptPath, {
+      documentVersion,
+      symbols: symbols as readonly CSharpFieldSymbolSnapshot[]
+    });
+  }
+
+  /** Returns symbols only when their provider ranges match the current document version. */
+  function getCurrentCSharpSymbols(
+    scriptPath: string,
+    kind: 'methods',
+    documentVersion: number
+  ): readonly CSharpMethodSymbolSnapshot[] | undefined;
+  function getCurrentCSharpSymbols(
+    scriptPath: string,
+    kind: 'fields',
+    documentVersion: number
+  ): readonly CSharpFieldSymbolSnapshot[] | undefined;
+  function getCurrentCSharpSymbols(
+    scriptPath: string,
+    kind: CSharpCodeLensSymbolKind,
+    documentVersion: number
+  ): readonly CSharpMethodSymbolSnapshot[] | readonly CSharpFieldSymbolSnapshot[] | undefined {
+    const entry = kind === 'methods'
+      ? lastMethodSymbolsByScriptPath.get(scriptPath)
+      : lastFieldSymbolsByScriptPath.get(scriptPath);
+    return entry !== undefined && entry.documentVersion === documentVersion ? entry.symbols : undefined;
   }
 
   /** Checks whether a script and symbol category is currently in retry backoff. */
@@ -126,18 +168,32 @@ export function createEventReferenceProvider(
     scriptPath: string,
     kind: CSharpCodeLensSymbolKind
   ): void {
-    if (!runtime.csharpLanguageService || isCSharpRetryBackoffActive(scriptPath, kind)) {
+    if (!runtime.csharpLanguageService) {
       return;
     }
 
-    const hasCachedSymbols = kind === 'methods'
-      ? lastMethodSymbolsByScriptPath.has(scriptPath)
-      : lastFieldSymbolsByScriptPath.has(scriptPath);
-    if (hasCachedSymbols && !hasCSharpUnavailableState(scriptPath, kind)) {
+    // Lightweight test documents may omit version; real VS Code documents always provide it.
+    const requestVersion = document.version ?? 0;
+    const retryMemory = csharpRetryMemory.get(csharpRetryKey(scriptPath, kind));
+    if (retryMemory && retryMemory.documentVersion !== requestVersion) {
+      resetCSharpRetry(scriptPath, kind);
+    }
+    const hasCachedSymbols = getCurrentCSharpSymbols(scriptPath, kind as 'methods', requestVersion) !== undefined;
+    if (hasCachedSymbols && !hasCSharpUnavailableState(scriptPath, kind, requestVersion)) {
       return;
     }
 
-    const key = csharpRetryKey(scriptPath, kind);
+    // An edit invalidates both cached ranges and retry backoff from the older version.
+    const cachedVersion = kind === 'methods'
+      ? lastMethodSymbolsByScriptPath.get(scriptPath)?.documentVersion
+      : lastFieldSymbolsByScriptPath.get(scriptPath)?.documentVersion;
+    if (cachedVersion !== undefined && cachedVersion !== requestVersion) {
+      resetCSharpRetry(scriptPath, kind);
+    } else if (isCSharpRetryBackoffActive(scriptPath, kind)) {
+      return;
+    }
+
+    const key = `${csharpRetryKey(scriptPath, kind)}#${requestVersion}`;
     if (csharpRefreshInFlight.has(key)) {
       return;
     }
@@ -151,14 +207,33 @@ export function createEventReferenceProvider(
         const symbols = kind === 'methods'
           ? await runtime.csharpLanguageService?.findMethods(document.uri, expectedNames) ?? []
           : await runtime.csharpLanguageService?.findUnityEventFields(document.uri, expectedNames) ?? [];
-        rememberCSharpSymbols(scriptPath, kind, symbols);
+        // TextDocument objects advance their version in place; never publish stale ranges.
+        const currentVersion = document.version ?? 0;
+        if (currentVersion !== requestVersion) {
+          runtime.logger.debug(`UnityEvent CodeLens discarded stale C# ${kind} for ${scriptPath}: requested=${requestVersion}, current=${currentVersion}.`);
+          controller.notifyCodeLensesChanged();
+          return;
+        }
+
+        const newerVersion = kind === 'methods'
+          ? lastMethodSymbolsByScriptPath.get(scriptPath)?.documentVersion
+          : lastFieldSymbolsByScriptPath.get(scriptPath)?.documentVersion;
+        if (newerVersion !== undefined && newerVersion > requestVersion) {
+          return;
+        }
+
+        rememberCSharpSymbols(scriptPath, kind, requestVersion, symbols);
         markCSharpCodeLensReady(scriptPath, kind);
         controller.notifyCodeLensesChanged();
       } catch (error) {
+        if ((document.version ?? 0) !== requestVersion) {
+          controller.notifyCodeLensesChanged();
+          return;
+        }
         const canPlacePlaceholder = kind === 'methods'
-          ? (lastMethodSymbolsByScriptPath.get(scriptPath)?.length ?? 0) > 0
-          : (lastFieldSymbolsByScriptPath.get(scriptPath)?.length ?? 0) > 0;
-        recordCSharpCodeLensUnavailable(scriptPath, kind, error, canPlacePlaceholder);
+          ? (getCurrentCSharpSymbols(scriptPath, 'methods', requestVersion)?.length ?? 0) > 0
+          : (getCurrentCSharpSymbols(scriptPath, 'fields', requestVersion)?.length ?? 0) > 0;
+        recordCSharpCodeLensUnavailable(scriptPath, kind, requestVersion, error, canPlacePlaceholder);
       } finally {
         csharpRefreshInFlight.delete(key);
       }
@@ -167,7 +242,7 @@ export function createEventReferenceProvider(
 
   return {
     onDidChangeCodeLenses: controller.onDidChangeCodeLenses,
-    async provideCodeLenses(document, token) {
+    async provideCodeLenses(document, _token) {
       if (!isEnabled() || !isCSharpFile(document.uri)) {
         return [];
       }
@@ -201,12 +276,12 @@ export function createEventReferenceProvider(
         return await createCodeLensesFromIndex(runtime, document, index, {
           embedReferences: false,
           includeZeroSummaryLenses: true,
-          cachedMethods: lastMethodSymbolsByScriptPath.get(scriptPath),
-          cachedFields: lastFieldSymbolsByScriptPath.get(scriptPath),
-          methodsUnavailable: hasCSharpUnavailableState(scriptPath, 'methods'),
-          fieldsUnavailable: hasCSharpUnavailableState(scriptPath, 'fields'),
-          fallbackMethods: lastMethodSymbolsByScriptPath.get(scriptPath),
-          fallbackFields: lastFieldSymbolsByScriptPath.get(scriptPath)
+          cachedMethods: getCurrentCSharpSymbols(scriptPath, 'methods', document.version ?? 0),
+          cachedFields: getCurrentCSharpSymbols(scriptPath, 'fields', document.version ?? 0),
+          methodsUnavailable: hasCSharpUnavailableState(scriptPath, 'methods', document.version ?? 0),
+          fieldsUnavailable: hasCSharpUnavailableState(scriptPath, 'fields', document.version ?? 0),
+          fallbackMethods: getCurrentCSharpSymbols(scriptPath, 'methods', document.version ?? 0),
+          fallbackFields: getCurrentCSharpSymbols(scriptPath, 'fields', document.version ?? 0)
         });
       } catch (error) {
         runtime.logger.warn(`UnityEvent CodeLens failed for ${scriptPath}: ${errorMessage(error)}`);

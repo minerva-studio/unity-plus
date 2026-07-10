@@ -30,6 +30,7 @@ export async function run(): Promise<void> {
   mocha.addFile(resolve(testsRoot, 'activation.test.js'));
   mocha.addFile(resolve(testsRoot, 'metaFiles.test.js'));
   mocha.addFile(resolve(testsRoot, 'projectSync.test.js'));
+  mocha.addFile(resolve(testsRoot, 'unityTestExecution.test.js'));
 
   return new Promise<void>((resolvePromise, reject) => {
     mocha.run(failures => {
