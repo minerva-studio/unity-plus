@@ -39,6 +39,9 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.rename.classFileSyncMode'].default, 'on');
     assert.deepStrictEqual(properties['unityPlus.rename.classFileSyncMode'].enum, ['on', 'off']);
     assert.strictEqual(properties['unityPlus.projectFiles.autoRefresh'].default, true);
+    assert.strictEqual(properties['unityPlus.projectFiles.autoRefreshDebounceMilliseconds'].default, 1000);
+    assert.strictEqual(properties['unityPlus.projectFiles.autoRefreshDebounceMilliseconds'].minimum, 0);
+    assert.strictEqual(properties['unityPlus.projectFiles.autoRefreshDebounceMilliseconds'].maximum, 10000);
     assert.strictEqual(properties['unityPlus.templates.csharpScriptFile'].default, '');
     assert.strictEqual(properties['unityPlus.templates.scriptableObjectFile'].default, '');
     assert.strictEqual(properties['unityPlus.templates.csharpScript'].default, '');

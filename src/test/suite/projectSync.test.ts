@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { createProjectSyncCoordinator } from '../../features/project-sync/projectSync';
+import type { UnityPlusLogger } from '../../unity/logger';
 
 /**
  * Integration tests for project sync operations.
@@ -128,6 +130,64 @@ suite('projectSync — Real Filesystem Operations', () => {
     assert.ok(readBack.includes('MonoBehaviour'));
   });
 
+  test('batches script creation into one complete project update', async () => {
+    const root = mkdtempSync(join(tempDir, 'batch-create-'));
+    const assets = join(root, 'Assets', 'Scripts');
+    mkdirSync(assets, { recursive: true });
+    const projectPath = join(root, 'Assembly-CSharp.csproj');
+    writeFileSync(projectPath, createProjectFile([]), 'utf8');
+    const firstScript = join(assets, 'First.cs');
+    const secondScript = join(assets, 'Second.cs');
+    writeFileSync(firstScript, 'public class First {}', 'utf8');
+    writeFileSync(secondScript, 'public class Second {}', 'utf8');
+    const logs: string[] = [];
+    const coordinator = createProjectSyncCoordinator({
+      root: vscode.Uri.file(root),
+      runtimeVscode: vscode,
+      logger: createMemoryLogger(logs)
+    }, () => 0);
+
+    coordinator.enqueue({ kind: 'create', uri: vscode.Uri.file(firstScript) });
+    coordinator.enqueue({ kind: 'create', uri: vscode.Uri.file(secondScript) });
+    await coordinator.flush();
+    coordinator.dispose();
+
+    const project = readFileSync(projectPath, 'utf8');
+    assert.ok(project.includes('Assets/Assets') === false);
+    assert.ok(project.includes('Assets\\Scripts\\First.cs') || project.includes('Assets/Scripts/First.cs'));
+    assert.ok(project.includes('Assets\\Scripts\\Second.cs') || project.includes('Assets/Scripts/Second.cs'));
+    assert.strictEqual(logs.filter(line => line.includes('Updated Assembly-CSharp.csproj')).length, 1);
+  });
+
+  test('collapses rename chains before updating the project', async () => {
+    const root = mkdtempSync(join(tempDir, 'rename-chain-'));
+    const assets = join(root, 'Assets', 'Scripts');
+    mkdirSync(assets, { recursive: true });
+    const projectPath = join(root, 'Assembly-CSharp.csproj');
+    writeFileSync(projectPath, createProjectFile(['Assets/ScriptA.cs']), 'utf8');
+    const first = vscode.Uri.file(join(root, 'Assets', 'ScriptA.cs'));
+    const middle = vscode.Uri.file(join(root, 'Assets', 'ScriptB.cs'));
+    const final = vscode.Uri.file(join(root, 'Assets', 'ScriptC.cs'));
+    writeFileSync(final.fsPath, 'public class ScriptC {}', 'utf8');
+    const coordinator = createProjectSyncCoordinator({
+      root: vscode.Uri.file(root),
+      runtimeVscode: vscode,
+      logger: createMemoryLogger([])
+    }, () => 0);
+
+    coordinator.enqueue({ kind: 'rename', oldUri: first, newUri: middle });
+    coordinator.enqueue({ kind: 'rename', oldUri: middle, newUri: final });
+    await coordinator.flush();
+    coordinator.dispose();
+
+    const project = readFileSync(projectPath, 'utf8');
+    assert.ok(!project.includes('ScriptA.cs'));
+    assert.ok(!project.includes('ScriptB.cs'));
+    assert.ok(project.includes('ScriptC.cs'));
+    assert.strictEqual(existsSync(`${middle.fsPath}.meta`), false);
+    assert.strictEqual(existsSync(`${final.fsPath}.meta`), true);
+  });
+
   function skipIfNoCSharp(command: string): boolean {
     const hasCSharp = vscode.extensions.getExtension('ms-dotnettools.csharp') !== undefined;
     if (!hasCSharp) {
@@ -158,3 +218,27 @@ suite('projectSync — Real Filesystem Operations', () => {
       'rescanUnityProject command should be registered');
   });
 });
+
+/** Creates a minimal Unity-style project file for real filesystem sync tests. */
+function createProjectFile(includes: readonly string[]): string {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    '<Project>',
+    '  <ItemGroup>',
+    ...includes.map(include => `    <Compile Include="${include}" />`),
+    '  </ItemGroup>',
+    '</Project>',
+    ''
+  ].join('\n');
+}
+
+/** Records project-sync logs without creating another VS Code output channel. */
+function createMemoryLogger(lines: string[]): UnityPlusLogger {
+  return {
+    debug: message => lines.push(message),
+    info: message => lines.push(message),
+    warn: message => lines.push(message),
+    error: message => lines.push(message),
+    dispose: () => undefined
+  };
+}

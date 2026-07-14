@@ -29,6 +29,17 @@ interface CSharpProjectTarget {
   csprojUri: vscode.Uri;
 }
 
+export type ProjectSyncChange =
+  | { kind: 'create'; uri: vscode.Uri }
+  | { kind: 'delete'; uri: vscode.Uri }
+  | { kind: 'rename'; oldUri: vscode.Uri; newUri: vscode.Uri };
+
+export interface ProjectSyncCoordinator extends vscode.Disposable {
+  enqueue(change: ProjectSyncChange): void;
+  flush(): Promise<void>;
+  runExclusive<T>(action: () => Promise<T>): Promise<T>;
+}
+
 interface TemplateConfig {
   fileSetting: string;
   textSetting: string;
@@ -49,6 +60,7 @@ export interface ProjectSyncFeatureOptions {
 const compileIncludePattern = /<Compile\s+Include=(["'])([^"']+)\1\s*\/>/g;
 const csharpExtension = '.cs';
 const metaExtension = '.meta';
+const projectWriteRetryDelaysMilliseconds = [50, 100, 200, 400, 800] as const;
 
 export function registerProjectSyncFeature(
   logger: UnityPlusLogger,
@@ -60,14 +72,19 @@ export function registerProjectSyncFeature(
   );
   const root = options.root;
   const disposables: vscode.Disposable[] = [];
+  const runtime = root ? { root, runtimeVscode, logger } : undefined;
+  const coordinator = runtime ? createProjectSyncCoordinator(runtime, () => getProjectSyncDebounceMilliseconds(runtimeVscode)) : undefined;
+  if (coordinator) {
+    disposables.push(coordinator);
+  }
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.refreshProjectFiles', async () => {
-    if (!root) {
+    if (!runtime || !coordinator) {
       runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project before refreshing project files.'));
       return;
     }
 
-    const result = await syncExistingProjectFileReferences({ root, runtimeVscode, logger });
+    const result = await coordinator.runExclusive(async () => await syncExistingProjectFileReferences(runtime));
     const message = runtimeVscode.l10n.t('Unity Plus: scanned {scanned} C# project file(s), updated {changed}.', {
       scanned: result.scanned,
       changed: result.changed
@@ -77,23 +94,22 @@ export function registerProjectSyncFeature(
   }));
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.createCSharpScript', async (targetUri?: vscode.Uri) => {
-    if (root) {
-      await createUnityScript({ root, runtimeVscode, logger }, { kind: 'csharpScript', targetUri });
+    if (runtime && coordinator) {
+      await createUnityScript(runtime, coordinator, { kind: 'csharpScript', targetUri });
     } else {
       runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project before creating a C# script.'));
     }
   }));
 
   disposables.push(runtimeVscode.commands.registerCommand('unityPlus.createScriptableObject', async (targetUri?: vscode.Uri) => {
-    if (root) {
-      await createUnityScript({ root, runtimeVscode, logger }, { kind: 'scriptableObject', targetUri });
+    if (runtime && coordinator) {
+      await createUnityScript(runtime, coordinator, { kind: 'scriptableObject', targetUri });
     } else {
       runtimeVscode.window.showWarningMessage(runtimeVscode.l10n.t('Unity Plus: Open a Unity project before creating a ScriptableObject.'));
     }
   }));
 
-  if (shouldRegisterProjectSyncWatcher(root, isAutoRefreshEnabled())) {
-    const runtime = { root, runtimeVscode, logger };
+  if (runtime && coordinator && shouldRegisterProjectSyncWatcher(root, isAutoRefreshEnabled())) {
     const assetsWatcher = runtimeVscode.workspace.createFileSystemWatcher(
       new runtimeVscode.RelativePattern(root, assetsCsharpGlob)
     );
@@ -104,12 +120,12 @@ export function registerProjectSyncFeature(
 
     const onCreate = (uri: vscode.Uri) => {
       if (isAutoRefreshEnabled()) {
-        void handleCreatedCSharpFile(runtime, uri);
+        coordinator.enqueue({ kind: 'create', uri });
       }
     };
     const onDelete = (uri: vscode.Uri) => {
       if (isAutoRefreshEnabled()) {
-        void removeScriptFromProjects(runtime, uri);
+        coordinator.enqueue({ kind: 'delete', uri });
       }
     };
 
@@ -122,7 +138,9 @@ export function registerProjectSyncFeature(
         return;
       }
 
-      void handleRenamedCSharpFiles(runtime, event.files);
+      for (const file of event.files) {
+        coordinator.enqueue({ kind: 'rename', oldUri: file.oldUri, newUri: file.newUri });
+      }
     }));
   }
 
@@ -134,6 +152,223 @@ export function shouldRegisterProjectSyncWatcher(
   autoRefreshEnabled: boolean
 ): root is vscode.Uri {
   return root !== undefined && autoRefreshEnabled;
+}
+
+/** Reads the trailing batch delay used for automatic project-file updates. */
+function getProjectSyncDebounceMilliseconds(runtimeVscode: typeof vscode): number {
+  return runtimeVscode.workspace.getConfiguration('unityPlus').get(
+    'projectFiles.autoRefreshDebounceMilliseconds',
+    1000
+  );
+}
+
+/** Owns one serialized project-sync queue for the detected Unity workspace. */
+export function createProjectSyncCoordinator(
+  runtime: ProjectSyncRuntime,
+  getDebounceMilliseconds: () => number
+): ProjectSyncCoordinator {
+  let pendingChanges: ProjectSyncChange[] = [];
+  let scheduledFlush: ReturnType<typeof setTimeout> | undefined;
+  let operationChain: Promise<void> = Promise.resolve();
+  let disposed = false;
+
+  function enqueue(change: ProjectSyncChange): void {
+    if (disposed) {
+      return;
+    }
+
+    pendingChanges.push(change);
+    if (scheduledFlush) {
+      clearTimeout(scheduledFlush);
+    }
+
+    scheduledFlush = setTimeout(() => {
+      scheduledFlush = undefined;
+      void queuePendingChanges();
+    }, Math.max(0, getDebounceMilliseconds()));
+  }
+
+  function queuePendingChanges(): Promise<void> {
+    if (pendingChanges.length === 0 || disposed) {
+      return operationChain;
+    }
+
+    const changes = pendingChanges;
+    pendingChanges = [];
+    operationChain = operationChain
+      .then(async () => {
+        await applyProjectSyncChanges(runtime, changes);
+      })
+      .catch(error => {
+        runtime.logger.warn(`Unity Plus project sync batch failed: ${errorMessage(error)}`);
+      });
+    return operationChain;
+  }
+
+  async function flush(): Promise<void> {
+    if (scheduledFlush) {
+      clearTimeout(scheduledFlush);
+      scheduledFlush = undefined;
+    }
+
+    // Changes can arrive while the current batch is running, so drain until
+    // both the active operation and the pending event buffer are empty.
+    do {
+      await queuePendingChanges();
+      await operationChain;
+    } while (!disposed && pendingChanges.length > 0);
+  }
+
+  return {
+    enqueue,
+    flush,
+    async runExclusive<T>(action: () => Promise<T>): Promise<T> {
+      await flush();
+      const actionPromise = operationChain.then(action);
+      operationChain = actionPromise.then(() => undefined, () => undefined);
+      return await actionPromise;
+    },
+    dispose(): void {
+      disposed = true;
+      pendingChanges = [];
+      if (scheduledFlush) {
+        clearTimeout(scheduledFlush);
+        scheduledFlush = undefined;
+      }
+    }
+  };
+}
+
+/** Applies one ordered watcher batch while writing each affected project once. */
+export async function applyProjectSyncChanges(
+  runtime: ProjectSyncRuntime,
+  changes: readonly ProjectSyncChange[]
+): Promise<ProjectSyncResult> {
+  const uniqueChanges = dedupeProjectSyncChanges(changes);
+  const needsRootProjects = uniqueChanges.some(change => change.kind !== 'create');
+  const rootProjects = needsRootProjects ? await findRootCsprojFiles(runtime) : [];
+  const operationsByProject = new Map<string, {
+    uri: vscode.Uri;
+    updates: Array<(content: string) => string>;
+  }>();
+
+  function addProjectUpdate(uri: vscode.Uri, update: (content: string) => string): void {
+    const key = normalizeFileKey(uri);
+    const entry = operationsByProject.get(key) ?? { uri, updates: [] };
+    entry.updates.push(update);
+    operationsByProject.set(key, entry);
+  }
+
+  for (const change of uniqueChanges) {
+    if (change.kind === 'create') {
+      if (!isCSharpUri(change.uri)) {
+        continue;
+      }
+
+      await ensureUnityMetaFile(runtime, change.uri);
+      const projectPath = toProjectPath(runtime.root, change.uri);
+      const target = projectPath ? await findCSharpProjectTarget(runtime, change.uri) : undefined;
+      if (projectPath && target) {
+        addProjectUpdate(target.csprojUri, content => addInclude(content, projectPath));
+      }
+      continue;
+    }
+
+    if (change.kind === 'delete') {
+      const projectPath = toProjectPath(runtime.root, change.uri);
+      if (projectPath) {
+        for (const projectUri of rootProjects) {
+          addProjectUpdate(projectUri, content => removeInclude(content, projectPath));
+        }
+      }
+      continue;
+    }
+
+    const oldProjectPath = toProjectPath(runtime.root, change.oldUri);
+    const newProjectPath = toProjectPath(runtime.root, change.newUri);
+    const oldIsCSharp = isCSharpUri(change.oldUri);
+    const newIsCSharp = isCSharpUri(change.newUri);
+    if (newIsCSharp) {
+      await ensureUnityMetaFile(runtime, change.newUri);
+    }
+
+    if (oldProjectPath && oldIsCSharp) {
+      for (const projectUri of rootProjects) {
+        addProjectUpdate(projectUri, content => removeInclude(content, oldProjectPath));
+      }
+    }
+
+    if (newProjectPath && newIsCSharp) {
+      const target = await findCSharpProjectTarget(runtime, change.newUri);
+      if (target) {
+        addProjectUpdate(target.csprojUri, content => addInclude(content, newProjectPath));
+      }
+    }
+  }
+
+  let changed = 0;
+  for (const entry of operationsByProject.values()) {
+    const updated = await updateCompileIncludes(runtime, entry.uri, content =>
+      entry.updates.reduce((current, update) => update(current), content)
+    );
+    if (updated) {
+      changed += 1;
+      runtime.logger.info(`Updated ${basename(entry.uri.fsPath)} from ${entry.updates.length} batched C# file change(s).`);
+    }
+  }
+
+  return { changed, scanned: operationsByProject.size };
+}
+
+/** Collapses duplicate and chained watcher notifications into their final intent. */
+function dedupeProjectSyncChanges(changes: readonly ProjectSyncChange[]): ProjectSyncChange[] {
+  const results: ProjectSyncChange[] = [];
+  for (const change of changes) {
+    const previous = results.at(-1);
+    if (previous && projectSyncChangeKey(previous) === projectSyncChangeKey(change)) {
+      continue;
+    }
+
+    if (previous?.kind === 'create' && change.kind === 'delete' && sameFile(previous.uri, change.uri)) {
+      results.pop();
+      continue;
+    }
+
+    if (previous?.kind === 'create' && change.kind === 'rename' && sameFile(previous.uri, change.oldUri)) {
+      results[results.length - 1] = { kind: 'create', uri: change.newUri };
+      continue;
+    }
+
+    if (previous?.kind === 'rename' && change.kind === 'rename' && sameFile(previous.newUri, change.oldUri)) {
+      results[results.length - 1] = { kind: 'rename', oldUri: previous.oldUri, newUri: change.newUri };
+      continue;
+    }
+
+    if (previous?.kind === 'rename' && change.kind === 'delete' && sameFile(previous.newUri, change.uri)) {
+      results[results.length - 1] = { kind: 'delete', uri: previous.oldUri };
+      continue;
+    }
+
+    results.push(change);
+  }
+  return results;
+}
+
+/** Builds a stable identity for duplicate watcher notification removal. */
+function projectSyncChangeKey(change: ProjectSyncChange): string {
+  return change.kind === 'rename'
+    ? `rename:${normalizeFileKey(change.oldUri)}:${normalizeFileKey(change.newUri)}`
+    : `${change.kind}:${normalizeFileKey(change.uri)}`;
+}
+
+/** Compares local file URIs using Windows-safe case-insensitive paths. */
+function sameFile(left: vscode.Uri, right: vscode.Uri): boolean {
+  return normalizeFileKey(left) === normalizeFileKey(right);
+}
+
+/** Creates a case-insensitive local file key for project batching. */
+function normalizeFileKey(uri: vscode.Uri): string {
+  return uri.fsPath.replace(/\\/g, '/').toLowerCase();
 }
 
 export async function handleCreatedCSharpFile(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<void> {
@@ -299,7 +534,11 @@ function hasPathSegment(path: string, segment: string): boolean {
   return path.replace(/\\/g, '/').split('/').some(part => part.toLowerCase() === normalizedSegment);
 }
 
-async function createUnityScript(runtime: ProjectSyncRuntime, request: CreateScriptRequest): Promise<void> {
+async function createUnityScript(
+  runtime: ProjectSyncRuntime,
+  coordinator: ProjectSyncCoordinator,
+  request: CreateScriptRequest
+): Promise<void> {
   const folderUri = await resolveCreateTargetFolder(runtime, request.targetUri);
   if (!folderUri) {
     return;
@@ -332,7 +571,7 @@ async function createUnityScript(runtime: ProjectSyncRuntime, request: CreateScr
 
   await writeTextFile(runtime, scriptUri, source);
   await ensureUnityMetaFile(runtime, scriptUri);
-  await addScriptToAsmdefProject(runtime, scriptUri);
+  coordinator.enqueue({ kind: 'create', uri: scriptUri });
   await runtime.runtimeVscode.window.showTextDocument(scriptUri);
 }
 
@@ -574,23 +813,86 @@ async function updateCompileIncludes(
   projectUri: vscode.Uri,
   update: (content: string) => string | Promise<string>
 ): Promise<boolean> {
-  const content = await readOptionalTextFile(runtime, projectUri);
-  if (content === undefined) {
-    runtime.logger.warn(`Unity Plus could not read ${basename(projectUri.fsPath)} for project sync.`);
-    return false;
-  }
+  for (let attempt = 0; attempt <= projectWriteRetryDelaysMilliseconds.length; attempt += 1) {
+    const content = await readOptionalTextFile(runtime, projectUri);
+    if (content === undefined) {
+      if (attempt < projectWriteRetryDelaysMilliseconds.length) {
+        await waitForProjectWriteRetry(attempt);
+        continue;
+      }
 
-  try {
-    const updated = await update(content);
-    if (updated === content) {
+      runtime.logger.warn(`Unity Plus could not read ${basename(projectUri.fsPath)} for project sync.`);
       return false;
     }
 
-    await writeTextFile(runtime, projectUri, updated);
+    let tempUri: vscode.Uri | undefined;
+    try {
+      const updated = await update(content);
+      if (updated === content) {
+        return false;
+      }
+
+      tempUri = createProjectTempUri(runtime, projectUri);
+      await writeTextFile(runtime, tempUri, updated);
+      const latestContent = await readOptionalTextFile(runtime, projectUri);
+      if (latestContent !== content) {
+        // Unity regenerated the project after our read. Reapply the complete
+        // transformation to its newer file instead of overwriting its state.
+        await deleteFileSafe(runtime, tempUri);
+        tempUri = undefined;
+        continue;
+      }
+
+      await runtime.runtimeVscode.workspace.fs.rename(tempUri, projectUri, { overwrite: true });
+      tempUri = undefined;
+      return true;
+    } catch (error) {
+      if (tempUri) {
+        await deleteFileSafe(runtime, tempUri);
+      }
+
+      if (isRetryableProjectFileError(error) && attempt < projectWriteRetryDelaysMilliseconds.length) {
+        await waitForProjectWriteRetry(attempt);
+        continue;
+      }
+
+      runtime.logger.warn(`Unity Plus could not update ${basename(projectUri.fsPath)}: ${errorMessage(error)}`);
+      return false;
+    }
+  }
+
+  return false;
+}
+
+/** Creates a same-directory temporary file for atomic project replacement. */
+function createProjectTempUri(runtime: ProjectSyncRuntime, projectUri: vscode.Uri): vscode.Uri {
+  const suffix = randomBytes(8).toString('hex');
+  return runtime.runtimeVscode.Uri.file(`${projectUri.fsPath}.unity-plus-${suffix}.tmp`);
+}
+
+/** Waits between bounded retries so transient Windows sharing locks can clear. */
+async function waitForProjectWriteRetry(attempt: number): Promise<void> {
+  const delay = projectWriteRetryDelaysMilliseconds[Math.min(attempt, projectWriteRetryDelaysMilliseconds.length - 1)];
+  await new Promise(resolve => setTimeout(resolve, delay));
+}
+
+/** Identifies transient Windows file sharing errors without hiding other failures. */
+function isRetryableProjectFileError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | undefined)?.code;
+  if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
     return true;
-  } catch (error) {
-    runtime.logger.warn(`Unity Plus could not update ${basename(projectUri.fsPath)}: ${errorMessage(error)}`);
-    return false;
+  }
+
+  const message = errorMessage(error).toLowerCase();
+  return message.includes('used by another process') || message.includes('being used by another process');
+}
+
+/** Removes an abandoned temporary file without masking the original failure. */
+async function deleteFileSafe(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<void> {
+  try {
+    await runtime.runtimeVscode.workspace.fs.delete(uri, { useTrash: false });
+  } catch {
+    // A missing or externally removed temp file requires no further cleanup.
   }
 }
 

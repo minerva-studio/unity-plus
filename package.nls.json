@@ -19,6 +19,7 @@
   "configuration.rename.classFileSyncMode.description": "Controls automatic C# top-level type/file name synchronization. Use on for safe single-type C# files or off to disable sync.",
   "configuration.rename.previewMode.description": "Controls the Unity Plus rename preview. Use silent to apply all safe rename changes, ask to choose script/meta file changes, or ask+warn to confirm a detailed affected-file warning after choosing.",
   "configuration.projectFiles.autoRefresh.description": "Refresh Unity project files when C# files are created, moved, or deleted.",
+  "configuration.projectFiles.autoRefreshDebounceMilliseconds.description": "Delay used to batch C# file changes before updating Unity project files.",
   "configuration.templates.csharpScriptFile.description": "Workspace-relative or absolute template file path for Unity Plus C# script creation. Takes priority over unityPlus.templates.csharpScript.",
   "configuration.templates.scriptableObjectFile.description": "Workspace-relative or absolute template file path for Unity Plus ScriptableObject creation. Takes priority over unityPlus.templates.scriptableObject.",
   "configuration.templates.csharpScript.description": "Template text for Unity Plus C# script creation. Supports ${className} and ${namespaceBlock}.",
