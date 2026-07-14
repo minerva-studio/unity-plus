@@ -85,6 +85,7 @@ export interface UnityEventReferenceIndexController {
   scheduleBuild(): void;
   forceBuild(context?: UnityEventReferenceBuildContext): Promise<UnitySerializedAssetReferenceIndex | undefined>;
   notifyCodeLensesChanged(): void;
+  dispose(): void;
 }
 
 export interface PriorityScanResult {

@@ -1,3 +1,4 @@
+import type * as vscode from 'vscode';
 import type { UnityEventReferenceBuildContext, UnitySerializedAssetReferenceIndex } from './model';
 import { backgroundBuildDebounceMilliseconds, type EventReferenceRuntime, type UnityEventReferenceIndexController, type UnityEventReferenceIndexStatus } from './runtime';
 import { buildUnityEventReferenceIndex } from './scanner';
@@ -10,7 +11,10 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
   let cachedVersion: number | undefined;
   let index: UnitySerializedAssetReferenceIndex | undefined;
   let buildPromise: Promise<UnitySerializedAssetReferenceIndex | undefined> | undefined;
-  let scheduledBuild = false;
+  let activeBuildCancellation: vscode.CancellationTokenSource | undefined;
+  let scheduledBuild: ReturnType<typeof setTimeout> | undefined;
+  let rebuildRequested = false;
+  let disposed = false;
 
   function refreshVersion(): void {
     const version = runtime.getCacheVersion();
@@ -18,22 +22,26 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
       return;
     }
 
+    cachedVersion = version;
+    index = undefined;
+
     if (status === 'building' && buildPromise) {
-      // Keep the in-flight build as the single owner of cancellation. Clearing
-      // buildPromise here would allow file watcher churn to start parallel full
-      // project scans before the current build can observe the version change.
-      cachedVersion = version;
+      // The controller owns scan cancellation so invalidation cannot leave a
+      // stale full-project scan consuming I/O until natural completion.
+      rebuildRequested = true;
+      activeBuildCancellation?.cancel();
       return;
     }
 
-    cachedVersion = version;
     status = 'idle';
-    index = undefined;
     buildPromise = undefined;
-    scheduledBuild = false;
   }
 
   async function forceBuild(context: UnityEventReferenceBuildContext = { mode: 'background' }): Promise<UnitySerializedAssetReferenceIndex | undefined> {
+    if (disposed) {
+      return undefined;
+    }
+
     refreshVersion();
 
     if (status === 'building' && buildPromise) {
@@ -43,8 +51,24 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     const buildVersion = cachedVersion;
     const previousIndex = index;
     const scanStatus = context.mode === 'background' ? runtime.scanStatus : undefined;
-    const buildContext = scanStatus ? { ...context, scanStatus } : context;
+    const buildCancellation = new runtime.runtimeVscode.CancellationTokenSource();
+    const externalCancellation = context.cancellationToken?.onCancellationRequested(() => buildCancellation.cancel());
+    if (context.cancellationToken?.isCancellationRequested) {
+      buildCancellation.cancel();
+    }
+
+    const buildContext = {
+      ...context,
+      cancellationToken: buildCancellation.token,
+      ...(scanStatus ? { scanStatus } : {})
+    };
     status = 'building';
+    activeBuildCancellation = buildCancellation;
+    rebuildRequested = false;
+    if (scheduledBuild) {
+      clearTimeout(scheduledBuild);
+      scheduledBuild = undefined;
+    }
     scanStatus?.start('Preparing UnityEvent reference scan', 'Unity refs: project');
     runtime.logger.info(`UnityEvent ${context.mode} reference scan started.`);
     buildPromise = buildUnityEventReferenceIndex(runtime, undefined, buildContext)
@@ -71,7 +95,7 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
       })
       .catch(error => {
         if (isCancellationError(error)) {
-          status = previousIndex ? 'ready' : 'idle';
+          status = previousIndex && buildVersion === runtime.getCacheVersion() ? 'ready' : 'idle';
           scanStatus?.finish('canceled', undefined, { label: 'Unity refs: project', phase: 'Canceled' });
           runtime.logger.info('UnityEvent reference index build canceled.');
           codeLensEvents.fire();
@@ -85,22 +109,46 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
         return undefined;
       })
       .finally(() => {
+        externalCancellation?.dispose();
+        buildCancellation.dispose();
+        if (activeBuildCancellation === buildCancellation) {
+          activeBuildCancellation = undefined;
+        }
         buildPromise = undefined;
+
+        // Coalesce any number of invalidations observed during this build into
+        // exactly one trailing rebuild for the newest cache version.
+        if (rebuildRequested && !disposed) {
+          rebuildRequested = false;
+          scheduleBuild();
+        }
       });
 
     return await buildPromise;
   }
 
   function scheduleBuild(): void {
-    refreshVersion();
-    if (scheduledBuild || status === 'building' || status === 'ready') {
+    if (disposed) {
       return;
     }
 
-    scheduledBuild = true;
+    refreshVersion();
+    if (status === 'building') {
+      rebuildRequested = true;
+      return;
+    }
+
+    if (status === 'ready') {
+      return;
+    }
+
+    if (scheduledBuild) {
+      clearTimeout(scheduledBuild);
+    }
+
     runtime.logger.debug('UnityEvent background reference scan scheduled.');
-    setTimeout(() => {
-      scheduledBuild = false;
+    scheduledBuild = setTimeout(() => {
+      scheduledBuild = undefined;
       refreshVersion();
 
       if (status === 'idle' || status === 'failed') {
@@ -121,6 +169,22 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     },
     scheduleBuild,
     forceBuild,
-    notifyCodeLensesChanged: () => codeLensEvents.fire()
+    notifyCodeLensesChanged: () => {
+      // Watcher invalidation must reach the active build immediately instead of
+      // waiting for VS Code to request CodeLens data again.
+      refreshVersion();
+      codeLensEvents.fire();
+    },
+    dispose: () => {
+      disposed = true;
+      rebuildRequested = false;
+      if (scheduledBuild) {
+        clearTimeout(scheduledBuild);
+        scheduledBuild = undefined;
+      }
+
+      activeBuildCancellation?.cancel();
+      codeLensEvents.dispose();
+    }
   };
 }

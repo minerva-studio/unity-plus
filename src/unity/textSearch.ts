@@ -90,6 +90,7 @@ export async function trySearchUnityTextMatches(
       ...createFixedTextRipgrepArgs(normalizedTexts, options.includeGlobs),
       '.'
     ]);
+    throwIfCancellationRequested(options.cancellationToken);
 
     if (!output) {
       continue;
@@ -117,6 +118,7 @@ async function trySearchFilesWithRipgrep(
       ...createFixedTextRipgrepArgs(texts, options.includeGlobs),
       '.'
     ]);
+    throwIfCancellationRequested(options.cancellationToken);
 
     if (!output) {
       continue;
@@ -204,12 +206,20 @@ async function runRipgrepCandidate(
 
   return await new Promise(resolvePromise => {
     let cleanupCancellation: () => void = () => undefined;
+    let cancellationRequested = false;
     const child = execFile(candidate.command, args, {
       cwd: options.root.fsPath,
       maxBuffer: maxRipgrepBufferBytes,
       windowsHide: true
     }, (error, stdout) => {
       cleanupCancellation();
+      if (cancellationRequested) {
+        // execFile invokes this callback after the child has closed, so callers
+        // cannot start another search while the canceled process is still alive.
+        resolvePromise(undefined);
+        return;
+      }
+
       const exitCode = (error as { code?: unknown } | null)?.code;
 
       if (!error || exitCode === 1) {
@@ -221,8 +231,8 @@ async function runRipgrepCandidate(
     });
 
     cleanupCancellation = registerCancellation(options.cancellationToken, () => {
+      cancellationRequested = true;
       child.kill();
-      resolvePromise(undefined);
     });
   });
 }

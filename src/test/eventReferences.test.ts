@@ -732,6 +732,58 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
   });
 
+  it('cancels an invalidated background build and coalesces watcher churn into one rebuild', async () => {
+    let assetScans = 0;
+    let releaseFirstBuild: (() => void) | undefined;
+    let markFirstBuildStarted: (() => void) | undefined;
+    let markSecondBuildStarted: (() => void) | undefined;
+    const firstBuildStarted = new Promise<void>(resolve => {
+      markFirstBuildStarted = resolve;
+    });
+    const secondBuildStarted = new Promise<void>(resolve => {
+      markSecondBuildStarted = resolve;
+    });
+    const runtime = createEventReferenceRuntime();
+    const lazyIndex = createLazyUnityMetadataIndex({
+      root: createUri('/Project'),
+      logger: createTestLogger(),
+      createIndex: () => createMetadataIndex()
+    });
+
+    registerEventReferenceFeature(createTestLogger(), {
+      runtimeVscode: runtime.runtime,
+      metadataIndex: lazyIndex,
+      isEnabled: () => true,
+      findAssetFiles: async () => {
+        assetScans += 1;
+        if (assetScans === 1) {
+          markFirstBuildStarted?.();
+          await new Promise<void>(resolve => {
+            releaseFirstBuild = resolve;
+          });
+        } else if (assetScans === 2) {
+          markSecondBuildStarted?.();
+        }
+
+        return [];
+      },
+      readTextFile: async () => ''
+    });
+
+    await assertPendingCodeLenses(
+      runtime,
+      createTextDocument('/Project/Assets/Gate.cs', 'public bool CanInteract() => true;')
+    );
+    await firstBuildStarted;
+
+    runtime.fireSerializedAssetChange(createUri('/Project/Assets/Gate.prefab'));
+    runtime.fireSerializedAssetChange(createUri('/Project/Assets/OtherGate.prefab'));
+    releaseFirstBuild?.();
+
+    await secondBuildStarted;
+    assert.strictEqual(assetScans, 2);
+  });
+
   it('invalidates ready CodeLens results when serialized assets change', async () => {
     const runtime = createEventReferenceRuntime();
     const prefabUri = createUri('/Project/Assets/Gate.prefab');
@@ -2264,6 +2316,7 @@ function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {})
     Range: FakeRange,
     CodeLens: FakeCodeLens,
     EventEmitter: FakeEventEmitter,
+    CancellationTokenSource: FakeCancellationTokenSource,
     Location: FakeLocation,
     StatusBarAlignment: {
       Left: 1
@@ -3287,6 +3340,20 @@ class FakeCancellationToken {
       listener();
     }
   }
+}
+
+/** Provides the VS Code cancellation source contract used by index ownership tests. */
+class FakeCancellationTokenSource {
+  private readonly fakeToken = new FakeCancellationToken();
+  readonly token = this.fakeToken as unknown as vscode.CancellationToken;
+
+  /** Cancels the owned token without introducing a second source of state. */
+  cancel(): void {
+    this.fakeToken.cancel();
+  }
+
+  /** Matches VS Code disposal; listeners are owned by the fake token lifetime. */
+  dispose(): void {}
 }
 
 class FakeEventEmitter<T> {

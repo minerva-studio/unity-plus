@@ -624,7 +624,8 @@ function createNotReadyEventIndexController(runtimeVscode: typeof vscode): Unity
     getReadyIndex: () => undefined,
     scheduleBuild: () => undefined,
     forceBuild: async () => undefined,
-    notifyCodeLensesChanged: () => emitter.fire()
+    notifyCodeLensesChanged: () => emitter.fire(),
+    dispose: () => emitter.dispose()
   };
 }
 
@@ -640,7 +641,8 @@ function createReadyEventIndexController(
     getReadyIndex: () => index,
     scheduleBuild: () => undefined,
     forceBuild: async () => index,
-    notifyCodeLensesChanged: () => emitter.fire()
+    notifyCodeLensesChanged: () => emitter.fire(),
+    dispose: () => emitter.dispose()
   };
 }
 

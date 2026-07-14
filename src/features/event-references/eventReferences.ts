@@ -92,6 +92,7 @@ export function registerEventReferenceFeature(
     const provider = createEventReferenceProvider(featureRuntime, indexController, isEnabled);
 
     disposables.push(
+      indexController,
       scanStatus,
       watchUnitySerializedAssetFiles(runtimeVscode, options.metadataIndex.root, uri => {
         serializedAssetCacheVersion += 1;
