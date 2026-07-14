@@ -38,6 +38,8 @@ export interface EventReferenceRuntime {
   readTextFile: (uri: vscode.Uri, runtimeVscode: typeof vscode) => Promise<string>;
   yamlAssets?: UnityYamlAssetHandler;
   getCacheVersion: () => number;
+  getRescanDebounceMilliseconds?: () => number;
+  waitForBackgroundScanReady?: () => Promise<void>;
   resolveCSharpType?: CSharpTypeResolver;
   buildCSharpTypeIndex?: CSharpTypeIndexBuilder;
   csharpLanguageService?: CSharpSymbolLanguageService;
@@ -127,7 +129,7 @@ export interface RunWithConcurrencyOptions {
 
 export const gameObjectClassId = 1;
 export const monoBehaviourClassId = 114;
-export const defaultAssetScanConcurrency = 4;
+export const defaultAssetScanConcurrency = 2;
 export const scanYieldEvery = 4;
 export const backgroundScanYieldEvery = 1;
 export const backgroundBuildDebounceMilliseconds = 150;

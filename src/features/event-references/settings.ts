@@ -8,6 +8,15 @@ export function isEventReferenceAutoScanEnabled(runtimeVscode: typeof vscode): b
     .get<boolean>('eventReferences.autoScan', true) !== false;
 }
 
+/** Reads the quiet period applied after serialized asset invalidation. */
+export function getEventReferenceRescanDebounceMilliseconds(runtimeVscode: typeof vscode): number {
+  const configured = runtimeVscode.workspace
+    .getConfiguration('unityPlus')
+    .get<number>('eventReferences.rescanDebounceMilliseconds', 5000);
+  const numericValue = Number.isFinite(configured) ? Math.floor(configured) : 5000;
+  return Math.min(60000, Math.max(250, numericValue));
+}
+
 /** Reads the bounded background scan concurrency setting. */
 export function getBackgroundScanConcurrency(runtimeVscode: typeof vscode): number {
   const configured = runtimeVscode.workspace

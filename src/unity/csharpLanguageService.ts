@@ -47,6 +47,13 @@ export interface CSharpTypeSymbolSnapshot {
   range: CSharpRange;
 }
 
+export interface CSharpDocumentMemberSnapshot {
+  methods: readonly CSharpMethodSymbolSnapshot[];
+  fields: readonly CSharpFieldSymbolSnapshot[];
+  methodsAvailable: boolean;
+  fieldsAvailable: boolean;
+}
+
 export type CSharpSymbolKind = 'type' | 'method' | 'field';
 
 export interface CSharpSymbolLocation {
@@ -65,6 +72,11 @@ export interface CSharpLanguageService {
 }
 
 export interface CSharpSymbolLanguageService extends CSharpLanguageService {
+  findDocumentMembers(
+    uri: vscode.Uri,
+    expectedMethodNames?: readonly string[],
+    expectedFieldNames?: readonly string[]
+  ): Promise<CSharpDocumentMemberSnapshot>;
   findMethods(uri: vscode.Uri, expectedNames?: readonly string[]): Promise<CSharpMethodSymbolSnapshot[]>;
   findTypes(uri: vscode.Uri): Promise<CSharpTypeSymbolSnapshot[]>;
   findUnityEventFields(uri: vscode.Uri, expectedNames?: readonly string[]): Promise<CSharpFieldSymbolSnapshot[]>;
@@ -94,6 +106,30 @@ export function createVscodeCSharpLanguageService(runtimeVscode: typeof vscode):
   return {
     async getPrimaryTopLevelType(uri) {
       return await getPrimaryTopLevelTypeFromSymbols(runtimeVscode, uri);
+    },
+    async findDocumentMembers(uri, expectedMethodNames = [], expectedFieldNames = []) {
+      const symbols = await getDocumentSymbols(runtimeVscode, uri);
+      const methods: CSharpMethodSymbolSnapshot[] = [];
+      const fields: CSharpFieldSymbolSnapshot[] = [];
+      collectCSharpMethodSymbols(runtimeVscode, symbols, [], methods);
+      collectUnityEventFieldSymbols(runtimeVscode, symbols, [], fields);
+      if (!containsOnlyNamespaceSymbols(runtimeVscode, symbols)) {
+        return { methods, fields, methodsAvailable: true, fieldsAvailable: true };
+      }
+
+      const workspaceSymbols = await getWorkspaceSymbolsForExactUri(
+        runtimeVscode,
+        uri,
+        [...expectedMethodNames, ...expectedFieldNames]
+      );
+      const workspaceMethods = createMethodSnapshotsFromWorkspaceSymbols(runtimeVscode, workspaceSymbols, expectedMethodNames);
+      const workspaceFields = await createFieldSnapshotsFromWorkspaceSymbols(runtimeVscode, workspaceSymbols, expectedFieldNames);
+      return {
+        methods: workspaceMethods,
+        fields: workspaceFields,
+        methodsAvailable: expectedMethodNames.length === 0 || workspaceMethods.length > 0,
+        fieldsAvailable: expectedFieldNames.length === 0 || workspaceFields.length > 0
+      };
     },
     async findMethods(uri, expectedNames = []) {
       const symbols = await getDocumentSymbols(runtimeVscode, uri);
@@ -355,6 +391,15 @@ async function findMethodsFromWorkspaceSymbols(
   expectedNames: readonly string[]
 ): Promise<CSharpMethodSymbolSnapshot[]> {
   const symbols = await getWorkspaceSymbolsForExactUri(runtimeVscode, uri, expectedNames);
+  return createMethodSnapshotsFromWorkspaceSymbols(runtimeVscode, symbols, expectedNames);
+}
+
+/** Converts provider workspace symbols into method snapshots without issuing another provider query. */
+function createMethodSnapshotsFromWorkspaceSymbols(
+  runtimeVscode: typeof vscode,
+  symbols: readonly vscode.SymbolInformation[],
+  expectedNames: readonly string[]
+): CSharpMethodSymbolSnapshot[] {
   const methods = symbols
     .filter(symbol => symbol.kind === runtimeVscode.SymbolKind.Method)
     .filter(symbol => expectedNames.length === 0 || expectedNames.some(name => normalizeCSharpSymbolName(symbol.name) === name))
@@ -520,6 +565,15 @@ async function findUnityEventFieldsFromWorkspaceSymbols(
   expectedNames: readonly string[]
 ): Promise<CSharpFieldSymbolSnapshot[]> {
   const symbols = await getWorkspaceSymbolsForExactUri(runtimeVscode, uri, expectedNames);
+  return await createFieldSnapshotsFromWorkspaceSymbols(runtimeVscode, symbols, expectedNames);
+}
+
+/** Converts provider workspace symbols into UnityEvent field snapshots without issuing another symbol query. */
+async function createFieldSnapshotsFromWorkspaceSymbols(
+  runtimeVscode: typeof vscode,
+  symbols: readonly vscode.SymbolInformation[],
+  expectedNames: readonly string[]
+): Promise<CSharpFieldSymbolSnapshot[]> {
   const fields: CSharpFieldSymbolSnapshot[] = [];
 
   for (const symbol of symbols) {

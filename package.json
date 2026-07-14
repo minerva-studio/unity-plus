@@ -230,9 +230,16 @@
           "default": true,
           "description": "%configuration.eventReferences.autoScan.description%"
         },
+        "unityPlus.eventReferences.rescanDebounceMilliseconds": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 250,
+          "maximum": 60000,
+          "description": "%configuration.eventReferences.rescanDebounceMilliseconds.description%"
+        },
         "unityPlus.eventReferences.backgroundScanConcurrency": {
           "type": "number",
-          "default": 4,
+          "default": 2,
           "minimum": 1,
           "maximum": 16,
           "description": "%configuration.eventReferences.backgroundScanConcurrency.description%"

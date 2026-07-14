@@ -202,6 +202,39 @@ describe('csharpLanguageService', () => {
     assert.strictEqual(fields[0]?.name, 'OnCheckEnable');
   });
 
+  it('builds one namespace fallback member snapshot from deduplicated exact queries', async () => {
+    const queries: string[] = [];
+    const service = createServiceWithSymbols([
+      fakeDocumentSymbol('Amlos.Control.Interact.', symbolKind.Namespace, fakeRange(1, 0, 24))
+    ], {
+      queries,
+      workspaceSymbols: {
+        Interact: [
+          fakeSymbolInformation('Interact(bool value)', symbolKind.Method, 'Amlos.Control.Interact.Interactable.', fakeRange(12, 20, 28))
+        ],
+        OnCheckEnable: [
+          fakeSymbolInformation('OnCheckEnable', symbolKind.Field, 'Amlos.Control.Interact.Interactable.', fakeRange(7, 26, 39))
+        ]
+      },
+      hoverTextByName: {
+        OnCheckEnable: 'UnityEngine.Events.UnityEvent OnCheckEnable'
+      }
+    });
+    const uri = { fsPath: '/Project/Assets/Scripts/Interactable.cs' } as vscode.Uri;
+
+    const snapshot = await service.findDocumentMembers(
+      uri,
+      ['Interact', 'OnCheckEnable'],
+      ['OnCheckEnable']
+    );
+
+    assert.deepStrictEqual(queries, ['Interact', 'OnCheckEnable']);
+    assert.deepStrictEqual(snapshot.methods.map(method => method.name), ['Interact']);
+    assert.deepStrictEqual(snapshot.fields.map(field => field.name), ['OnCheckEnable']);
+    assert.strictEqual(snapshot.methodsAvailable, true);
+    assert.strictEqual(snapshot.fieldsAvailable, true);
+  });
+
   it('finds target methods by provider workspace symbols and declaring type', async () => {
     const queries: string[] = [];
     const service = createServiceWithSymbols([], {

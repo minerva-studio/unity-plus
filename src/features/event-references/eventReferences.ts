@@ -9,6 +9,7 @@ import { parseUnityEventReferences } from './parser';
 import { createEventReferenceProvider } from './provider';
 import { buildUnityEventReferenceIndex } from './scanner';
 import { createUnityEventReferenceScanStatus } from './scanStatus';
+import { getEventReferenceRescanDebounceMilliseconds } from './settings';
 import { buildDefaultCSharpTypeIndex } from './typeIndex';
 import { readDefaultTextFile } from './utils';
 import { createSharedUnityYamlAssetHandler } from '../unity-yaml-assets/handler';
@@ -83,6 +84,8 @@ export function registerEventReferenceFeature(
       readTextFile: options.readTextFile ?? readDefaultTextFile,
       yamlAssets,
       getCacheVersion: () => (options.getCacheVersion?.() ?? 0) + serializedAssetCacheVersion,
+      getRescanDebounceMilliseconds: () => getEventReferenceRescanDebounceMilliseconds(runtimeVscode),
+      waitForBackgroundScanReady: createCSharpBackgroundScanReadiness(runtimeVscode, logger),
       resolveCSharpType: options.resolveCSharpType,
       buildCSharpTypeIndex: options.buildCSharpTypeIndex ?? buildDefaultCSharpTypeIndex,
       csharpLanguageService: options.csharpLanguageService ?? createVscodeCSharpLanguageService(runtimeVscode),
@@ -93,6 +96,7 @@ export function registerEventReferenceFeature(
 
     disposables.push(
       indexController,
+      provider,
       scanStatus,
       watchUnitySerializedAssetFiles(runtimeVscode, options.metadataIndex.root, uri => {
         serializedAssetCacheVersion += 1;
@@ -162,6 +166,63 @@ export function registerEventReferenceFeature(
   }));
 
   return runtimeVscode.Disposable.from(...disposables);
+}
+
+/** Creates one lazy readiness gate so automatic scans do not compete with C# startup. */
+function createCSharpBackgroundScanReadiness(
+  runtimeVscode: typeof vscode,
+  logger: UnityPlusLogger
+): () => Promise<void> {
+  let readiness: Promise<void> | undefined;
+  return async () => {
+    readiness ??= waitForCSharpBackgroundScanReadiness(runtimeVscode, logger);
+    await readiness;
+  };
+}
+
+/** Waits for the installed C# provider, with a bounded fallback for older exports. */
+async function waitForCSharpBackgroundScanReadiness(
+  runtimeVscode: typeof vscode,
+  logger: UnityPlusLogger
+): Promise<void> {
+  if (!runtimeVscode.extensions) {
+    // Lightweight unit runtimes do not host extensions; they are already ready
+    // for deterministic background scan scheduling.
+    return;
+  }
+
+  const extension = runtimeVscode.extensions?.getExtension('ms-dotnettools.csharp');
+  if (!extension) {
+    logger.warn('UnityEvent background scan could not find the C# extension; using delayed startup fallback.');
+    await wait(10000);
+    return;
+  }
+
+  try {
+    const exports = extension.isActive ? extension.exports : await extension.activate();
+    const initializationFinished = (exports as { initializationFinished?: () => Promise<void> } | undefined)?.initializationFinished;
+    if (typeof initializationFinished !== 'function') {
+      logger.info('UnityEvent background scan is using delayed startup because the C# initialization gate is unavailable.');
+      await wait(10000);
+      return;
+    }
+
+    const result = await Promise.race([
+      initializationFinished().then(() => 'ready' as const),
+      wait(60000).then(() => 'timeout' as const)
+    ]);
+    if (result === 'timeout') {
+      logger.warn('UnityEvent background scan waited 60 seconds for C# initialization and will continue at reduced concurrency.');
+    }
+  } catch (error) {
+    logger.warn(`UnityEvent background scan could not await C# initialization: ${error instanceof Error ? error.message : String(error)}`);
+    await wait(10000);
+  }
+}
+
+/** Waits without blocking the extension host event loop. */
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
 /** Creates the warning shown when the command runs outside a detected Unity workspace. */

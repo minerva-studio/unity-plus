@@ -276,7 +276,13 @@ describe('eventReferences', () => {
   });
 
   it('shows CodeLens and hover details for referenced C# methods', async () => {
-    const runtime = createEventReferenceRuntime();
+    let documentSymbolReads = 0;
+    const runtime = createEventReferenceRuntime({
+      executeDocumentSymbols: async (_uri, symbols) => {
+        documentSymbolReads += 1;
+        return symbols;
+      }
+    });
     const prefabUri = createUri('/Project/Assets/Gate.prefab');
     const csharpDocument = createTextDocument('/Project/Assets/Gate.cs', [
       'using UnityEngine.Events;',
@@ -358,6 +364,7 @@ describe('eventReferences', () => {
     assert.ok(fieldHover);
     const fieldHoverText = (fieldHover.contents[0] as vscode.MarkdownString).value;
     assert.strictEqual(fieldHoverText.includes('CanInteract'), true);
+    assert.strictEqual(documentSymbolReads, 1);
 
     await runtime.runCommand('unityPlus.showUnityEventReferenceLocations', lenses[0].command?.arguments?.[0]);
     assert.strictEqual(runtime.referenceCommands.length, 1);
@@ -426,11 +433,10 @@ describe('eventReferences', () => {
     await runtime.waitForCodeLensChange();
     await runtime.provideCodeLenses(originalDocument);
     await runtime.provideCodeLenses(editedDocument);
-    assert.strictEqual(pendingSymbolReads.length, 4);
+    assert.strictEqual(pendingSymbolReads.length, 2);
 
     const refreshCount = runtime.codeLensChangeCount;
-    pendingSymbolReads[2]();
-    pendingSymbolReads[3]();
+    pendingSymbolReads[1]();
     await runtime.waitForCodeLensChangeAfter(refreshCount);
     await Promise.resolve();
     const currentLenses = await runtime.provideCodeLenses(editedDocument);
@@ -438,7 +444,6 @@ describe('eventReferences', () => {
     assert.strictEqual(currentMethodLens?.range.start.line, 5);
 
     pendingSymbolReads[0]();
-    pendingSymbolReads[1]();
     await Promise.resolve();
     await Promise.resolve();
     const finalLenses = await runtime.provideCodeLenses(editedDocument);
@@ -473,20 +478,22 @@ describe('eventReferences', () => {
       resolveCSharpType: async typeName => createTypeResolver()(typeName),
       csharpLanguageService: {
         ...createFakeCSharpSymbolLanguageService({}),
-        async findMethods() {
+        async findDocumentMembers() {
           csharpMethodReads += 1;
-          throw new Error('C# symbols not ready');
-        },
-        async findUnityEventFields() {
           csharpFieldReads += 1;
-          return [{
-            name: 'OnCheckEnable',
-            typeName: 'Gate',
-            range: {
-              start: { line: 4, character: 20 },
-              end: { line: 4, character: 33 }
-            }
-          }];
+          return {
+            methods: [],
+            fields: [{
+              name: 'OnCheckEnable',
+              typeName: 'Gate',
+              range: {
+                start: { line: 4, character: 20 },
+                end: { line: 4, character: 33 }
+              }
+            }],
+            methodsAvailable: false,
+            fieldsAvailable: true
+          };
         }
       }
     });
@@ -530,18 +537,20 @@ describe('eventReferences', () => {
       resolveCSharpType: async typeName => createTypeResolver()(typeName),
       csharpLanguageService: {
         ...createFakeCSharpSymbolLanguageService({}),
-        async findMethods() {
-          return [{
-            name: 'CanInteract',
-            typeName: 'Gate',
-            range: {
-              start: { line: 3, character: 14 },
-              end: { line: 3, character: 25 }
-            }
-          }];
-        },
-        async findUnityEventFields() {
-          throw new Error('C# field symbols not ready');
+        async findDocumentMembers() {
+          return {
+            methods: [{
+              name: 'CanInteract',
+              typeName: 'Gate',
+              range: {
+                start: { line: 3, character: 14 },
+                end: { line: 3, character: 25 }
+              }
+            }],
+            fields: [],
+            methodsAvailable: true,
+            fieldsAvailable: false
+          };
         }
       }
     });
@@ -582,27 +591,29 @@ describe('eventReferences', () => {
       resolveCSharpType: async typeName => typeName === 'Amlos.Fixtures.IronDoor' ? ironDoorScriptPath : createTypeResolver()(typeName),
       csharpLanguageService: {
         ...createFakeCSharpSymbolLanguageService({}),
-        async findMethods() {
-          methodReads += 1;
-          return [];
-        },
-        async findUnityEventFields() {
+        async findDocumentMembers(_uri, expectedMethodNames) {
+          methodReads += expectedMethodNames?.length ? 1 : 0;
           fieldReads += 1;
-          return [{
-            name: 'OpenGate',
-            typeName: 'GateController',
-            range: {
-              start: { line: 3, character: 20 },
-              end: { line: 3, character: 28 }
-            }
-          }, {
-            name: 'CloseGate',
-            typeName: 'GateController',
-            range: {
-              start: { line: 4, character: 20 },
-              end: { line: 4, character: 29 }
-            }
-          }];
+          return {
+            methods: [],
+            fields: [{
+              name: 'OpenGate',
+              typeName: 'GateController',
+              range: {
+                start: { line: 3, character: 20 },
+                end: { line: 3, character: 28 }
+              }
+            }, {
+              name: 'CloseGate',
+              typeName: 'GateController',
+              range: {
+                start: { line: 4, character: 20 },
+                end: { line: 4, character: 29 }
+              }
+            }],
+            methodsAvailable: true,
+            fieldsAvailable: true
+          };
         }
       }
     });
@@ -649,27 +660,25 @@ describe('eventReferences', () => {
       resolveCSharpType: async typeName => createTypeResolver()(typeName),
       csharpLanguageService: {
         ...createFakeCSharpSymbolLanguageService({}),
-        async findMethods(uri) {
-          if (uri.fsPath.replace(/\\/g, '/').endsWith('/Assets/Gate.cs')) {
-            throw new Error('C# method symbols not ready');
-          }
-
-          return [];
-        },
-        async findUnityEventFields(uri) {
+        async findDocumentMembers(uri) {
           const normalizedPath = uri.fsPath.replace(/\\/g, '/');
           if (normalizedPath.endsWith('/Assets/OtherGate.cs')) {
             otherFieldReads += 1;
           }
 
-          return [{
-            name: 'OnCheckEnable',
-            typeName: normalizedPath.endsWith('/Assets/OtherGate.cs') ? 'OtherGate' : 'Gate',
-            range: {
-              start: { line: 3, character: 20 },
-              end: { line: 3, character: 33 }
-            }
-          }];
+          return {
+            methods: [],
+            fields: [{
+              name: 'OnCheckEnable',
+              typeName: normalizedPath.endsWith('/Assets/OtherGate.cs') ? 'OtherGate' : 'Gate',
+              range: {
+                start: { line: 3, character: 20 },
+                end: { line: 3, character: 33 }
+              }
+            }],
+            methodsAvailable: false,
+            fieldsAvailable: true
+          };
         }
       }
     });
@@ -2176,6 +2185,7 @@ interface EventReferenceRuntimeOptions {
 function createEventReferenceRuntime(options: EventReferenceRuntimeOptions = {}): EventReferenceRuntime {
   const configuration = {
     'eventReferences.autoScan': true,
+    'eventReferences.rescanDebounceMilliseconds': 250,
     ...(options.configuration ?? {})
   };
   const commands = new Map<string, (...args: unknown[]) => unknown>();
@@ -3173,6 +3183,14 @@ function createFakeCSharpSymbolLanguageService(typesByPath: Record<string, CShar
   return {
     async getPrimaryTopLevelType() {
       return undefined;
+    },
+    async findDocumentMembers() {
+      return {
+        methods: [],
+        fields: [],
+        methodsAvailable: true,
+        fieldsAvailable: true
+      };
     },
     async findMethods() {
       return [];

@@ -13,6 +13,8 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
   let buildPromise: Promise<UnitySerializedAssetReferenceIndex | undefined> | undefined;
   let activeBuildCancellation: vscode.CancellationTokenSource | undefined;
   let scheduledBuild: ReturnType<typeof setTimeout> | undefined;
+  let pendingBackgroundStart: Promise<void> | undefined;
+  let nextBackgroundBuildAt = 0;
   let rebuildRequested = false;
   let disposed = false;
 
@@ -22,8 +24,14 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
       return;
     }
 
+    const hadCachedVersion = cachedVersion !== undefined;
     cachedVersion = version;
     index = undefined;
+    if (hadCachedVersion) {
+      // Asset churn extends one quiet window instead of triggering another
+      // complete scan as soon as the previous scan exits.
+      nextBackgroundBuildAt = Date.now() + (runtime.getRescanDebounceMilliseconds?.() ?? 5000);
+    }
 
     if (status === 'building' && buildPromise) {
       // The controller owns scan cancellation so invalidation cannot leave a
@@ -133,7 +141,7 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     }
 
     refreshVersion();
-    if (status === 'building') {
+    if (status === 'building' || pendingBackgroundStart) {
       rebuildRequested = true;
       return;
     }
@@ -147,14 +155,42 @@ export function createEventReferenceIndexController(runtime: EventReferenceRunti
     }
 
     runtime.logger.debug('UnityEvent background reference scan scheduled.');
+    const delayMilliseconds = Math.max(
+      backgroundBuildDebounceMilliseconds,
+      nextBackgroundBuildAt - Date.now()
+    );
     scheduledBuild = setTimeout(() => {
       scheduledBuild = undefined;
       refreshVersion();
 
-      if (status === 'idle' || status === 'failed') {
-        void forceBuild({ mode: 'background' });
+      if (Date.now() < nextBackgroundBuildAt) {
+        scheduleBuild();
+        return;
       }
-    }, backgroundBuildDebounceMilliseconds);
+
+      pendingBackgroundStart = (async () => {
+        await runtime.waitForBackgroundScanReady?.();
+        if (disposed) {
+          return;
+        }
+
+        refreshVersion();
+        if (Date.now() < nextBackgroundBuildAt) {
+          scheduleBuild();
+          return;
+        }
+
+        if (status === 'idle' || status === 'failed') {
+          await forceBuild({ mode: 'background' });
+        }
+      })().finally(() => {
+        pendingBackgroundStart = undefined;
+        if (rebuildRequested && !disposed && status !== 'building') {
+          rebuildRequested = false;
+          scheduleBuild();
+        }
+      });
+    }, delayMilliseconds);
   }
 
   return {

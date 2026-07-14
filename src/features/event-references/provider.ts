@@ -21,7 +21,7 @@ export function createEventReferenceProvider(
   runtime: EventReferenceRuntime,
   controller: UnityEventReferenceIndexController,
   isEnabled: () => boolean
-): vscode.CodeLensProvider & vscode.HoverProvider & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
+): vscode.CodeLensProvider & vscode.HoverProvider & vscode.Disposable & { showReferenceLocations(target: EventReferenceLocationTarget): Promise<void> } {
   const csharpRetryMemory = new Map<string, {
     documentVersion: number;
     delayMilliseconds: number;
@@ -32,6 +32,24 @@ export function createEventReferenceProvider(
   const lastMethodSymbolsByScriptPath = new Map<string, VersionedCSharpSymbols<CSharpMethodSymbolSnapshot>>();
   const lastFieldSymbolsByScriptPath = new Map<string, VersionedCSharpSymbols<CSharpFieldSymbolSnapshot>>();
   const csharpRefreshInFlight = new Set<string>();
+  const documentEpochByScriptPath = new Map<string, number>();
+  let disposed = false;
+
+  /** Clears provider state whose symbol ranges belong to one closed document. */
+  function clearDocumentState(scriptPath: string): void {
+    lastMethodSymbolsByScriptPath.delete(scriptPath);
+    lastFieldSymbolsByScriptPath.delete(scriptPath);
+    documentEpochByScriptPath.set(scriptPath, (documentEpochByScriptPath.get(scriptPath) ?? 0) + 1);
+    for (const kind of ['methods', 'fields'] as const) {
+      resetCSharpRetry(scriptPath, kind);
+    }
+  }
+
+  const closeDocumentDisposable = runtime.runtimeVscode.workspace.onDidCloseTextDocument?.(document => {
+    if (isCSharpFile(document.uri)) {
+      clearDocumentState(toProjectPath(runtime.metadataIndex.root, document.uri));
+    }
+  });
 
   /** Creates a retry key so one script or symbol kind cannot block another. */
   function csharpRetryKey(scriptPath: string, kind: CSharpCodeLensSymbolKind): string {
@@ -161,79 +179,102 @@ export function createEventReferenceProvider(
     return memory !== undefined && Date.now() < memory.nextAllowedAt;
   }
 
-  /** Starts an asynchronous C# symbol read without blocking VS Code CodeLens rendering. */
+  /** Starts one asynchronous member snapshot read without blocking CodeLens or hover rendering. */
   function scheduleCSharpSymbolRefresh(
     document: vscode.TextDocument,
     index: UnitySerializedAssetReferenceIndex,
-    scriptPath: string,
-    kind: CSharpCodeLensSymbolKind
+    scriptPath: string
   ): void {
-    if (!runtime.csharpLanguageService) {
+    if (!runtime.csharpLanguageService || disposed) {
       return;
     }
 
     // Lightweight test documents may omit version; real VS Code documents always provide it.
     const requestVersion = document.version ?? 0;
-    const retryMemory = csharpRetryMemory.get(csharpRetryKey(scriptPath, kind));
-    if (retryMemory && retryMemory.documentVersion !== requestVersion) {
-      resetCSharpRetry(scriptPath, kind);
+    const needsMethods = index.hasMethodReferences(scriptPath);
+    const needsFields = index.hasFieldReferences(scriptPath);
+    const requestedKinds = (['methods', 'fields'] as const).filter(kind => kind === 'methods' ? needsMethods : needsFields);
+    for (const kind of requestedKinds) {
+      const retryMemory = csharpRetryMemory.get(csharpRetryKey(scriptPath, kind));
+      if (retryMemory && retryMemory.documentVersion !== requestVersion) {
+        resetCSharpRetry(scriptPath, kind);
+      }
+
+      const cachedVersion = kind === 'methods'
+        ? lastMethodSymbolsByScriptPath.get(scriptPath)?.documentVersion
+        : lastFieldSymbolsByScriptPath.get(scriptPath)?.documentVersion;
+      if (cachedVersion !== undefined && cachedVersion !== requestVersion) {
+        resetCSharpRetry(scriptPath, kind);
+      }
     }
-    const hasCachedSymbols = getCurrentCSharpSymbols(scriptPath, kind as 'methods', requestVersion) !== undefined;
-    if (hasCachedSymbols && !hasCSharpUnavailableState(scriptPath, kind, requestVersion)) {
+
+    const unresolvedKinds = requestedKinds.filter(kind =>
+      getCurrentCSharpSymbols(scriptPath, kind as 'methods', requestVersion) === undefined ||
+      hasCSharpUnavailableState(scriptPath, kind, requestVersion)
+    );
+    if (unresolvedKinds.length === 0 || unresolvedKinds.every(kind => isCSharpRetryBackoffActive(scriptPath, kind))) {
       return;
     }
 
-    // An edit invalidates both cached ranges and retry backoff from the older version.
-    const cachedVersion = kind === 'methods'
-      ? lastMethodSymbolsByScriptPath.get(scriptPath)?.documentVersion
-      : lastFieldSymbolsByScriptPath.get(scriptPath)?.documentVersion;
-    if (cachedVersion !== undefined && cachedVersion !== requestVersion) {
-      resetCSharpRetry(scriptPath, kind);
-    } else if (isCSharpRetryBackoffActive(scriptPath, kind)) {
-      return;
-    }
-
-    const key = `${csharpRetryKey(scriptPath, kind)}#${requestVersion}`;
+    const key = `${scriptPath.replace(/\\/g, '/').toLowerCase()}#members#${requestVersion}`;
     if (csharpRefreshInFlight.has(key)) {
       return;
     }
 
+    const requestEpoch = documentEpochByScriptPath.get(scriptPath) ?? 0;
     csharpRefreshInFlight.add(key);
     void (async () => {
       try {
-        const expectedNames = kind === 'methods'
-          ? getExpectedMethodNamesForScript(index, scriptPath)
-          : getExpectedFieldNamesForScript(index, scriptPath);
-        const symbols = kind === 'methods'
-          ? await runtime.csharpLanguageService?.findMethods(document.uri, expectedNames) ?? []
-          : await runtime.csharpLanguageService?.findUnityEventFields(document.uri, expectedNames) ?? [];
+        const snapshot = await runtime.csharpLanguageService!.findDocumentMembers(
+          document.uri,
+          needsMethods ? getExpectedMethodNamesForScript(index, scriptPath) : [],
+          needsFields ? getExpectedFieldNamesForScript(index, scriptPath) : []
+        );
         // TextDocument objects advance their version in place; never publish stale ranges.
         const currentVersion = document.version ?? 0;
-        if (currentVersion !== requestVersion) {
-          runtime.logger.debug(`UnityEvent CodeLens discarded stale C# ${kind} for ${scriptPath}: requested=${requestVersion}, current=${currentVersion}.`);
+        if (disposed || currentVersion !== requestVersion || (documentEpochByScriptPath.get(scriptPath) ?? 0) !== requestEpoch) {
+          runtime.logger.debug(`UnityEvent member snapshot discarded stale C# symbols for ${scriptPath}: requested=${requestVersion}, current=${currentVersion}.`);
           controller.notifyCodeLensesChanged();
           return;
         }
 
-        const newerVersion = kind === 'methods'
-          ? lastMethodSymbolsByScriptPath.get(scriptPath)?.documentVersion
-          : lastFieldSymbolsByScriptPath.get(scriptPath)?.documentVersion;
-        if (newerVersion !== undefined && newerVersion > requestVersion) {
+        const newestCachedVersion = Math.max(
+          lastMethodSymbolsByScriptPath.get(scriptPath)?.documentVersion ?? -1,
+          lastFieldSymbolsByScriptPath.get(scriptPath)?.documentVersion ?? -1
+        );
+        if (newestCachedVersion > requestVersion) {
+          runtime.logger.debug(`UnityEvent member snapshot ignored older C# symbols for ${scriptPath}: requested=${requestVersion}, cached=${newestCachedVersion}.`);
           return;
         }
 
-        rememberCSharpSymbols(scriptPath, kind, requestVersion, symbols);
-        markCSharpCodeLensReady(scriptPath, kind);
+        for (const kind of requestedKinds) {
+          const available = kind === 'methods' ? snapshot.methodsAvailable : snapshot.fieldsAvailable;
+          const symbols = kind === 'methods' ? snapshot.methods : snapshot.fields;
+          if (available) {
+            rememberCSharpSymbols(scriptPath, kind, requestVersion, symbols);
+            markCSharpCodeLensReady(scriptPath, kind);
+          } else {
+            recordCSharpCodeLensUnavailable(
+              scriptPath,
+              kind,
+              requestVersion,
+              new Error(`C# document member snapshot is unavailable for ${kind}.`),
+              false
+            );
+          }
+        }
         controller.notifyCodeLensesChanged();
       } catch (error) {
-        if ((document.version ?? 0) !== requestVersion) {
+        if (disposed || (document.version ?? 0) !== requestVersion || (documentEpochByScriptPath.get(scriptPath) ?? 0) !== requestEpoch) {
           controller.notifyCodeLensesChanged();
           return;
         }
-        const canPlacePlaceholder = kind === 'methods'
-          ? (getCurrentCSharpSymbols(scriptPath, 'methods', requestVersion)?.length ?? 0) > 0
-          : (getCurrentCSharpSymbols(scriptPath, 'fields', requestVersion)?.length ?? 0) > 0;
-        recordCSharpCodeLensUnavailable(scriptPath, kind, requestVersion, error, canPlacePlaceholder);
+        for (const kind of unresolvedKinds) {
+          const canPlacePlaceholder = kind === 'methods'
+            ? (getCurrentCSharpSymbols(scriptPath, 'methods', requestVersion)?.length ?? 0) > 0
+            : (getCurrentCSharpSymbols(scriptPath, 'fields', requestVersion)?.length ?? 0) > 0;
+          recordCSharpCodeLensUnavailable(scriptPath, kind, requestVersion, error, canPlacePlaceholder);
+        }
       } finally {
         csharpRefreshInFlight.delete(key);
       }
@@ -265,12 +306,8 @@ export function createEventReferenceProvider(
           return [];
         }
 
-        if (index.hasMethodReferences(scriptPath)) {
-          scheduleCSharpSymbolRefresh(document, index, scriptPath, 'methods');
-        }
-
-        if (index.hasFieldReferences(scriptPath)) {
-          scheduleCSharpSymbolRefresh(document, index, scriptPath, 'fields');
+        if (index.hasMethodReferences(scriptPath) || index.hasFieldReferences(scriptPath)) {
+          scheduleCSharpSymbolRefresh(document, index, scriptPath);
         }
 
         return await createCodeLensesFromIndex(runtime, document, index, {
@@ -303,7 +340,16 @@ export function createEventReferenceProvider(
       }
 
       const scriptPath = toProjectPath(runtime.metadataIndex.root, document.uri);
-      const method = await findMethodAtHoverPosition(runtime, document.uri, position, scriptPath);
+      const documentVersion = document.version ?? 0;
+      const methods = getCurrentCSharpSymbols(scriptPath, 'methods', documentVersion);
+      const fields = getCurrentCSharpSymbols(scriptPath, 'fields', documentVersion);
+      if (!methods && !fields) {
+        // Hover must never create a second C# provider request. CodeLens owns
+        // snapshot preparation and will refresh hover data asynchronously.
+        return undefined;
+      }
+
+      const method = methods?.find(symbol => containsPosition(symbol.range, position));
 
       if (method) {
         const references = index.getReferences(scriptPath, method.name, method.typeName);
@@ -312,7 +358,7 @@ export function createEventReferenceProvider(
         }
       }
 
-      const field = await findFieldAtHoverPosition(runtime, document.uri, position, scriptPath);
+      const field = fields?.find(symbol => containsPosition(symbol.range, position));
       if (field) {
         const references = index.getFieldReferences(scriptPath, field.name, field.typeName);
         if (references.length > 0) {
@@ -330,54 +376,22 @@ export function createEventReferenceProvider(
         () => controller.scheduleBuild(),
         isEnabled
       );
+    },
+    dispose() {
+      disposed = true;
+      closeDocumentDisposable?.dispose();
+      for (const memory of csharpRetryMemory.values()) {
+        if (memory.refreshTimer) {
+          clearTimeout(memory.refreshTimer);
+        }
+      }
+      csharpRetryMemory.clear();
+      lastMethodSymbolsByScriptPath.clear();
+      lastFieldSymbolsByScriptPath.clear();
+      csharpRefreshInFlight.clear();
+      documentEpochByScriptPath.clear();
     }
   };
-}
-
-/** Reads the hovered method symbol without letting C# provider errors escape into VS Code hover plumbing. */
-async function findMethodAtHoverPosition(
-  runtime: EventReferenceRuntime,
-  uri: vscode.Uri,
-  position: vscode.Position,
-  scriptPath: string
-): Promise<CSharpMethodSymbolSnapshot | undefined> {
-  try {
-    return await runtime.csharpLanguageService?.findMethodAtPosition(uri, position);
-  } catch (error) {
-    logHoverCSharpProviderError(runtime, scriptPath, 'methods', error);
-    return undefined;
-  }
-}
-
-/** Reads the hovered UnityEvent field symbol without turning provider readiness into hover failures. */
-async function findFieldAtHoverPosition(
-  runtime: EventReferenceRuntime,
-  uri: vscode.Uri,
-  position: vscode.Position,
-  scriptPath: string
-): Promise<CSharpFieldSymbolSnapshot | undefined> {
-  try {
-    return await runtime.csharpLanguageService?.findUnityEventFieldAtPosition(uri, position);
-  } catch (error) {
-    logHoverCSharpProviderError(runtime, scriptPath, 'fields', error);
-    return undefined;
-  }
-}
-
-/** Logs C# hover lookup failures visibly while keeping the editor hover responsive. */
-function logHoverCSharpProviderError(
-  runtime: EventReferenceRuntime,
-  scriptPath: string,
-  kind: CSharpCodeLensSymbolKind,
-  error: unknown
-): void {
-  const message = errorMessage(error);
-  if (isExpectedCSharpUnavailableError(error)) {
-    runtime.logger.info(`UnityEvent hover C# ${kind} unavailable for ${scriptPath}: ${message}`);
-    return;
-  }
-
-  runtime.logger.error(`UnityEvent hover C# ${kind} unexpected provider failure for ${scriptPath}: ${message}`);
 }
 
 /** Collects target method names that YAML already associates with the current script. */
@@ -446,6 +460,18 @@ function isExpectedCSharpUnavailableError(error: unknown): boolean {
     message.includes('unavailable') ||
     message.includes('canceled') ||
     message.includes('cancelled');
+}
+
+/** Checks whether a provider-backed member range contains the current editor position. */
+function containsPosition(
+  range: { start: { line: number; character: number }; end: { line: number; character: number } },
+  position: vscode.Position
+): boolean {
+  const afterStart = position.line > range.start.line ||
+    (position.line === range.start.line && position.character >= range.start.character);
+  const beforeEnd = position.line < range.end.line ||
+    (position.line === range.end.line && position.character <= range.end.character);
+  return afterStart && beforeEnd;
 }
 
 /** Converts language-service ranges back into VS Code ranges for hover rendering. */
