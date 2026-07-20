@@ -17,6 +17,7 @@ describe('package manifest', () => {
       'onCommand:unityPlus.showUnityEventReferences',
       'onCommand:unityPlus.openMetaFile',
       'onCommand:unityPlus.openInUnity',
+      'onCommand:unityPlus.selectUnityEditor',
       'onCommand:unityPlus.rescanUnityProject',
       'onCommand:unityPlus.refreshUnityTests'
     ]);
@@ -117,6 +118,15 @@ describe('package manifest', () => {
 
     assert.strictEqual(command?.title, '%command.openInUnity.title%');
     assert.strictEqual(command?.icon, '$(rocket)');
+  });
+
+  it('contributes an explicit command for selecting the live Unity Editor instance', () => {
+    const manifest = readPackageManifest();
+    const command = manifest.contributes.commands.find((item: { command: string }) =>
+      item.command === 'unityPlus.selectUnityEditor'
+    );
+
+    assert.strictEqual(command?.title, '%command.selectUnityEditor.title%');
   });
 
   it('keeps Unity Plus command ownership through categories', () => {

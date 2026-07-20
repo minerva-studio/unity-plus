@@ -10,6 +10,7 @@
   "command.showUnityEventReferences.title": "Show UnityEvent References",
   "command.openMetaFile.title": "Open Meta File",
   "command.openInUnity.title": "Open In Unity",
+  "command.selectUnityEditor.title": "Select Unity Editor",
   "command.rescanUnityProject.title": "Rescan Unity Project",
   "command.openUnityYamlMonoBehaviourScript.title": "Open Unity YAML MonoBehaviour Script",
   "command.refreshUnityTests.title": "Refresh Unity Tests",

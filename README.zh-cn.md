@@ -72,6 +72,7 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 ### 元文件与 Unity 集成
 - 资源管理器上下文菜单和编辑器标题栏中的「打开 Meta 文件」命令 (`$(file-code)`)。
 - 「在 Unity 中打开」命令 (`$(rocket)`) 通过 IDE 消息将选中资源发送到 Unity 编辑器。
+- 「选择 Unity 编辑器」会发现所有存活的本地 IDE 消息端点，并询问当前项目应连接哪个实例。选择仅在该端点存活期间有效；重启 Unity 后会重新询问。
 - 可选择在 VS Code 资源管理器中隐藏 `.meta` 文件 (`unityPlus.metaFiles.hideInExplorer`)。
 
 ### C# 脚本创建

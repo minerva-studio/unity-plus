@@ -70,6 +70,7 @@ While building Unity Plus, we surveyed the Unity-for-VS-Code extension ecosystem
 ### Meta Files & Unity Integration
 - `Open Meta File` command (`$(file-code)`) in the explorer context menu and editor title bar.
 - `Open In Unity` command (`$(rocket)`) sends the selected asset to the Unity Editor via IDE messaging.
+- `Select Unity Editor` discovers all live local IDE messaging endpoints and asks which instance to use for the current project. The selection lasts only while that endpoint remains alive; restarting Unity triggers selection again.
 - Option to hide `.meta` files from the VS Code explorer (`unityPlus.metaFiles.hideInExplorer`).
 
 ### C# Script Creation

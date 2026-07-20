@@ -6,7 +6,10 @@ import { discoverUnityTests } from './testDiscovery';
 import { executeUnityTests } from './testExecution';
 import type { UnityTestInfo, UnityTestMode } from './testModel';
 
-export interface UnityTestRunnerFeatureOptions { root?: vscode.Uri; }
+export interface UnityTestRunnerFeatureOptions {
+  root?: vscode.Uri;
+  createBridge?: () => UnityTestBridgeClient;
+}
 
 export function registerUnityTestRunnerFeature(
   logger: UnityPlusLogger,
@@ -29,7 +32,7 @@ export function registerUnityTestRunnerFeature(
 
   async function getBridge(projectRoot: string): Promise<UnityTestBridgeClient> {
     if (!bridge) {
-      bridge = createUnityTestBridge();
+      bridge = options.createBridge?.() ?? createUnityTestBridge();
       bridge.onError(err => logger.warn(`Unity test bridge: ${err.message}`));
     }
 

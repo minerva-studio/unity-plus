@@ -1,6 +1,8 @@
 import * as assert from 'assert';
 import {
   decodeUnityIdeMessage,
+  createUnityIdeMessagingEndpointResolver,
+  discoverUnityIdeMessagingEndpoints,
   encodeUnityIdeMessage,
   findUnityIdeMessagingEndpoint,
   resetUnityIdeMessagingCache,
@@ -84,11 +86,100 @@ describe('visualStudioMessaging', () => {
 
     assert.strictEqual(port, undefined);
   });
+
+  it('collects every responsive Unity Editor in one discovery scan', async () => {
+    const socket = new FakeUnityIdeSocket({
+      endpoints: [
+        { projectRoot: 'C:/FirstProject', port: 56042 },
+        { projectRoot: 'C:/SecondProject', port: 56043 }
+      ]
+    });
+
+    const endpoints = await discoverUnityIdeMessagingEndpoints({
+      createSocket: () => socket,
+      portStart: 56042,
+      portEnd: 56043,
+      timeoutMs: 10
+    });
+
+    assert.deepStrictEqual(endpoints, [
+      { projectRoot: 'C:/FirstProject', port: 56042 },
+      { projectRoot: 'C:/SecondProject', port: 56043 }
+    ]);
+  });
+
+  it('asks the UI to select an Editor and reuses it only while the port still matches the project', async () => {
+    const sockets = [
+      new FakeUnityIdeSocket({ projectRoot: 'C:/Project', projectPort: 56042 }),
+      new FakeUnityIdeSocket({ projectRoot: 'C:/Project', projectPort: 56042 })
+    ];
+    let selectionCount = 0;
+    const resolver = createUnityIdeMessagingEndpointResolver({
+      createSocket: () => sockets.shift() ?? new FakeUnityIdeSocket(),
+      portStart: 56042,
+      portEnd: 56042,
+      timeoutMs: 10,
+      readEditorInstance: () => ({ process_id: 40 }),
+      selectEndpoint: async (_projectRoot, endpoints) => {
+        selectionCount += 1;
+        assert.strictEqual(endpoints[0].processId, 40);
+        return endpoints[0];
+      }
+    });
+
+    assert.strictEqual(await resolver.resolve('C:/Project'), 56042);
+    assert.strictEqual(await resolver.resolve('C:/Project'), 56042);
+    assert.strictEqual(selectionCount, 1);
+  });
+
+  it('lets the UI choose between multiple Editor ports for the same project', async () => {
+    const resolver = createUnityIdeMessagingEndpointResolver({
+      createSocket: () => new FakeUnityIdeSocket({
+        endpoints: [
+          { projectRoot: 'C:/Project', port: 56042 },
+          { projectRoot: 'C:/Project', port: 56043 }
+        ]
+      }),
+      portStart: 56042,
+      portEnd: 56043,
+      timeoutMs: 10,
+      selectEndpoint: async (_projectRoot, endpoints) => {
+        assert.deepStrictEqual(endpoints.map(endpoint => endpoint.port), [56042, 56043]);
+        return endpoints[1];
+      }
+    });
+
+    assert.strictEqual(await resolver.resolve('C:/Project'), 56043);
+  });
+
+  it('asks again after a Unity restart moves the project to a new port', async () => {
+    const sockets = [
+      new FakeUnityIdeSocket({ projectRoot: 'C:/Project', projectPort: 56042 }),
+      new FakeUnityIdeSocket(),
+      new FakeUnityIdeSocket({ projectRoot: 'C:/Project', projectPort: 56043 })
+    ];
+    const selectedPorts: number[] = [];
+    const resolver = createUnityIdeMessagingEndpointResolver({
+      createSocket: () => sockets.shift() ?? new FakeUnityIdeSocket(),
+      portStart: 56042,
+      portEnd: 56043,
+      timeoutMs: 10,
+      selectEndpoint: async (_projectRoot, endpoints) => {
+        selectedPorts.push(endpoints[0].port);
+        return endpoints[0];
+      }
+    });
+
+    assert.strictEqual(await resolver.resolve('C:/Project'), 56042);
+    assert.strictEqual(await resolver.resolve('C:/Project'), 56043);
+    assert.deepStrictEqual(selectedPorts, [56042, 56043]);
+  });
 });
 
 interface FakeUnityIdeSocketOptions {
   projectRoot?: string;
   projectPort?: number;
+  endpoints?: readonly { projectRoot: string; port: number }[];
 }
 
 class FakeUnityIdeSocket implements UnityIdeSocket {
@@ -128,9 +219,16 @@ class FakeUnityIdeSocket implements UnityIdeSocket {
     callback?.(null);
 
     const decoded = decodeUnityIdeMessage(message);
-    if (decoded?.type === unityIdeMessageTypeProjectPath && port === this.options.projectPort) {
-      const response = encodeUnityIdeMessage(unityIdeMessageTypeProjectPath, this.options.projectRoot ?? '');
-      this.messageListener?.(response, { port });
+    if (decoded?.type === unityIdeMessageTypeProjectPath) {
+      const endpoints = this.options.endpoints ?? [{
+        projectRoot: this.options.projectRoot ?? '',
+        port: this.options.projectPort ?? -1
+      }];
+      const endpoint = endpoints.find(candidate => candidate.port === port);
+      if (endpoint) {
+        const response = encodeUnityIdeMessage(unityIdeMessageTypeProjectPath, endpoint.projectRoot);
+        this.messageListener?.(response, { port });
+      }
     }
   }
 }

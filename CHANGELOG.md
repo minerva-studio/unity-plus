@@ -2,6 +2,18 @@
 
 All notable changes to Unity Plus are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added explicit Unity Editor instance selection shared by Open In Unity and the Unity Test Runner.
+- Added a `Select Unity Editor` command for changing the current live endpoint.
+
+### Fixed
+
+- Discover all responsive local Unity IDE messaging endpoints instead of treating the first response as the only global Editor.
+- Revalidate the selected project endpoint before every operation and ask again when a Unity restart changes its PID-derived port.
+
 ## 0.5.1 - 2026-07-09
 
 ### Added

@@ -34,6 +34,7 @@ suite('activation — Command Registration', () => {
     'unityPlus.showUnityEventReferences',
     'unityPlus.openMetaFile',
     'unityPlus.openInUnity',
+    'unityPlus.selectUnityEditor',
     'unityPlus.rescanUnityProject',
   ];
 

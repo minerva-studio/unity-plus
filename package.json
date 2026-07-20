@@ -32,6 +32,7 @@
     "onCommand:unityPlus.showUnityEventReferences",
     "onCommand:unityPlus.openMetaFile",
     "onCommand:unityPlus.openInUnity",
+    "onCommand:unityPlus.selectUnityEditor",
     "onCommand:unityPlus.rescanUnityProject",
     "onCommand:unityPlus.refreshUnityTests"
   ],
@@ -79,6 +80,11 @@
         "title": "%command.openInUnity.title%",
         "category": "%command.category%",
         "icon": "$(rocket)"
+      },
+      {
+        "command": "unityPlus.selectUnityEditor",
+        "title": "%command.selectUnityEditor.title%",
+        "category": "%command.category%"
       },
       {
         "command": "unityPlus.rescanUnityProject",
