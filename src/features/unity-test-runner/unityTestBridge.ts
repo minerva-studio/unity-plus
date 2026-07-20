@@ -15,6 +15,11 @@ const pingIntervalMs = 3000;
 export type BridgeMessageHandler = (message: UnityIdeMessage) => void;
 export type BridgeErrorHandler = (error: Error) => void;
 
+export interface UnityTestBridgeSubscription {
+  /** Stops delivering bridge messages to the registered handler. */
+  dispose(): void;
+}
+
 export interface UnityTestBridgeDependencies {
   /** Finds and validates the current Unity IDE messaging endpoint. */
   findEndpoint?: (projectRoot: string) => Promise<number | undefined>;
@@ -28,7 +33,7 @@ export interface UnityTestBridgeClient {
   /** Send a typed message to Unity. */
   send(type: number, value?: string): void;
   /** Register a handler for incoming messages. */
-  onMessage(handler: BridgeMessageHandler): void;
+  onMessage(handler: BridgeMessageHandler): UnityTestBridgeSubscription;
   /** Register a handler for socket errors. */
   onError(handler: BridgeErrorHandler): void;
   /** Close the persistent socket and stop keep-alive. */
@@ -45,7 +50,7 @@ export interface UnityTestBridgeClient {
 export function createUnityTestBridge(dependencies: UnityTestBridgeDependencies = {}): UnityTestBridgeClient {
   let socket: dgram.Socket | undefined;
   let port: number | undefined;
-  let messageHandler: BridgeMessageHandler | undefined;
+  const messageHandlers = new Set<BridgeMessageHandler>();
   let errorHandler: BridgeErrorHandler | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let connectInFlight: Promise<void> | undefined;
@@ -114,7 +119,9 @@ export function createUnityTestBridge(dependencies: UnityTestBridgeDependencies 
         clearTimeout(safety);
         const decoded = decodeUnityIdeMessage(buffer);
         if (decoded) {
-          messageHandler?.(decoded);
+          for (const handler of messageHandlers) {
+            handler(decoded);
+          }
         }
         tcpSocket.end();
       }
@@ -143,7 +150,9 @@ export function createUnityTestBridge(dependencies: UnityTestBridgeDependencies 
       return;
     }
 
-    messageHandler?.(decoded);
+    for (const handler of messageHandlers) {
+      handler(decoded);
+    }
   }
 
   return {
@@ -204,8 +213,11 @@ export function createUnityTestBridge(dependencies: UnityTestBridgeDependencies 
       sendRaw(type, value);
     },
 
-    onMessage(handler: BridgeMessageHandler): void {
-      messageHandler = handler;
+    onMessage(handler: BridgeMessageHandler): UnityTestBridgeSubscription {
+      messageHandlers.add(handler);
+      return {
+        dispose: () => messageHandlers.delete(handler)
+      };
     },
 
     onError(handler: BridgeErrorHandler): void {

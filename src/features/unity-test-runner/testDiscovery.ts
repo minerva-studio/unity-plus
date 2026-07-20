@@ -66,6 +66,7 @@ export function discoverUnityTests(
       }
       settled = true;
       clearTimeout(timeout);
+      messageSubscription?.dispose();
     }
 
     function checkDone(): void {
@@ -77,7 +78,7 @@ export function discoverUnityTests(
 
     // IMPORTANT: register the message handler BEFORE sending requests.
     // UDP responses can arrive before the send() call completes.
-    bridge.onMessage((message) => {
+    const messageSubscription = bridge.onMessage((message) => {
       if (settled) {
         return;
       }

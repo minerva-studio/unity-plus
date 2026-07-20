@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { executeUnityTests, UnityTestStartTimeoutError } from '../../features/unity-test-runner/testExecution';
+import { UnityTestRunScheduler } from '../../features/unity-test-runner/unityTestRunner';
 import type { UnityTestBridgeClient } from '../../features/unity-test-runner/unityTestBridge';
 import {
   unityIdeMessageTypeRunFinished,
@@ -11,7 +12,7 @@ import {
 class MockExecutionBridge implements UnityTestBridgeClient {
   readonly connected = true;
   readonly sent: Array<{ type: number; value: string }> = [];
-  private messageHandler?: (message: { type: number; value: string }) => void;
+  private readonly messageHandlers = new Set<(message: { type: number; value: string }) => void>();
 
   /** Simulates an already connected protocol fixture. */
   async connect(): Promise<void> {
@@ -24,8 +25,9 @@ class MockExecutionBridge implements UnityTestBridgeClient {
   }
 
   /** Registers the fixture's active message handler. */
-  onMessage(handler: (message: { type: number; value: string }) => void): void {
-    this.messageHandler = handler;
+  onMessage(handler: (message: { type: number; value: string }) => void): { dispose(): void } {
+    this.messageHandlers.add(handler);
+    return { dispose: () => this.messageHandlers.delete(handler) };
   }
 
   /** Accepts error handlers because this fixture emits no socket errors. */
@@ -40,7 +42,9 @@ class MockExecutionBridge implements UnityTestBridgeClient {
 
   /** Delivers a Unity protocol message to the execution workflow. */
   emit(type: number, value = ''): void {
-    this.messageHandler?.({ type, value });
+    for (const handler of this.messageHandlers) {
+      handler({ type, value });
+    }
   }
 }
 
@@ -79,12 +83,10 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        'EditMode',
-        [name],
+        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name] }],
         cancellation.token,
         undefined,
         new Map([[name, item]]),
-        [name],
         1000
       );
       let resolved = false;
@@ -96,6 +98,9 @@ suite('unityTestExecution - protocol fixture', () => {
       bridge.emit(unityIdeMessageTypeTestFinished, JSON.stringify({
         TestResultAdaptors: [{ FullName: name, Name: 'Passes', TestStatus: 0 }]
       }));
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: name, Name: 'Passes', TestStatus: 0 }]
+      }));
       await execution;
 
       assert.deepStrictEqual(state.passed, [item.id]);
@@ -105,28 +110,31 @@ suite('unityTestExecution - protocol fixture', () => {
     }
   });
 
-  test('ends after cancellation without waiting for Unity', async () => {
+  test('ends without sending when cancellation was already requested', async () => {
     const bridge = new MockExecutionBridge();
     const cancellation = new vscode.CancellationTokenSource();
     const state: MockRunState = { ended: 0, errored: [], passed: [] };
 
     try {
+      cancellation.cancel();
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        'EditMode',
-        ['Tests.Sample.Cancelled'],
+        [{
+          mode: 'EditMode',
+          fullName: 'Tests.Sample.Cancelled',
+          expectedFullNames: ['Tests.Sample.Cancelled']
+        }],
         cancellation.token,
-        undefined,
         undefined,
         undefined,
         1000
       );
-      cancellation.cancel();
       await execution;
 
       assert.strictEqual(state.ended, 1);
       assert.deepStrictEqual(state.errored, []);
+      assert.deepStrictEqual(bridge.sent, []);
     } finally {
       cancellation.dispose();
     }
@@ -143,12 +151,10 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        'EditMode',
-        [name],
+        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name] }],
         cancellation.token,
         undefined,
         new Map([[name, item]]),
-        [name],
         1000
       );
 
@@ -177,12 +183,10 @@ suite('unityTestExecution - protocol fixture', () => {
         executeUnityTests(
           bridge,
           createMockRun(state),
-          'PlayMode',
-          [name],
+          [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name] }],
           cancellation.token,
           undefined,
           new Map([[name, item]]),
-          [name],
           5
         ),
         UnityTestStartTimeoutError
@@ -192,6 +196,167 @@ suite('unityTestExecution - protocol fixture', () => {
       assert.strictEqual(state.ended, 1);
     } finally {
       cancellation.dispose();
+    }
+  });
+
+  test('waits for RunFinished before sending the next Unity batch', async () => {
+    const bridge = new MockExecutionBridge();
+    const cancellation = new vscode.CancellationTokenSource();
+    const state: MockRunState = { ended: 0, errored: [], passed: [] };
+    const firstName = 'Tests.Sample.First';
+    const secondName = 'Tests.Sample.Second';
+    const firstItem = createTestItem(firstName);
+    const secondItem = createTestItem(secondName);
+
+    try {
+      const execution = executeUnityTests(
+        bridge,
+        createMockRun(state),
+        [
+          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName] },
+          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName] }
+        ],
+        cancellation.token,
+        undefined,
+        new Map([[firstName, firstItem], [secondName, secondItem]]),
+        1000
+      );
+
+      assert.deepStrictEqual(bridge.sent.map(message => message.value), [`EditMode:${firstName}`]);
+      bridge.emit(unityIdeMessageTypeTestFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: 'Tests.Sample.First.Parent', Name: 'Parent', TestStatus: 0 }]
+      }));
+      assert.deepStrictEqual(bridge.sent.map(message => message.value), [`EditMode:${firstName}`]);
+      assert.strictEqual(state.ended, 0);
+
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: firstName, Name: 'First', TestStatus: 0 }]
+      }));
+      assert.deepStrictEqual(
+        bridge.sent.map(message => message.value),
+        [`EditMode:${firstName}`, `EditMode:${secondName}`]
+      );
+      assert.deepStrictEqual(state.errored, []);
+
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: secondName, Name: 'Second', TestStatus: 0 }]
+      }));
+      await execution;
+
+      assert.deepStrictEqual(state.passed, [firstItem.id, secondItem.id]);
+      assert.deepStrictEqual(state.errored, []);
+      assert.strictEqual(state.ended, 1);
+    } finally {
+      cancellation.dispose();
+    }
+  });
+
+  test('does not send later batches after an active run is cancelled', async () => {
+    const bridge = new MockExecutionBridge();
+    const cancellation = new vscode.CancellationTokenSource();
+    const state: MockRunState = { ended: 0, errored: [], passed: [] };
+    const firstName = 'Tests.Sample.Active';
+    const secondName = 'Tests.Sample.Queued';
+
+    try {
+      const execution = executeUnityTests(
+        bridge,
+        createMockRun(state),
+        [
+          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName] },
+          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName] }
+        ],
+        cancellation.token,
+        undefined,
+        undefined,
+        1000
+      );
+
+      cancellation.cancel();
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: firstName, Name: 'Active', TestStatus: 0 }]
+      }));
+      await execution;
+
+      assert.deepStrictEqual(bridge.sent.map(message => message.value), [`EditMode:${firstName}`]);
+      assert.strictEqual(state.ended, 1);
+    } finally {
+      cancellation.dispose();
+    }
+  });
+
+  test('queues overlapping VS Code runs and skips a queued run cancelled before execution', async () => {
+    let queuedMessages = 0;
+    const scheduler = new UnityTestRunScheduler(() => { queuedMessages += 1; });
+    const firstCancellation = new vscode.CancellationTokenSource();
+    const secondCancellation = new vscode.CancellationTokenSource();
+    const firstState: MockRunState = { ended: 0, errored: [], passed: [] };
+    const secondState: MockRunState = { ended: 0, errored: [], passed: [] };
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let secondExecuted = false;
+
+    try {
+      const firstRun = scheduler.schedule(
+        createMockRun(firstState),
+        firstCancellation.token,
+        async () => {
+          await firstGate;
+          firstState.ended += 1;
+        }
+      );
+      const secondRun = scheduler.schedule(
+        createMockRun(secondState),
+        secondCancellation.token,
+        async () => { secondExecuted = true; }
+      );
+
+      secondCancellation.cancel();
+      assert.strictEqual(queuedMessages, 1);
+      assert.strictEqual(secondExecuted, false);
+      assert.strictEqual(secondState.ended, 0);
+
+      releaseFirst?.();
+      await Promise.all([firstRun, secondRun]);
+
+      assert.strictEqual(secondExecuted, false);
+      assert.strictEqual(secondState.ended, 1);
+    } finally {
+      firstCancellation.dispose();
+      secondCancellation.dispose();
+    }
+  });
+
+  test('starts the next queued VS Code run only after the active run finishes', async () => {
+    const scheduler = new UnityTestRunScheduler(() => undefined);
+    const firstCancellation = new vscode.CancellationTokenSource();
+    const secondCancellation = new vscode.CancellationTokenSource();
+    const firstState: MockRunState = { ended: 0, errored: [], passed: [] };
+    const secondState: MockRunState = { ended: 0, errored: [], passed: [] };
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let secondExecuted = false;
+
+    try {
+      const firstRun = scheduler.schedule(
+        createMockRun(firstState),
+        firstCancellation.token,
+        async () => { await firstGate; }
+      );
+      const secondRun = scheduler.schedule(
+        createMockRun(secondState),
+        secondCancellation.token,
+        async () => { secondExecuted = true; }
+      );
+
+      assert.strictEqual(secondExecuted, false);
+      releaseFirst?.();
+      await Promise.all([firstRun, secondRun]);
+
+      assert.strictEqual(secondExecuted, true);
+    } finally {
+      firstCancellation.dispose();
+      secondCancellation.dispose();
     }
   });
 });

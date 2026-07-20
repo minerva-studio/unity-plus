@@ -64,6 +64,7 @@
   "Discovering EditMode and PlayMode tests": "正在发现 EditMode 和 PlayMode 测试",
   "Unity Plus: found {editModeCount} EditMode and {playModeCount} PlayMode tests.": "Unity Plus: 找到 {editModeCount} 个 EditMode 测试和 {playModeCount} 个 PlayMode 测试。",
   "Unity Plus: Unity is not responding; it may be refreshing, compiling, reloading the script domain, or the project may not be open.": "Unity Plus: Unity 未响应；可能正在刷新、编译、重载脚本域，或者项目未打开。",
+  "Unity Plus: Unity tests are queued until the current run finishes.": "Unity Plus: Unity 测试已排队，正在等待当前运行完成。",
   "Unity Plus: Open a Unity project before selecting a Unity Editor.": "Unity Plus: 请先打开 Unity 项目再选择 Unity 编辑器。",
   "Unity Plus: No Unity Editor was selected for the current project.": "Unity Plus: 尚未为当前项目选择 Unity 编辑器。",
   "Unity Editor on port {port}": "端口 {port} 上的 Unity 编辑器",

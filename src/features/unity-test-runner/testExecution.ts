@@ -16,6 +16,12 @@ import type { UnityPlusLogger } from '../../unity/logger';
 
 const defaultTestStartTimeoutMs = 8000;
 
+export interface UnityTestExecutionBatch {
+  mode: UnityTestMode;
+  fullName: string;
+  expectedFullNames: readonly string[];
+}
+
 export class UnityTestStartTimeoutError extends Error {
   /** Creates the explicit failure used when Unity accepts no test-run activity. */
   constructor() {
@@ -27,27 +33,26 @@ export class UnityTestStartTimeoutError extends Error {
 export async function executeUnityTests(
   bridge: UnityTestBridgeClient,
   run: vscode.TestRun,
-  mode: UnityTestMode,
-  fullNames: string[],
+  batches: readonly UnityTestExecutionBatch[],
   token: vscode.CancellationToken,
   log?: UnityPlusLogger,
   /** FullName → real TestItem from the controller tree for result reporting. */
   itemByFullName?: Map<string, vscode.TestItem>,
-  /** FullNames to match in TestFinished (defaults to fullNames if omitted). */
-  pendingNames?: string[],
   /** Startup timeout override used by the protocol mock fixture. */
   startTimeoutMs = defaultTestStartTimeoutMs
 ): Promise<void> {
-  // fullNames: what we send to Unity. pendingNames: what we wait for in results.
-  // When running a parent (class), fullNames=[parent], pendingNames=[all leaf children].
-  const pending = new Set(pendingNames ?? fullNames);
-  log?.info(`executeTests mode=${mode} send=${fullNames.length} pending=${pending.size}`);
+  const totalPending = batches.reduce((count, batch) => count + batch.expectedFullNames.length, 0);
+  log?.info(`executeTests batches=${batches.length} pending=${totalPending}`);
   await new Promise<void>((resolve, reject) => {
     let done = false;
-    let started = false;
+    let cancelled = token.isCancellationRequested;
+    let batchIndex = 0;
+    let batchStarted = false;
+    let pending = new Set<string>();
+    let expected = new Set<string>();
     let startTimer: ReturnType<typeof setTimeout> | undefined;
 
-    /** Ends the VS Code run exactly once and releases its cancellation listener. */
+    /** Ends the VS Code run exactly once and releases all protocol listeners. */
     function settle(error?: Error): void {
       if (done) {
         return;
@@ -57,25 +62,45 @@ export async function executeUnityTests(
       if (startTimer) {
         clearTimeout(startTimer);
       }
-      cancelListener.dispose();
+      cancelListener?.dispose();
+      messageSubscription?.dispose();
       run.end();
       if (error) reject(error); else resolve();
     }
 
-    /** Records the first protocol activity that proves Unity started the run. */
+    /** Records the first protocol activity that proves Unity started the current batch. */
     function markStarted(): void {
-      if (started) {
+      if (batchStarted) {
         return;
       }
 
-      started = true;
+      batchStarted = true;
       if (startTimer) {
         clearTimeout(startTimer);
         startTimer = undefined;
       }
     }
 
-    const cancelListener = token.onCancellationRequested(() => queueMicrotask(settle));
+    /** Sends one Unity execution command and starts its independent startup timeout. */
+    function sendCurrentBatch(): void {
+      const batch = batches[batchIndex];
+      expected = new Set(batch.expectedFullNames);
+      pending = new Set(expected);
+      batchStarted = false;
+      log?.info(
+        `executeBatch ${batchIndex + 1}/${batches.length} mode=${batch.mode} pending=${pending.size} name="${batch.fullName}"`
+      );
+      startTimer = setTimeout(() => {
+        const error = new UnityTestStartTimeoutError();
+        markPendingErrored(run, pending, itemByFullName, error.message);
+        settle(error);
+      }, startTimeoutMs);
+      bridge.send(unityIdeMessageTypeExecuteTests, `${batch.mode}:${batch.fullName}`);
+    }
+
+    const cancelListener = token.onCancellationRequested(() => {
+      cancelled = true;
+    });
     const messageHandler = (message: { type: number; value: string }): void => {
       if (done) return;
 
@@ -101,40 +126,33 @@ export async function executeUnityTests(
           // A completion callback proves Unity started even if its UDP start message was lost.
           markStarted();
           handleTestFinished(run, message.value, pending, () => {
-            if (pending.size === 0) settle();
-            else log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
-          }, log, itemByFullName);
+            log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
+          }, log, itemByFullName, expected);
           break;
         case unityIdeMessageTypeRunFinished:
           // Unity serializes RunFinished as the same complete result tree as TestFinished.
           markStarted();
-          handleTestFinished(run, message.value, pending, () => undefined, log, itemByFullName);
-          // Only results absent even from the final tree remain genuinely unreported.
+          handleTestFinished(run, message.value, pending, () => undefined, log, itemByFullName, expected);
+          // Only results absent from this batch's final tree are genuinely unreported.
           markPendingErrored(run, pending, itemByFullName, 'Unity finished without reporting this test result.');
-          settle();
+          if (cancelled || batchIndex + 1 >= batches.length) {
+            settle();
+          } else {
+            batchIndex += 1;
+            sendCurrentBatch();
+          }
           break;
       }
     };
 
-    bridge.onMessage(messageHandler);
-    startTimer = setTimeout(() => {
-      const error = new UnityTestStartTimeoutError();
-      markPendingErrored(run, pending, itemByFullName, error.message);
-      settle(error);
-    }, startTimeoutMs);
-
-    // Send after handlers and timeout are installed so fast responses cannot race setup.
-    for (const fullName of fullNames) {
-      if (token.isCancellationRequested) {
-        settle();
-        break;
-      }
-      bridge.send(unityIdeMessageTypeExecuteTests, `${mode}:${fullName}`);
-    }
-
-    if (fullNames.length === 0) {
+    const messageSubscription = bridge.onMessage(messageHandler);
+    if (cancelled || batches.length === 0) {
       settle();
+      return;
     }
+
+    // Send only after the handler is installed so a fast Unity response cannot race setup.
+    sendCurrentBatch();
   });
 }
 
@@ -146,7 +164,8 @@ function handleTestFinished(
   pending: Set<string>,
   onAllDone: () => void,
   log?: UnityPlusLogger,
-  itemByFullName?: Map<string, vscode.TestItem>
+  itemByFullName?: Map<string, vscode.TestItem>,
+  expectedFullNames?: ReadonlySet<string>
 ): void {
   let container: UnityTestResultContainer;
   try { container = JSON.parse(raw); } catch { return; }
@@ -155,6 +174,10 @@ function handleTestFinished(
     const matched = pending.has(payload.FullName);
     log?.info(`TestFinished: "${payload.FullName}" status=${payload.TestStatus} match=${matched}`);
     if (!matched) {
+      // RunFinished repeats completed leaves; only non-leaf nodes need aggregate reporting here.
+      if (expectedFullNames?.has(payload.FullName)) {
+        continue;
+      }
       // Also try to report parent items that were enqueued
       const parentItem = itemByFullName?.get(payload.FullName);
       if (parentItem && payload.TestStatus !== undefined) {

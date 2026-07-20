@@ -41,6 +41,33 @@ class MockPersistentSocket extends EventEmitter {
 }
 
 describe('unityTestBridge', () => {
+  it('delivers messages to active subscribers and stops after disposal', async () => {
+    const socket = new MockPersistentSocket();
+    const bridge = createUnityTestBridge({
+      findEndpoint: async () => 56002,
+      createSocket: () => socket as unknown as import('node:dgram').Socket
+    });
+    const firstMessages: number[] = [];
+    const secondMessages: number[] = [];
+
+    try {
+      await bridge.connect('C:/Project');
+      const first = bridge.onMessage(message => firstMessages.push(message.type));
+      const second = bridge.onMessage(message => secondMessages.push(message.type));
+
+      socket.emit('message', encodeUnityIdeMessage(unityIdeMessageTypePong, ''));
+      first.dispose();
+      socket.emit('message', encodeUnityIdeMessage(unityIdeMessageTypeRunStarted, '{}'));
+      second.dispose();
+      socket.emit('message', encodeUnityIdeMessage(unityIdeMessageTypeRunFinished, '{}'));
+
+      assert.deepStrictEqual(firstMessages, [unityIdeMessageTypePong]);
+      assert.deepStrictEqual(secondMessages, [unityIdeMessageTypePong, unityIdeMessageTypeRunStarted]);
+    } finally {
+      bridge.disconnect();
+    }
+  });
+
   it('rebuilds the persistent socket when endpoint validation finds a new port', async () => {
     const ports = [56002, 56003];
     const sockets: MockPersistentSocket[] = [];
@@ -267,7 +294,7 @@ describe('testDiscovery', () => {
         connected: true,
         connect: async () => undefined,
         send: () => undefined,
-        onMessage: () => undefined,
+        onMessage: () => ({ dispose: () => undefined }),
         onError: () => undefined,
         disconnect: () => undefined
       };
