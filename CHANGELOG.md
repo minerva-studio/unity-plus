@@ -4,6 +4,8 @@ All notable changes to Unity Plus are documented in this file.
 
 ## Unreleased
 
+## 0.5.2 - 2026-07-21
+
 ### Added
 
 - Added explicit Unity Editor instance selection shared by Open In Unity and the Unity Test Runner.
