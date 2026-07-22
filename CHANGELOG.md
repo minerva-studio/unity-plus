@@ -13,6 +13,7 @@ All notable changes to Unity Plus are documented in this file.
 
 - Discover all responsive local Unity IDE messaging endpoints instead of treating the first response as the only global Editor.
 - Revalidate the selected project endpoint before every operation and ask again when a Unity restart changes its PID-derived port.
+- Preserve Unity C# project file identity during automatic synchronization so C# Dev Kit does not detach the project and place its scripts in a miscellaneous project.
 
 ## 0.5.1 - 2026-07-09
 

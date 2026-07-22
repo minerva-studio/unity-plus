@@ -825,32 +825,31 @@ async function updateCompileIncludes(
       return false;
     }
 
-    let tempUri: vscode.Uri | undefined;
     try {
       const updated = await update(content);
       if (updated === content) {
         return false;
       }
 
-      tempUri = createProjectTempUri(runtime, projectUri);
-      await writeTextFile(runtime, tempUri, updated);
       const latestContent = await readOptionalTextFile(runtime, projectUri);
       if (latestContent !== content) {
         // Unity regenerated the project after our read. Reapply the complete
         // transformation to its newer file instead of overwriting its state.
-        await deleteFileSafe(runtime, tempUri);
-        tempUri = undefined;
         continue;
       }
 
-      await runtime.runtimeVscode.workspace.fs.rename(tempUri, projectUri, { overwrite: true });
-      tempUri = undefined;
-      return true;
-    } catch (error) {
-      if (tempUri) {
-        await deleteFileSafe(runtime, tempUri);
+      // Preserve the existing project file identity. Replacing it through a
+      // temporary-file rename makes C# Dev Kit observe a project deletion and
+      // can leave every source file attached to its miscellaneous project.
+      await writeTextFile(runtime, projectUri, updated);
+      const writtenContent = await readOptionalTextFile(runtime, projectUri);
+      if (writtenContent === updated) {
+        return true;
       }
 
+      // Another writer changed the project immediately after our write.
+      // Retry the transformation against the newest complete project content.
+    } catch (error) {
       if (isRetryableProjectFileError(error) && attempt < projectWriteRetryDelaysMilliseconds.length) {
         await waitForProjectWriteRetry(attempt);
         continue;
@@ -862,12 +861,6 @@ async function updateCompileIncludes(
   }
 
   return false;
-}
-
-/** Creates a same-directory temporary file for atomic project replacement. */
-function createProjectTempUri(runtime: ProjectSyncRuntime, projectUri: vscode.Uri): vscode.Uri {
-  const suffix = randomBytes(8).toString('hex');
-  return runtime.runtimeVscode.Uri.file(`${projectUri.fsPath}.unity-plus-${suffix}.tmp`);
 }
 
 /** Waits between bounded retries so transient Windows sharing locks can clear. */
@@ -885,15 +878,6 @@ function isRetryableProjectFileError(error: unknown): boolean {
 
   const message = errorMessage(error).toLowerCase();
   return message.includes('used by another process') || message.includes('being used by another process');
-}
-
-/** Removes an abandoned temporary file without masking the original failure. */
-async function deleteFileSafe(runtime: ProjectSyncRuntime, uri: vscode.Uri): Promise<void> {
-  try {
-    await runtime.runtimeVscode.workspace.fs.delete(uri, { useTrash: false });
-  } catch {
-    // A missing or externally removed temp file requires no further cleanup.
-  }
 }
 
 function addInclude(content: string, projectPath: string): string {

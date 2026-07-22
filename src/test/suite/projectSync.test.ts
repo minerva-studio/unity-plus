@@ -2,9 +2,10 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { createProjectSyncCoordinator } from '../../features/project-sync/projectSync';
 import type { UnityPlusLogger } from '../../unity/logger';
+import { configureCSharpSolution, getUnityFixtureRoot } from './csharpProviderSetup';
 
 /**
  * Integration tests for project sync operations.
@@ -159,6 +160,32 @@ suite('projectSync — Real Filesystem Operations', () => {
     assert.strictEqual(logs.filter(line => line.includes('Updated Assembly-CSharp.csproj')).length, 1);
   });
 
+  test('preserves the project file identity while adding scripts', async () => {
+    const root = mkdtempSync(join(tempDir, 'identity-'));
+    const assets = join(root, 'Assets', 'Scripts');
+    mkdirSync(assets, { recursive: true });
+    const projectPath = join(root, 'Assembly-CSharp.csproj');
+    writeFileSync(projectPath, createProjectFile([]), 'utf8');
+    const scriptPath = join(assets, 'IdentityProbe.cs');
+    writeFileSync(scriptPath, 'public class IdentityProbe {}', 'utf8');
+    const originalFileId = statSync(projectPath).ino;
+    const coordinator = createProjectSyncCoordinator({
+      root: vscode.Uri.file(root),
+      runtimeVscode: vscode,
+      logger: createMemoryLogger([])
+    }, () => 0);
+
+    coordinator.enqueue({ kind: 'create', uri: vscode.Uri.file(scriptPath) });
+    await coordinator.flush();
+    coordinator.dispose();
+
+    assert.strictEqual(statSync(projectPath).ino, originalFileId,
+      'project sync must update the existing project file instead of replacing it');
+    assert.ok(readFileSync(projectPath, 'utf8').includes('IdentityProbe.cs'));
+    assert.strictEqual(readdirSync(root).some(name => name.includes('.unity-plus-')), false,
+      'project sync must not leave temporary replacement files');
+  });
+
   test('collapses rename chains before updating the project', async () => {
     const root = mkdtempSync(join(tempDir, 'rename-chain-'));
     const assets = join(root, 'Assets', 'Scripts');
@@ -217,7 +244,90 @@ suite('projectSync — Real Filesystem Operations', () => {
     assert.ok(allCommands.includes('unityPlus.rescanUnityProject'),
       'rescanUnityProject command should be registered');
   });
+
+  test('keeps the real C# project context after automatic project sync', async function () {
+    this.timeout(120_000);
+    const root = getUnityFixtureRoot();
+    await configureCSharpSolution(root);
+    const projectUri = vscode.Uri.file(join(root.fsPath, 'UnityEventFixture.csproj'));
+    const probeUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'ProjectSyncProbe.cs'));
+    const metaUri = vscode.Uri.file(`${probeUri.fsPath}.meta`);
+    const originalProject = await vscode.workspace.fs.readFile(projectUri);
+    const originalFileId = statSync(projectUri.fsPath).ino;
+    const source = [
+      'using Minerva.Gameplay;',
+      '',
+      'public sealed class ProjectSyncProbe',
+      '{',
+      '    private SymbolTest value = new();',
+      '}',
+      ''
+    ].join('\n');
+
+    try {
+      await vscode.workspace.fs.writeFile(probeUri, Buffer.from(source, 'utf8'));
+      await waitForProjectInclude(projectUri, 'Assets\\ProjectSyncProbe.cs');
+      assert.strictEqual(statSync(projectUri.fsPath).ino, originalFileId,
+        'automatic sync must not replace the project file observed by C# Dev Kit');
+
+      const document = await vscode.workspace.openTextDocument(probeUri);
+      const symbolOffset = document.lineAt(4).text.indexOf('SymbolTest');
+      const definitions = await waitForDefinitions(probeUri, new vscode.Position(4, symbolOffset));
+      assert.ok(definitions.some(location => location.fsPath.endsWith(join('Assets', 'Scripts', 'SymbolTest.cs'))),
+        'the synchronized script should resolve types from its loaded C# project');
+    } finally {
+      await deleteIfExists(probeUri);
+      await deleteIfExists(metaUri);
+      await vscode.workspace.fs.writeFile(projectUri, originalProject);
+    }
+  });
 });
+
+/** Waits for the automatic watcher batch to add one Compile Include. */
+async function waitForProjectInclude(projectUri: vscode.Uri, expectedPath: string): Promise<void> {
+  const timeoutAt = Date.now() + 15_000;
+  while (Date.now() < timeoutAt) {
+    const content = new TextDecoder().decode(await vscode.workspace.fs.readFile(projectUri));
+    if (content.replaceAll('/', '\\').includes(expectedPath)) {
+      return;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+
+  assert.fail(`Project sync did not add ${expectedPath}.`);
+}
+
+/** Waits for the real C# provider to resolve a cross-file definition. */
+async function waitForDefinitions(uri: vscode.Uri, position: vscode.Position): Promise<vscode.Uri[]> {
+  const timeoutAt = Date.now() + 30_000;
+  while (Date.now() < timeoutAt) {
+    const definitions = await vscode.commands.executeCommand<Array<vscode.Location | vscode.LocationLink>>(
+      'vscode.executeDefinitionProvider',
+      uri,
+      position
+    ) ?? [];
+    const uris = definitions.map(definition => 'uri' in definition ? definition.uri : definition.targetUri);
+    if (uris.length > 0) {
+      return uris;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  assert.fail(`C# provider did not resolve a definition for ${uri.fsPath}.`);
+}
+
+/** Deletes one fixture file when a test created it. */
+async function deleteIfExists(uri: vscode.Uri): Promise<void> {
+  try {
+    await vscode.workspace.fs.delete(uri, { useTrash: false });
+  } catch (error) {
+    if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) {
+      throw error;
+    }
+  }
+}
 
 /** Creates a minimal Unity-style project file for real filesystem sync tests. */
 function createProjectFile(includes: readonly string[]): string {
