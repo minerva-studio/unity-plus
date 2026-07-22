@@ -281,7 +281,56 @@ suite('projectSync — Real Filesystem Operations', () => {
       await vscode.workspace.fs.writeFile(projectUri, originalProject);
     }
   });
+
+  test('keeps dependent C# project references after synchronizing an upstream project', async function () {
+    this.timeout(120_000);
+    const root = getUnityFixtureRoot();
+    await configureCSharpSolution(root);
+    const coreProjectUri = vscode.Uri.file(join(root.fsPath, 'ProjectSync.Core.csproj'));
+    const implProjectUri = vscode.Uri.file(join(root.fsPath, 'ProjectSync.Impl.csproj'));
+    const baseUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'ProjectSync', 'Core', 'ProjectSyncBase.cs'));
+    const derivedUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'ProjectSync', 'Implementation', 'ProjectSyncDerived.cs'));
+    const probeUri = vscode.Uri.file(join(root.fsPath, 'Assets', 'ProjectSync', 'Core', 'GeneratedProjectSyncType.cs'));
+    const metaUri = vscode.Uri.file(`${probeUri.fsPath}.meta`);
+    const originalCoreProject = await vscode.workspace.fs.readFile(coreProjectUri);
+    const originalImplProject = await vscode.workspace.fs.readFile(implProjectUri);
+    const originalCoreFileId = statSync(coreProjectUri.fsPath).ino;
+
+    try {
+      await assertProjectSyncBaseDefinition(derivedUri, baseUri);
+      await vscode.workspace.fs.writeFile(probeUri, Buffer.from([
+        'namespace Minerva.ProjectSync;',
+        '',
+        '/// <summary>Forces an upstream project synchronization during the integration test.</summary>',
+        'public sealed class GeneratedProjectSyncType',
+        '{',
+        '}',
+        ''
+      ].join('\n'), 'utf8'));
+      await waitForProjectInclude(coreProjectUri, 'Assets\\ProjectSync\\Core\\GeneratedProjectSyncType.cs');
+
+      assert.strictEqual(statSync(coreProjectUri.fsPath).ino, originalCoreFileId,
+        'upstream synchronization must preserve the project identity observed by C# Dev Kit');
+      assert.deepStrictEqual(await vscode.workspace.fs.readFile(implProjectUri), originalImplProject,
+        'upstream synchronization must not rewrite the dependent project');
+      await assertProjectSyncBaseDefinition(derivedUri, baseUri);
+    } finally {
+      await deleteIfExists(probeUri);
+      await deleteIfExists(metaUri);
+      await vscode.workspace.fs.writeFile(coreProjectUri, originalCoreProject);
+    }
+  });
 });
+
+/** Confirms the real C# provider resolves the implementation base type from the upstream project. */
+async function assertProjectSyncBaseDefinition(derivedUri: vscode.Uri, expectedBaseUri: vscode.Uri): Promise<void> {
+  const document = await vscode.workspace.openTextDocument(derivedUri);
+  const line = document.lineAt(3);
+  const symbolOffset = line.text.indexOf('ProjectSyncBase');
+  const definitions = await waitForDefinitions(derivedUri, new vscode.Position(3, symbolOffset));
+  assert.ok(definitions.some(uri => uri.fsPath === expectedBaseUri.fsPath),
+    'the dependent project should keep resolving its upstream project reference');
+}
 
 /** Waits for the automatic watcher batch to add one Compile Include. */
 async function waitForProjectInclude(projectUri: vscode.Uri, expectedPath: string): Promise<void> {

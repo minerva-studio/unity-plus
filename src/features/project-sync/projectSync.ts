@@ -840,7 +840,8 @@ async function updateCompileIncludes(
 
       // Preserve the existing project file identity. Replacing it through a
       // temporary-file rename makes C# Dev Kit observe a project deletion and
-      // can leave every source file attached to its miscellaneous project.
+      // can invalidate downstream ProjectReference graphs or leave source files
+      // attached to its miscellaneous project.
       await writeTextFile(runtime, projectUri, updated);
       const writtenContent = await readOptionalTextFile(runtime, projectUri);
       if (writtenContent === updated) {

@@ -4,7 +4,7 @@ All notable changes to Unity Plus are documented in this file.
 
 ## Unreleased
 
-## 0.5.2 - 2026-07-21
+## 0.5.2 - 2026-07-22
 
 ### Added
 
@@ -15,7 +15,8 @@ All notable changes to Unity Plus are documented in this file.
 
 - Discover all responsive local Unity IDE messaging endpoints instead of treating the first response as the only global Editor.
 - Revalidate the selected project endpoint before every operation and ask again when a Unity restart changes its PID-derived port.
-- Preserve Unity C# project file identity during automatic synchronization so C# Dev Kit does not detach the project and place its scripts in a miscellaneous project.
+- Serialize Unity test batches and overlapping VS Code runs so each `RunFinished` closes only its own batch and queued runs cannot consume another run's results.
+- Preserve Unity C# project file identity during automatic synchronization so C# Dev Kit keeps dependent project references loaded instead of detaching scripts into a miscellaneous project.
 
 ## 0.5.1 - 2026-07-09
 

@@ -1,0 +1,6 @@
+{
+  "name": "ProjectSync.Impl",
+  "references": [
+    "ProjectSync.Core"
+  ]
+}
