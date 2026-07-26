@@ -3,6 +3,18 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 describe('package manifest', () => {
+  it('keeps the 0.5.3 release metadata synchronized', () => {
+    const manifest = readPackageManifest();
+    const packageLock = readJson<{
+      version: string;
+      packages: Record<string, { version?: string }>;
+    }>('package-lock.json');
+
+    assert.strictEqual(manifest.version, '0.5.3');
+    assert.strictEqual(packageLock.version, '0.5.3');
+    assert.strictEqual(packageLock.packages[''].version, '0.5.3');
+  });
+
   it('activates from C# files and explicit Unity Plus commands', () => {
     const manifest = readPackageManifest();
 

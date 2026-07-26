@@ -1,22 +1,35 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
+import type { UnityPlusLogger } from '../../unity/logger';
+import { EditorPackageUnityTestBackend } from '../../features/unity-test-runner/editorPackageTestBackend';
 import { executeUnityTests, UnityTestStartTimeoutError } from '../../features/unity-test-runner/testExecution';
 import { UnityTestRunScheduler } from '../../features/unity-test-runner/unityTestRunner';
 import type { UnityTestBridgeClient } from '../../features/unity-test-runner/unityTestBridge';
 import {
+  unityIdeMessageTypeExecuteTests,
   unityIdeMessageTypeRunFinished,
   unityIdeMessageTypeRunStarted,
-  unityIdeMessageTypeTestFinished
+  unityIdeMessageTypeTestFinished,
+  unityIdeMessageTypeTestListRetrieved,
+  unityIdeMessageTypeRetrieveTestList
 } from '../../unity/visualStudioMessaging';
 
 class MockExecutionBridge implements UnityTestBridgeClient {
   readonly connected = true;
   readonly sent: Array<{ type: number; value: string }> = [];
+  readonly connectedProjectRoots: string[] = [];
+  disconnectCount = 0;
   private readonly messageHandlers = new Set<(message: { type: number; value: string }) => void>();
 
-  /** Simulates an already connected protocol fixture. */
-  async connect(): Promise<void> {
-    return;
+  /** Creates a fixture that may fail endpoint validation when requested by a test. */
+  constructor(private readonly connectError?: Error) {}
+
+  /** Records each project endpoint validation performed by the backend. */
+  async connect(projectRoot: string): Promise<void> {
+    this.connectedProjectRoots.push(projectRoot);
+    if (this.connectError) {
+      throw this.connectError;
+    }
   }
 
   /** Records each command sent by the execution workflow. */
@@ -35,9 +48,9 @@ class MockExecutionBridge implements UnityTestBridgeClient {
     return;
   }
 
-  /** Disconnects the no-op protocol fixture. */
+  /** Records backend ownership release for the persistent protocol fixture. */
   disconnect(): void {
-    return;
+    this.disconnectCount += 1;
   }
 
   /** Delivers a Unity protocol message to the execution workflow. */
@@ -52,6 +65,7 @@ interface MockRunState {
   ended: number;
   errored: string[];
   passed: string[];
+  passedItems?: vscode.TestItem[];
 }
 
 /** Creates the smallest TestRun fixture needed to verify lifecycle behavior. */
@@ -59,7 +73,10 @@ function createMockRun(state: MockRunState): vscode.TestRun {
   return {
     end: () => { state.ended += 1; },
     errored: (item: vscode.TestItem) => { state.errored.push(item.id); },
-    passed: (item: vscode.TestItem) => { state.passed.push(item.id); },
+    passed: (item: vscode.TestItem) => {
+      state.passed.push(item.id);
+      state.passedItems?.push(item);
+    },
     started: () => undefined,
     failed: () => undefined,
     skipped: () => undefined
@@ -70,6 +87,171 @@ function createMockRun(state: MockRunState): vscode.TestRun {
 function createTestItem(fullName: string): vscode.TestItem {
   return { id: `unity:${fullName}`, label: fullName } as vscode.TestItem;
 }
+
+/** Creates the logger surface consumed by the backend and execution helper. */
+function createMockLogger(): UnityPlusLogger {
+  return {
+    info: () => undefined,
+    warn: () => undefined
+  } as unknown as UnityPlusLogger;
+}
+
+/** Lets async backend setup reach the expected number of protocol sends. */
+async function waitForSentCount(bridge: MockExecutionBridge, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 10 && bridge.sent.length < count; attempt += 1) {
+    await Promise.resolve();
+  }
+  assert.strictEqual(bridge.sent.length, count);
+}
+
+suite('EditorPackageUnityTestBackend - protocol fixture', () => {
+  test('revalidates the exact project and preserves editor-package discovery', async () => {
+    const bridge = new MockExecutionBridge();
+    const backend = new EditorPackageUnityTestBackend(createMockLogger(), () => bridge);
+    const editTest = {
+      Id: 'edit',
+      Name: 'EditTest',
+      FullName: 'Tests.EditTest',
+      Type: 'Tests',
+      Method: 'EditTest',
+      Assembly: 'Tests.dll',
+      Parent: -1
+    };
+    const playTest = {
+      Id: 'play',
+      Name: 'PlayTest',
+      FullName: 'Tests.PlayTest',
+      Type: 'Tests',
+      Method: 'PlayTest',
+      Assembly: 'Tests.dll',
+      Parent: -1
+    };
+
+    try {
+      const discovery = backend.discover('C:/Unity/Project');
+      await waitForSentCount(bridge, 2);
+
+      assert.deepStrictEqual(
+        bridge.sent,
+        [
+          { type: unityIdeMessageTypeRetrieveTestList, value: 'EditMode' },
+          { type: unityIdeMessageTypeRetrieveTestList, value: 'PlayMode' }
+        ]
+      );
+      bridge.emit(
+        unityIdeMessageTypeTestListRetrieved,
+        `EditMode:${JSON.stringify({ TestAdaptors: [editTest] })}`
+      );
+      bridge.emit(
+        unityIdeMessageTypeTestListRetrieved,
+        `PlayMode:${JSON.stringify({ TestAdaptors: [playTest] })}`
+      );
+
+      assert.deepStrictEqual(await discovery, {
+        editModeTests: [editTest],
+        playModeTests: [playTest]
+      });
+      assert.deepStrictEqual(bridge.connectedProjectRoots, ['C:/Unity/Project']);
+    } finally {
+      backend.dispose();
+    }
+
+    assert.strictEqual(bridge.disconnectCount, 1);
+  });
+
+  test('reuses the bridge and reports results with the real TestItem identity', async () => {
+    const bridge = new MockExecutionBridge();
+    let bridgeCreationCount = 0;
+    const backend = new EditorPackageUnityTestBackend(createMockLogger(), () => {
+      bridgeCreationCount += 1;
+      return bridge;
+    });
+    const cancellation = new vscode.CancellationTokenSource();
+    const cancelled = new vscode.CancellationTokenSource();
+    const name = 'Tests.Sample.BackendPasses';
+    const item = createTestItem(name);
+    const state: MockRunState = {
+      ended: 0,
+      errored: [],
+      passed: [],
+      passedItems: []
+    };
+
+    try {
+      const execution = backend.run({
+        projectRoot: 'C:/Unity/First',
+        run: createMockRun(state),
+        batches: [{ mode: 'EditMode', fullName: name, expectedFullNames: [name] }],
+        token: cancellation.token,
+        itemByFullName: new Map([[name, item]])
+      });
+      await waitForSentCount(bridge, 1);
+
+      assert.deepStrictEqual(bridge.sent, [
+        { type: unityIdeMessageTypeExecuteTests, value: `EditMode:${name}` }
+      ]);
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: name, Name: 'BackendPasses', TestStatus: 0 }]
+      }));
+      await execution;
+
+      cancelled.cancel();
+      await backend.run({
+        projectRoot: 'C:/Unity/Second',
+        run: createMockRun(state),
+        batches: [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name] }],
+        token: cancelled.token,
+        itemByFullName: new Map([[name, item]])
+      });
+
+      assert.strictEqual(bridgeCreationCount, 1);
+      assert.deepStrictEqual(
+        bridge.connectedProjectRoots,
+        ['C:/Unity/First', 'C:/Unity/Second']
+      );
+      assert.deepStrictEqual(state.passed, [item.id]);
+      assert.strictEqual(state.passedItems?.[0], item);
+      assert.strictEqual(state.ended, 2);
+      assert.strictEqual(bridge.sent.length, 1);
+    } finally {
+      cancellation.dispose();
+      cancelled.dispose();
+      backend.dispose();
+    }
+
+    assert.strictEqual(bridge.disconnectCount, 1);
+  });
+
+  test('ends the TestRun once when project connection fails before execution', async () => {
+    const bridge = new MockExecutionBridge(new Error('Project endpoint unavailable.'));
+    const backend = new EditorPackageUnityTestBackend(createMockLogger(), () => bridge);
+    const cancellation = new vscode.CancellationTokenSource();
+    const state: MockRunState = { ended: 0, errored: [], passed: [] };
+
+    try {
+      await assert.rejects(
+        backend.run({
+          projectRoot: 'C:/Unity/Unavailable',
+          run: createMockRun(state),
+          batches: [{
+            mode: 'EditMode',
+            fullName: 'Tests.Sample.Unavailable',
+            expectedFullNames: ['Tests.Sample.Unavailable']
+          }],
+          token: cancellation.token
+        }),
+        /Project endpoint unavailable/
+      );
+
+      assert.strictEqual(state.ended, 1);
+      assert.deepStrictEqual(bridge.sent, []);
+      assert.deepStrictEqual(bridge.connectedProjectRoots, ['C:/Unity/Unavailable']);
+    } finally {
+      cancellation.dispose();
+      backend.dispose();
+    }
+  });
+});
 
 suite('unityTestExecution - protocol fixture', () => {
   test('resolves only after the requested test finishes', async () => {

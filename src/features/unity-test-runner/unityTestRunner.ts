@@ -1,10 +1,11 @@
 import * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
-import { createUnityTestBridge, type UnityTestBridgeClient } from './unityTestBridge';
+import type { UnityTestBridgeClient } from './unityTestBridge';
 import { createUnityTestController } from './testController';
-import { discoverUnityTests } from './testDiscovery';
-import { executeUnityTests, type UnityTestExecutionBatch } from './testExecution';
+import { EditorPackageUnityTestBackend } from './editorPackageTestBackend';
+import type { UnityTestExecutionBatch } from './testExecution';
 import type { UnityTestInfo, UnityTestMode } from './testModel';
+import type { UnityTestBackend } from './unityTestBackend';
 
 export interface UnityTestRunnerFeatureOptions {
   root?: vscode.Uri;
@@ -62,8 +63,8 @@ export function registerUnityTestRunnerFeature(
   const testLookup = new Map<string, UnityTestInfo>();
   let editTests: UnityTestInfo[] = [];
   let playTests: UnityTestInfo[] = [];
-  let bridge: UnityTestBridgeClient | undefined;
   const testRunScheduler = new UnityTestRunScheduler();
+  const backend: UnityTestBackend = new EditorPackageUnityTestBackend(logger, options.createBridge);
 
   const { updateTestTree, createTestRun, dispose: disposeController } =
     createUnityTestController(
@@ -74,17 +75,6 @@ export function registerUnityTestRunnerFeature(
 
   disposables.push(vscode.commands.registerCommand('unityPlus.refreshUnityTests', () => refreshTests(logger, options.root)));
 
-  async function getBridge(projectRoot: string): Promise<UnityTestBridgeClient> {
-    if (!bridge) {
-      bridge = options.createBridge?.() ?? createUnityTestBridge();
-      bridge.onError(err => logger.warn(`Unity test bridge: ${err.message}`));
-    }
-
-    // ProjectPath validation runs before every refresh and test run, including connected sockets.
-    await bridge.connect(projectRoot);
-    return bridge;
-  }
-
   async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
     await vscode.window.withProgress({
@@ -94,10 +84,9 @@ export function registerUnityTestRunnerFeature(
     }, async progress => {
       try {
         progress.report({ message: vscode.l10n.t('Connecting to Unity') });
-        const client = await getBridge(root.fsPath);
         progress.report({ message: vscode.l10n.t('Discovering EditMode and PlayMode tests') });
         log.info('Discovering Unity tests...');
-        const { editModeTests, playModeTests } = await discoverUnityTests(client);
+        const { editModeTests, playModeTests } = await backend.discover(root.fsPath);
 
         // Replace the visible tree only after discovery returns a valid response.
         testLookup.clear();
@@ -135,20 +124,15 @@ export function registerUnityTestRunnerFeature(
     }
 
     await testRunScheduler.schedule(run, token, async () => {
-      let executionStarted = false;
       try {
-        // Do not send ExecuteTests until ProjectPath confirms a responsive Unity endpoint.
-        const client = await getBridge(root.fsPath);
-        if (token.isCancellationRequested) {
-          run.end();
-          return;
-        }
-        executionStarted = true;
-        await executeUnityTests(client, run, batches, token, logger, itemByFullName);
+        await backend.run({
+          projectRoot: root.fsPath,
+          run,
+          batches,
+          token,
+          itemByFullName
+        });
       } catch (error) {
-        if (!executionStarted) {
-          run.end();
-        }
         log.warn(`Unity test execution failed: ${errorMessage(error)}`);
         showUnityUnavailableWarning();
       }
@@ -162,7 +146,7 @@ export function registerUnityTestRunnerFeature(
     ));
   }
 
-  disposables.push({ dispose: () => bridge?.disconnect() });
+  disposables.push(backend);
   return vscode.Disposable.from(...disposables);
 }
 
