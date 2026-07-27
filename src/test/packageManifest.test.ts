@@ -69,6 +69,8 @@ describe('package manifest', () => {
     assert.strictEqual(properties['unityPlus.eventReferences.backgroundScanConcurrency'].maximum, 16);
     assert.strictEqual(properties['unityPlus.metaFiles.hideInExplorer'].default, true);
     assert.strictEqual(properties['unityPlus.metaFiles.moveWithAsset'].default, true);
+    assert.strictEqual(properties['unityPlus.testRunner.backend'].default, 'idePackage');
+    assert.deepStrictEqual(properties['unityPlus.testRunner.backend'].enum, ['idePackage', 'unityCli']);
   });
 
   it('uses VS Code native localization bundles', () => {
@@ -94,6 +96,8 @@ describe('package manifest', () => {
     assert.strictEqual(bundle['Unity Plus: UnityEvent references are disabled.'], 'Unity Plus: UnityEvent 引用已禁用。');
     assert.ok(bundle['Unity Plus: Install the Unity Visual Studio Editor package (com.unity.ide.visualstudio) in this Unity project.']);
     assert.ok(bundle['Unity Plus: Open a Unity project before creating a C# script.']);
+    assert.ok(bundle['Unity Plus: Unity CLI was not found on PATH. Install Unity CLI or reload VS Code after updating PATH.']);
+    assert.ok(bundle['Unity Plus: Unity CLI backend failed: {message}']);
     assert.ok(bundle['{count} UnityEvent references']);
     assert.strictEqual(bundle['{count} UnityEvent targets'], '{count} UnityEvent 目标');
     assert.strictEqual(bundle['- UnityEvent targets'], '- UnityEvent 目标');

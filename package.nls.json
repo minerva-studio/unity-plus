@@ -33,5 +33,8 @@
   "configuration.metaFiles.moveWithAsset.description": "Move Unity .meta files with their asset files when assets are renamed or moved.",
   "configuration.scan.includeScenesOutsideBuildSettings.description": "Scan scenes outside Unity Build Settings when looking for event references.",
   "configuration.logging.level.description": "Controls the verbosity of the Unity Plus output channel.",
-  "configuration.testRunner.autoRefresh.description": "Automatically refresh the Unity test list when the Testing panel is opened."
+  "configuration.testRunner.autoRefresh.description": "Automatically refresh the Unity test list when the Testing panel is opened.",
+  "configuration.testRunner.backend.description": "Select the Unity test discovery and execution backend.",
+  "configuration.testRunner.backend.idePackage.description": "Stable Unity IDE package messaging backend.",
+  "configuration.testRunner.backend.unityCli.description": "Experimental Unity CLI/Pipeline backend for Unity 6 or later."
 }

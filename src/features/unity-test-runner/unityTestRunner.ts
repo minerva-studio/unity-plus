@@ -4,11 +4,14 @@ import type { UnityTestBridgeClient } from './ide-package/unityTestBridge';
 import { createUnityTestController } from './testController';
 import { IdePackageUnityTestBackend } from './ide-package/idePackageTestBackend';
 import {
+  countUnityTestLeaves,
   createUnityTestExecutionBatches,
   flattenUnityTestNodes
 } from './testTree';
-import type { UnityTestNode } from './testModel';
+import type { UnityTestBackendKind, UnityTestNode } from './testModel';
 import type { UnityTestBackend } from './unityTestBackend';
+import { UnityCliTestBackend } from './unity-cli/unityCliTestBackend';
+import { UnityCliUnavailableError } from './unity-cli/unityCliProcess';
 
 export interface UnityTestRunnerFeatureOptions {
   root?: vscode.Uri;
@@ -67,7 +70,10 @@ export function registerUnityTestRunnerFeature(
   let editTests: readonly UnityTestNode[] = [];
   let playTests: readonly UnityTestNode[] = [];
   const testRunScheduler = new UnityTestRunScheduler();
-  const backend: UnityTestBackend = new IdePackageUnityTestBackend(logger, options.createBridge);
+  const backends: Readonly<Record<UnityTestBackendKind, UnityTestBackend>> = {
+    idePackage: new IdePackageUnityTestBackend(logger, options.createBridge),
+    unityCli: new UnityCliTestBackend(logger)
+  };
 
   const { updateTestTree, createTestRun, dispose: disposeController } =
     createUnityTestController(
@@ -77,6 +83,16 @@ export function registerUnityTestRunnerFeature(
   disposables.push({ dispose: disposeController });
 
   disposables.push(vscode.commands.registerCommand('unityPlus.refreshUnityTests', () => refreshTests(logger, options.root)));
+  disposables.push(vscode.workspace.onDidChangeConfiguration(event => {
+    if (!event.affectsConfiguration('unityPlus.testRunner.backend')) {
+      return;
+    }
+    testLookup.clear();
+    editTests = [];
+    playTests = [];
+    updateTestTree([], []);
+    void refreshTests(logger, options.root);
+  }));
 
   async function refreshTests(log: UnityPlusLogger, root?: vscode.Uri): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
@@ -85,11 +101,12 @@ export function registerUnityTestRunnerFeature(
       title: vscode.l10n.t('Unity Plus: refreshing Unity tests'),
       cancellable: false
     }, async progress => {
+      const backendKind = getSelectedBackendKind();
       try {
         progress.report({ message: vscode.l10n.t('Connecting to Unity') });
         progress.report({ message: vscode.l10n.t('Discovering EditMode and PlayMode tests') });
         log.info('Discovering Unity tests...');
-        const { editModeTests, playModeTests } = await backend.discover(root.fsPath);
+        const { editModeTests, playModeTests } = await backends[backendKind].discover(root.fsPath);
 
         // Replace the visible tree only after discovery returns a valid response.
         testLookup.clear();
@@ -97,14 +114,14 @@ export function registerUnityTestRunnerFeature(
         for (const t of flattenUnityTestNodes(editModeTests)) testLookup.set(t.id, t);
         for (const t of flattenUnityTestNodes(playModeTests)) testLookup.set(t.id, t);
         updateTestTree(editModeTests, playModeTests);
-        log.info(`Unity tests: ${editModeTests.length} EditMode, ${playModeTests.length} PlayMode`);
+        log.info(`Unity tests backend=${backendKind}: ${countUnityTestLeaves(editModeTests)} EditMode, ${countUnityTestLeaves(playModeTests)} PlayMode`);
         void vscode.window.showInformationMessage(vscode.l10n.t(
           'Unity Plus: found {editModeCount} EditMode and {playModeCount} PlayMode tests.',
-          { editModeCount: editModeTests.length, playModeCount: playModeTests.length }
+          { editModeCount: countUnityTestLeaves(editModeTests), playModeCount: countUnityTestLeaves(playModeTests) }
         ));
       } catch (error) {
         log.warn(`Unity test discovery failed: ${errorMessage(error)}`);
-        showUnityUnavailableWarning();
+        showUnityBackendWarning(error, backendKind);
       }
     });
   }
@@ -116,6 +133,8 @@ export function registerUnityTestRunnerFeature(
     token: vscode.CancellationToken
   ): Promise<void> {
     if (!root) { log.warn('No Unity root'); return; }
+    const backendKind = getSelectedBackendKind();
+    const backend = backends[backendKind];
     const testItems = collectTestItems(request);
     const batches = createUnityTestExecutionBatches(testItems, testLookup, editTests, playTests);
     const run = createTestRun(request, 'Unity Tests');
@@ -137,20 +156,41 @@ export function registerUnityTestRunnerFeature(
         });
       } catch (error) {
         log.warn(`Unity test execution failed: ${errorMessage(error)}`);
-        showUnityUnavailableWarning();
+        showUnityBackendWarning(error, backendKind);
       }
     });
   }
 
-  /** Shows one honest warning for protocol phases where Unity cannot report its exact busy state. */
-  function showUnityUnavailableWarning(): void {
+  /** Shows a backend-specific warning without treating failed tests as backend availability failures. */
+  function showUnityBackendWarning(error: unknown, backendKind: UnityTestBackendKind): void {
+    if (error instanceof UnityCliUnavailableError) {
+      void vscode.window.showWarningMessage(vscode.l10n.t(
+        'Unity Plus: Unity CLI was not found on PATH. Install Unity CLI or reload VS Code after updating PATH.'
+      ));
+      return;
+    }
+    if (backendKind === 'unityCli') {
+      void vscode.window.showWarningMessage(vscode.l10n.t(
+        'Unity Plus: Unity CLI backend failed: {message}',
+        { message: errorMessage(error) }
+      ));
+      return;
+    }
     void vscode.window.showWarningMessage(vscode.l10n.t(
       'Unity Plus: Unity is not responding; it may be refreshing, compiling, reloading the script domain, or the project may not be open.'
     ));
   }
 
-  disposables.push(backend);
+  for (const backend of Object.values(backends)) {
+    disposables.push(backend);
+  }
   return vscode.Disposable.from(...disposables);
+
+  /** Reads the configured backend at the moment an operation is created. */
+  function getSelectedBackendKind(): UnityTestBackendKind {
+    const value = vscode.workspace.getConfiguration('unityPlus').get<string>('testRunner.backend', 'idePackage');
+    return value === 'unityCli' ? 'unityCli' : 'idePackage';
+  }
 }
 
 // --- Internal helpers ---

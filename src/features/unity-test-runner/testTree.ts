@@ -22,6 +22,21 @@ export function flattenUnityTestNodes(roots: readonly UnityTestNode[]): UnityTes
   return nodes;
 }
 
+/** Counts executable leaves without counting method-suite containers twice. */
+export function countUnityTestLeaves(roots: readonly UnityTestNode[]): number {
+  let count = 0;
+  for (const node of roots) {
+    if (node.children.length === 0) {
+      if (node.kind !== 'container') {
+        count += 1;
+      }
+      continue;
+    }
+    count += countUnityTestLeaves(node.children);
+  }
+  return count;
+}
+
 /** Collects executable leaf names below one backend-neutral test node. */
 export function collectUnityTestLeafFullNames(node: UnityTestNode): string[] {
   if (node.children.length === 0) {
@@ -77,16 +92,36 @@ function appendLeafBatches(
   mode: UnityTestMode,
   roots: readonly UnityTestNode[]
 ): void {
-  for (const node of flattenUnityTestNodes(roots)) {
-    if ((node.kind !== 'method' && node.kind !== 'case') || !node.fullName) {
-      continue;
+  function append(node: UnityTestNode): void {
+    if (node.kind === 'method') {
+      if (!node.fullName) {
+        return;
+      }
+      const expectedFullNames = collectUnityTestLeafFullNames(node);
+      batches.push({
+        mode,
+        fullName: node.fullName,
+        expectedFullNames: expectedFullNames.length > 0 ? expectedFullNames : [node.fullName],
+        includeExplicit: false
+      });
+      return;
     }
-    batches.push({
-      mode,
-      fullName: node.fullName,
-      expectedFullNames: [node.fullName],
-      includeExplicit: false
-    });
+    if (node.kind === 'case' && node.fullName) {
+      batches.push({
+        mode,
+        fullName: node.fullName,
+        expectedFullNames: [node.fullName],
+        includeExplicit: false
+      });
+      return;
+    }
+    for (const child of node.children) {
+      append(child);
+    }
+  }
+
+  for (const root of roots) {
+    append(root);
   }
 }
 

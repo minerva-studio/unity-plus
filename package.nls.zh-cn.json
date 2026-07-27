@@ -33,5 +33,8 @@
   "configuration.metaFiles.moveWithAsset.description": "重命名或移动资源文件时，同时移动 Unity .meta 文件。",
   "configuration.scan.includeScenesOutsideBuildSettings.description": "查找事件引用时扫描 Unity Build Settings 之外的场景。",
   "configuration.logging.level.description": "控制 Unity Plus 输出通道的详细程度。",
-  "configuration.testRunner.autoRefresh.description": "打开 Testing 面板时自动刷新 Unity 测试列表。"
+  "configuration.testRunner.autoRefresh.description": "打开 Testing 面板时自动刷新 Unity 测试列表。",
+  "configuration.testRunner.backend.description": "选择 Unity 测试发现和执行后端。",
+  "configuration.testRunner.backend.idePackage.description": "稳定的 Unity IDE Package 消息后端。",
+  "configuration.testRunner.backend.unityCli.description": "适用于 Unity 6 或更高版本的实验性 Unity CLI/Pipeline 后端。"
 }

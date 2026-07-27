@@ -36,6 +36,9 @@ Unity Plus 正是为此而生。Unity 开发者不应该为了获得一套可靠
 - 测试结果（通过 / 失败 / 跳过）内联显示在 Testing 面板中。
 - 通过 `unityPlus.refreshUnityTests` 命令或 Testing 面板工具栏按钮手动刷新，桥接重连时自动刷新。
 - 需要 Unity Editor 开启并启用 Visual Studio Editor 包 (`com.unity.ide.visualstudio`)。
+- 默认的 `idePackage` 后端是稳定路径。可选的 `unityCli` 后端需要 Unity 6 或更高版本、Unity CLI 和 Unity Pipeline 包。
+- CLI 树是对 IDE 树的最佳努力重建。Pipeline 的不区分大小写 substring filter 会在派发前进行安全检查；匹配额外测试的选择会被拒绝，不会运行测试超集。
+- CLI 后端不会自动回退到 IDE 后端。通过 `unityPlus.testRunner.backend` 选择后端，修改设置后会重新加载测试树。
 
 ### 重命名同步
 - 当顶层 C# 类型（`class`、`struct`、`enum`、`interface`、`record`）被重命名时，自动同步重命名 `.cs` 文件 —— 包括 `MonoBehaviour` 和 `ScriptableObject`。

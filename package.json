@@ -281,6 +281,19 @@
           "type": "boolean",
           "default": true,
           "description": "%configuration.testRunner.autoRefresh.description%"
+        },
+        "unityPlus.testRunner.backend": {
+          "type": "string",
+          "enum": [
+            "idePackage",
+            "unityCli"
+          ],
+          "enumDescriptions": [
+            "%configuration.testRunner.backend.idePackage.description%",
+            "%configuration.testRunner.backend.unityCli.description%"
+          ],
+          "default": "idePackage",
+          "description": "%configuration.testRunner.backend.description%"
         }
       }
     }

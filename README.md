@@ -34,6 +34,9 @@ While building Unity Plus, we surveyed the Unity-for-VS-Code extension ecosystem
 - Test results (passed / failed / skipped) displayed inline in the Testing panel.
 - Manual refresh via `unityPlus.refreshUnityTests` command or Testing panel toolbar button, plus auto-refresh on bridge reconnect.
 - Requires Unity Editor to be open with the Visual Studio Editor package (`com.unity.ide.visualstudio`) enabled.
+- The default `idePackage` backend is the stable path. The optional `unityCli` backend requires Unity 6 or later, Unity CLI, and the Unity Pipeline package.
+- CLI discovery is a best-effort reconstruction of the IDE tree. Pipeline's case-insensitive substring filter is preflight-checked; selections that match extra tests are rejected before dispatch.
+- The CLI backend has no automatic fallback to the IDE backend. Select it with `unityPlus.testRunner.backend` and reload the test tree after changing the setting.
 
 ### Rename Sync
 - Auto rename `.cs` file when a top-level C# type (`class`, `struct`, `enum`, `interface`, `record`) is renamed — including `MonoBehaviour` and `ScriptableObject`.

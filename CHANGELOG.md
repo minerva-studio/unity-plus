@@ -9,6 +9,9 @@ All notable changes to Unity Plus are documented in this file.
 ### Changed
 
 - Moved the existing Unity IDE package test discovery and execution workflow behind a dedicated backend without changing its Test Explorer behavior.
+- Added an experimental `unityCli` backend for Unity 6 and the Unity Pipeline package, while keeping `idePackage` as the default backend.
+- Added CLI best-effort test tree reconstruction, strict JSON envelope validation, serial execution, status polling, cancellation, and pre-dispatch substring-scope rejection.
+- Documented that the CLI backend does not automatically fall back to the IDE backend.
 
 ## 0.5.2 - 2026-07-22
 
