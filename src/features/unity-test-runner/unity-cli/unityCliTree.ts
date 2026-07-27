@@ -14,7 +14,8 @@ export function buildUnityCliTestTree(
     'container',
     projectName,
     undefined,
-    []
+    [],
+    { kind: 'mode' }
   );
   const assemblies = new Map<string, MutableUnityTestNode>();
 
@@ -27,7 +28,8 @@ export function buildUnityCliTestTree(
       test.assembly,
       'container',
       undefined,
-      test.assembly
+      test.assembly,
+      { kind: 'assembly', value: test.assembly }
     );
     const fullNameWithoutArguments = test.parameterizedMethodFullName ?? test.fullName;
     const segments = fullNameWithoutArguments.split('.').filter(Boolean);
@@ -44,7 +46,9 @@ export function buildUnityCliTestTree(
         createNodeId(mode, 'namespace', test.assembly, parentFullName),
         segments[index],
         'container',
-        parentFullName
+        parentFullName,
+        undefined,
+        { kind: 'testName', value: parentFullName }
       );
     }
 
@@ -61,7 +65,9 @@ export function buildUnityCliTestTree(
         createNodeId(mode, 'fixture', test.assembly, fixtureFullName),
         fixtureName,
         'container',
-        fixtureFullName
+        fixtureFullName,
+        undefined,
+        { kind: 'testName', value: fixtureFullName }
       );
     }
 
@@ -74,7 +80,9 @@ export function buildUnityCliTestTree(
         createNodeId(mode, 'method', test.assembly, test.parameterizedMethodFullName),
         methodName,
         'method',
-        test.parameterizedMethodFullName
+        test.parameterizedMethodFullName,
+        undefined,
+        { kind: 'testName', value: test.parameterizedMethodFullName }
       );
       const leaf = getOrCreateChild(
         method,
@@ -83,7 +91,9 @@ export function buildUnityCliTestTree(
         createNodeId(mode, 'case', test.assembly, test.fullName),
         test.label,
         'case',
-        test.fullName
+        test.fullName,
+        undefined,
+        { kind: 'testName', value: test.fullName }
       );
       mergeNodeMetadata(leaf, test);
       continue;
@@ -96,7 +106,9 @@ export function buildUnityCliTestTree(
       createNodeId(mode, 'case', test.assembly, test.fullName),
       test.label,
       'case',
-      test.fullName
+      test.fullName,
+      undefined,
+      { kind: 'testName', value: test.fullName }
     );
     mergeNodeMetadata(leaf, test);
   }
@@ -128,13 +140,15 @@ function createNode(
   kind: 'container' | 'method' | 'case',
   fullName: string | undefined,
   assembly: string | undefined,
-  categories: string[]
+  categories: string[],
+  executionScope?: UnityTestNode['executionScope']
 ): MutableUnityTestNode {
   return {
     id,
     label,
     fullName,
     assembly,
+    executionScope,
     kind,
     categories,
     explicit: false,
@@ -151,13 +165,22 @@ function getOrCreateChild(
   label: string,
   kind: 'container' | 'method' | 'case',
   fullName: string | undefined,
-  assembly?: string
+  assembly?: string,
+  executionScope?: UnityTestNode['executionScope']
 ): MutableUnityTestNode {
   const existing = lookup.get(key);
   if (existing) {
     return existing;
   }
-  const created = createNode(id, label, kind, fullName, assembly ?? parent.assembly, []);
+  const created = createNode(
+    id,
+    label,
+    kind,
+    fullName,
+    assembly ?? parent.assembly,
+    [],
+    executionScope
+  );
   parent.children.push(created);
   lookup.set(key, created);
   return created;
@@ -180,6 +203,7 @@ type MutableUnityTestNode = {
   assembly?: string;
   categories: string[];
   explicit: boolean;
+  executionScope?: UnityTestNode['executionScope'];
   kind: 'container' | 'method' | 'case';
   children: MutableUnityTestNode[];
 };

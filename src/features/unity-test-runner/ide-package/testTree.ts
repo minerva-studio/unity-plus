@@ -9,6 +9,9 @@ export function mapUnityTestAdaptorsToNodes(tests: readonly UnityTestInfo[]): Un
     label: test.Name,
     fullName: test.FullName || undefined,
     assembly: test.Assembly || undefined,
+    executionScope: test.FullName
+      ? { kind: 'testName' as const, value: test.FullName }
+      : undefined,
     kind: (test.Method ? 'method' : undefined) as UnityTestNode['kind'],
     children: childrenByIndex[index]
   }));

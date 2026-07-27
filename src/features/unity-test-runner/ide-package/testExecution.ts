@@ -35,6 +35,14 @@ export async function executeUnityTests(
 ): Promise<void> {
   const totalPending = batches.reduce((count, batch) => count + batch.expectedFullNames.length, 0);
   log?.info(`executeTests batches=${batches.length} pending=${totalPending}`);
+  const unsupportedBatch = batches.find(batch => batch.scope.kind !== 'testName');
+  if (unsupportedBatch) {
+    const message = `IDE Package test execution does not support ${unsupportedBatch.scope.kind} scopes.`;
+    markPendingErrored(run, new Set(unsupportedBatch.expectedFullNames), itemByFullName, message);
+    run.end();
+    throw new Error(message);
+  }
+
   await new Promise<void>((resolve, reject) => {
     let done = false;
     let cancelled = token.isCancellationRequested;
@@ -42,6 +50,7 @@ export async function executeUnityTests(
     let batchStarted = false;
     let pending = new Set<string>();
     let expected = new Set<string>();
+    const reportedParents = new Set<string>();
     let startTimer: ReturnType<typeof setTimeout> | undefined;
 
     /** Ends the VS Code run exactly once and releases all protocol listeners. */
@@ -76,18 +85,19 @@ export async function executeUnityTests(
     /** Sends one Unity execution command and starts its independent startup timeout. */
     function sendCurrentBatch(): void {
       const batch = batches[batchIndex];
+      const fullName = batch.scope.kind === 'testName' ? batch.scope.value : '';
       expected = new Set(batch.expectedFullNames);
       pending = new Set(expected);
       batchStarted = false;
       log?.info(
-        `executeBatch ${batchIndex + 1}/${batches.length} mode=${batch.mode} pending=${pending.size} name="${batch.fullName}"`
+        `executeBatch ${batchIndex + 1}/${batches.length} mode=${batch.mode} pending=${pending.size} name="${fullName}"`
       );
       startTimer = setTimeout(() => {
         const error = new UnityTestStartTimeoutError();
         markPendingErrored(run, pending, itemByFullName, error.message);
         settle(error);
       }, startTimeoutMs);
-      bridge.send(unityIdeMessageTypeExecuteTests, `${batch.mode}:${batch.fullName}`);
+      bridge.send(unityIdeMessageTypeExecuteTests, `${batch.mode}:${fullName}`);
     }
 
     const cancelListener = token.onCancellationRequested(() => {
@@ -95,9 +105,6 @@ export async function executeUnityTests(
     });
     const messageHandler = (message: { type: number; value: string }): void => {
       if (done) return;
-
-      const tname = ['','Ping','Pong','','','','','','','','','','','','','','','Tcp','RunStarted','RunFinished','TestStarted','TestFinished','TestListRetrieved','RetrieveTestList','ExecuteTests'][message.type] || `?${message.type}`;
-      log?.info(`recv ${tname}(${message.type}) len=${message.value.length}`);
 
       switch (message.type) {
         case unityIdeMessageTypeRunStarted:
@@ -118,13 +125,13 @@ export async function executeUnityTests(
           // A completion callback proves Unity started even if its UDP start message was lost.
           markStarted();
           handleTestFinished(run, message.value, pending, () => {
-            log?.info(`pendingLeft=${pending.size} [${[...pending].slice(0,5).join(', ')}]`);
-          }, log, itemByFullName, expected);
+            log?.info(`Unity batch leaf results pending=${pending.size}`);
+          }, log, itemByFullName, expected, false, reportedParents);
           break;
         case unityIdeMessageTypeRunFinished:
           // Unity serializes RunFinished as the same complete result tree as TestFinished.
           markStarted();
-          handleTestFinished(run, message.value, pending, () => undefined, log, itemByFullName, expected);
+          handleTestFinished(run, message.value, pending, () => undefined, log, itemByFullName, expected, true, reportedParents);
           // Only results absent from this batch's final tree are genuinely unreported.
           markPendingErrored(run, pending, itemByFullName, 'Unity finished without reporting this test result.');
           if (cancelled || batchIndex + 1 >= batches.length) {
@@ -157,26 +164,27 @@ function handleTestFinished(
   onAllDone: () => void,
   log?: UnityPlusLogger,
   itemByFullName?: Map<string, vscode.TestItem>,
-  expectedFullNames?: ReadonlySet<string>
+  expectedFullNames?: ReadonlySet<string>,
+  reportParentResults = false,
+  reportedParents?: Set<string>
 ): void {
   let container: UnityTestResultContainer;
   try { container = JSON.parse(raw); } catch { return; }
 
   for (const payload of container.TestResultAdaptors ?? []) {
     const matched = pending.has(payload.FullName);
-    log?.info(`TestFinished: "${payload.FullName}" status=${payload.TestStatus} match=${matched}`);
     if (!matched) {
-      // RunFinished repeats completed leaves; only non-leaf nodes need aggregate reporting here.
-      if (expectedFullNames?.has(payload.FullName)) {
+      // Only the final tree reports aggregates, and each parent is reported once.
+      if (!reportParentResults || expectedFullNames?.has(payload.FullName) || reportedParents?.has(payload.FullName)) {
         continue;
       }
-      // Also try to report parent items that were enqueued
       const parentItem = itemByFullName?.get(payload.FullName);
       if (parentItem && payload.TestStatus !== undefined) {
         const st = mapTestStatus(payload.TestStatus);
         if (st === 'passed') run.passed(parentItem);
         else if (st === 'failed') run.failed(parentItem, new vscode.TestMessage(payload.ResultState || ''));
         else if (st === 'skipped') run.skipped(parentItem);
+        reportedParents?.add(payload.FullName);
       }
       continue;
     }
@@ -187,8 +195,6 @@ function handleTestFinished(
     const item = itemByFullName?.get(payload.FullName)
       ?? { id: `unity:${payload.FullName}`, label: payload.Name } as vscode.TestItem;
     const status = mapTestStatus(payload.TestStatus);
-    log?.info(`→ reporting as "${status}" pendingLeft=${pending.size}`);
-
     switch (status) {
       case 'passed': run.passed(item); break;
       case 'failed': {

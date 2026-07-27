@@ -18,6 +18,12 @@ import {
   unityIdeMessageTypeTestListRetrieved,
   unityIdeMessageTypeRetrieveTestList
 } from '../../unity/visualStudioMessaging';
+import type { UnityTestExecutionBatch, UnityTestMode } from '../../features/unity-test-runner/testModel';
+
+/** Creates the IDE-supported test-name batch used by protocol fixtures. */
+function testNameBatch(mode: UnityTestMode, fullName: string): UnityTestExecutionBatch {
+  return { mode, scope: { kind: 'testName', value: fullName }, expectedFullNames: [fullName] };
+}
 
 class MockExecutionBridge implements UnityTestBridgeClient {
   readonly connected = true;
@@ -158,6 +164,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
           label: 'EditTest',
           fullName: 'Tests.EditTest',
           assembly: 'Tests.dll',
+          executionScope: { kind: 'testName', value: 'Tests.EditTest' },
           kind: 'method',
           children: []
         }],
@@ -166,6 +173,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
           label: 'PlayTest',
           fullName: 'Tests.PlayTest',
           assembly: 'Tests.dll',
+          executionScope: { kind: 'testName', value: 'Tests.PlayTest' },
           kind: 'method',
           children: []
         }]
@@ -200,7 +208,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
       const execution = backend.run({
         projectRoot: 'C:/Unity/First',
         run: createMockRun(state),
-        batches: [{ mode: 'EditMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
+        batches: [testNameBatch('EditMode', name)],
         token: cancellation.token,
         itemByFullName: new Map([[name, item]])
       });
@@ -218,7 +226,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
       await backend.run({
         projectRoot: 'C:/Unity/Second',
         run: createMockRun(state),
-        batches: [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
+        batches: [testNameBatch('PlayMode', name)],
         token: cancelled.token,
         itemByFullName: new Map([[name, item]])
       });
@@ -252,12 +260,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
         backend.run({
           projectRoot: 'C:/Unity/Unavailable',
           run: createMockRun(state),
-          batches: [{
-            mode: 'EditMode',
-            fullName: 'Tests.Sample.Unavailable',
-            expectedFullNames: ['Tests.Sample.Unavailable'],
-            includeExplicit: false
-          }],
+          batches: [testNameBatch('EditMode', 'Tests.Sample.Unavailable')],
           token: cancellation.token
         }),
         /Project endpoint unavailable/
@@ -285,7 +288,7 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
+        [testNameBatch('EditMode', name)],
         cancellation.token,
         undefined,
         new Map([[name, item]]),
@@ -322,12 +325,7 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        [{
-          mode: 'EditMode',
-          fullName: 'Tests.Sample.Cancelled',
-          expectedFullNames: ['Tests.Sample.Cancelled'],
-          includeExplicit: false
-        }],
+        [testNameBatch('EditMode', 'Tests.Sample.Cancelled')],
         cancellation.token,
         undefined,
         undefined,
@@ -354,7 +352,7 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
+        [testNameBatch('EditMode', name)],
         cancellation.token,
         undefined,
         new Map([[name, item]]),
@@ -386,7 +384,7 @@ suite('unityTestExecution - protocol fixture', () => {
         executeUnityTests(
           bridge,
           createMockRun(state),
-          [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
+          [testNameBatch('PlayMode', name)],
           cancellation.token,
           undefined,
           new Map([[name, item]]),
@@ -416,8 +414,8 @@ suite('unityTestExecution - protocol fixture', () => {
         bridge,
         createMockRun(state),
         [
-          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName], includeExplicit: false },
-          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName], includeExplicit: false }
+          testNameBatch('EditMode', firstName),
+          testNameBatch('EditMode', secondName)
         ],
         cancellation.token,
         undefined,
@@ -466,8 +464,8 @@ suite('unityTestExecution - protocol fixture', () => {
         bridge,
         createMockRun(state),
         [
-          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName], includeExplicit: false },
-          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName], includeExplicit: false }
+          testNameBatch('EditMode', firstName),
+          testNameBatch('EditMode', secondName)
         ],
         cancellation.token,
         undefined,

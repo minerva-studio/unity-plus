@@ -36,8 +36,17 @@ export interface UnityCliTestResult {
 
 /** Result of converting shared selections into safe Pipeline filter batches. */
 export interface UnityCliBatchPreparation {
-  readonly batches: readonly UnityTestExecutionBatch[];
+  readonly batches: readonly UnityCliExecutionBatch[];
   readonly error?: string;
+}
+
+/** A CLI-ready batch with Pipeline-specific filter and explicit-test options. */
+export interface UnityCliExecutionBatch {
+  readonly mode: UnityTestMode;
+  readonly filter?: string;
+  readonly filterType?: 'assembly' | 'testName';
+  readonly expectedFullNames: readonly string[];
+  readonly includeExplicit: boolean;
 }
 
 /** Parses a successful list_tests envelope and its exact data.result.Tests array. */
@@ -117,14 +126,20 @@ export function parseUnityCliCancel(raw: string): void {
 /** Matches Pipeline's case-insensitive FullName substring filter exactly enough for preflight. */
 export function matchPipelineFilter(
   tests: readonly UnityCliTestCase[],
-  batch: UnityTestExecutionBatch
+  batch: UnityCliExecutionBatch
 ): readonly UnityCliTestCase[] {
-  const needle = batch.fullName.toLocaleLowerCase();
-  return tests.filter(test =>
-    test.mode === batch.mode &&
-    test.fullName.toLocaleLowerCase().includes(needle) &&
-    (batch.includeExplicit || !test.explicit)
-  );
+  return tests.filter(test => {
+    if (test.mode !== batch.mode || (!batch.includeExplicit && test.explicit)) {
+      return false;
+    }
+    if (!batch.filter) {
+      return true;
+    }
+
+    const value = batch.filter.toLocaleLowerCase();
+    const candidate = batch.filterType === 'assembly' ? test.assembly : test.fullName;
+    return candidate.toLocaleLowerCase().includes(value);
+  });
 }
 
 /** Prepares safe Pipeline batches, splitting an over-broad parent scope into leaves. */
@@ -133,15 +148,20 @@ export function prepareUnityCliBatches(
   editTests: readonly UnityCliTestCase[],
   playTests: readonly UnityCliTestCase[]
 ): UnityCliBatchPreparation {
-  const prepared: UnityTestExecutionBatch[] = [];
+  const prepared: UnityCliExecutionBatch[] = [];
   for (const batch of batches) {
     const tests = batch.mode === 'EditMode' ? editTests : playTests;
     const expectedNames = new Set(batch.expectedFullNames);
     const expectedTests = tests.filter(test => expectedNames.has(test.fullName));
-    const effectiveBatch = {
-      ...batch,
-      includeExplicit: batch.includeExplicit || expectedTests.some(test => test.explicit)
-    };
+    if (expectedTests.length !== expectedNames.size) {
+      const missing = batch.expectedFullNames.find(fullName => !tests.some(test => test.fullName === fullName));
+      return {
+        batches: [],
+        error: `Unity CLI selection was rejected before dispatch because expected test "${missing}" was not present in the latest discovery snapshot.`
+      };
+    }
+
+    const effectiveBatch = createCliExecutionBatch(batch, expectedTests.some(test => test.explicit));
 
     const parentMatch = compareBatchMatch(tests, effectiveBatch);
     if (parentMatch.safe) {
@@ -162,9 +182,10 @@ export function prepareUnityCliBatches(
         };
       }
 
-      const leafBatch: UnityTestExecutionBatch = {
+      const leafBatch: UnityCliExecutionBatch = {
         mode: batch.mode,
-        fullName,
+        filter: fullName,
+        filterType: 'testName',
         expectedFullNames: [fullName],
         includeExplicit: expectedTest.explicit
       };
@@ -177,6 +198,32 @@ export function prepareUnityCliBatches(
   }
 
   return { batches: prepared };
+}
+
+/** Converts a shared logical scope into the corresponding Pipeline command filter. */
+function createCliExecutionBatch(
+  batch: UnityTestExecutionBatch,
+  includeExplicit: boolean
+): UnityCliExecutionBatch {
+  if (batch.scope.kind === 'mode') {
+    return { mode: batch.mode, expectedFullNames: batch.expectedFullNames, includeExplicit };
+  }
+  if (batch.scope.kind === 'assembly') {
+    return {
+      mode: batch.mode,
+      filter: batch.scope.value,
+      filterType: 'assembly',
+      expectedFullNames: batch.expectedFullNames,
+      includeExplicit
+    };
+  }
+  return {
+    mode: batch.mode,
+    filter: batch.scope.value,
+    filterType: 'testName',
+    expectedFullNames: batch.expectedFullNames,
+    includeExplicit
+  };
 }
 
 /** Returns a stable leaf label from a full test name. */
@@ -272,7 +319,7 @@ function parseTestResults(record: JsonRecord): UnityCliTestResult[] {
 /** Compares one Pipeline substring filter with the exact expected logical leaves. */
 function compareBatchMatch(
   tests: readonly UnityCliTestCase[],
-  batch: UnityTestExecutionBatch
+  batch: UnityCliExecutionBatch
 ): { safe: boolean; message: string } {
   const matched = matchPipelineFilter(tests, batch);
   const expected = new Set(batch.expectedFullNames);
@@ -292,7 +339,7 @@ function compareBatchMatch(
     : '';
   return {
     safe: false,
-    message: `Unity CLI selection was rejected before dispatch because Pipeline substring filter "${batch.fullName}" matched an unsafe set.${extraText}${missingText}`
+    message: `Unity CLI selection was rejected before dispatch because Pipeline ${batch.filterType ?? 'mode'} filter "${batch.filter ?? '(none)'}" matched an unsafe set.${extraText}${missingText}`
   };
 }
 

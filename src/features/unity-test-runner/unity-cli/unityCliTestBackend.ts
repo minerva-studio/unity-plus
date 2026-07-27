@@ -5,7 +5,6 @@ import type {
   UnityTestBackendRunRequest,
   UnityTestDiscoveryResult
 } from '../unityTestBackend';
-import type { UnityTestExecutionBatch } from '../testModel';
 import { buildUnityCliTestTree } from './unityCliTree';
 import {
   parseUnityCliCancel,
@@ -15,7 +14,8 @@ import {
   prepareUnityCliBatches,
   type UnityCliTestCase,
   type UnityCliTestResult,
-  type UnityCliTestStatus
+  type UnityCliTestStatus,
+  type UnityCliExecutionBatch
 } from './unityCliProtocol';
 import {
   runUnityCliCommand,
@@ -138,25 +138,27 @@ function buildGlobalArgs(projectRoot: string, commandArgs: readonly string[]): s
 /** Runs one validated batch and polls its run-free Pipeline status to a terminal state. */
 async function runCliBatch(
   request: UnityTestBackendRunRequest,
-  batch: UnityTestExecutionBatch,
+  batch: UnityCliExecutionBatch,
   logger: UnityPlusLogger,
   isCancelled: () => boolean,
   cancellation: { sendCancel: () => Promise<void> }
 ): Promise<void> {
   const mode = batch.mode === 'EditMode' ? 'editor' : 'playmode';
-  const runRaw = await runUnityCliCommand(request.projectRoot, buildGlobalArgs(request.projectRoot, [
+  const commandArgs = [
     'run_tests',
     '--mode',
-    mode,
-    '--filter',
-    batch.fullName,
-    '--filter_type',
-    'testName',
+    mode
+  ];
+  if (batch.filter && batch.filterType) {
+    commandArgs.push('--filter', batch.filter, '--filter_type', batch.filterType);
+  }
+  commandArgs.push(
     '--include_explicit',
     String(batch.includeExplicit),
     '--async_tests',
     'true'
-  ]), logger);
+  );
+  const runRaw = await runUnityCliCommand(request.projectRoot, buildGlobalArgs(request.projectRoot, commandArgs), logger);
   parseUnityCliRunStarted(runRaw);
 
   let cancelIssued = false;
@@ -184,7 +186,7 @@ async function runCliBatch(
 function reportCliTerminalStatus(
   run: vscode.TestRun,
   itemByFullName: ReadonlyMap<string, vscode.TestItem> | undefined,
-  batch: UnityTestExecutionBatch,
+  batch: UnityCliExecutionBatch,
   status: UnityCliTestStatus
 ): void {
   if (status.status === 'cancelled') {

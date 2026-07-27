@@ -98,7 +98,13 @@ describe('Unity CLI protocol', () => {
     const result = prepareUnityCliBatches([parentBatch('Tests.Fixture', ['Tests.Fixture.A', 'Tests.Fixture.B'])], tests, []);
 
     assert.strictEqual(result.error, undefined);
-    assert.deepStrictEqual(result.batches, [parentBatch('Tests.Fixture', ['Tests.Fixture.A', 'Tests.Fixture.B'])]);
+    assert.deepStrictEqual(result.batches, [{
+      mode: 'EditMode',
+      filter: 'Tests.Fixture',
+      filterType: 'testName',
+      expectedFullNames: ['Tests.Fixture.A', 'Tests.Fixture.B'],
+      includeExplicit: false
+    }]);
   });
 
   it('splits an unsafe parent batch into safe leaves in order', () => {
@@ -110,7 +116,7 @@ describe('Unity CLI protocol', () => {
     const result = prepareUnityCliBatches([parentBatch('Tests.Fixture', ['Tests.Fixture.A', 'Tests.Fixture.B'])], tests, []);
 
     assert.strictEqual(result.error, undefined);
-    assert.deepStrictEqual(result.batches.map(batch => batch.fullName), ['Tests.Fixture.A', 'Tests.Fixture.B']);
+    assert.deepStrictEqual(result.batches.map(batch => batch.filter), ['Tests.Fixture.A', 'Tests.Fixture.B']);
     assert.deepStrictEqual(result.batches.map(batch => batch.expectedFullNames), [
       ['Tests.Fixture.A'],
       ['Tests.Fixture.B']
@@ -141,6 +147,41 @@ describe('Unity CLI protocol', () => {
     assert.match(result.error ?? '', /unsafe set/);
     assert.strictEqual(result.batches.length, 0);
   });
+
+  it('maps assembly and mode scopes to their native Pipeline filters', () => {
+    const tests = [
+      cliTest('Tests.One.A', false, 'One.dll'),
+      cliTest('Tests.Two.B', false, 'Two.dll')
+    ];
+    const assembly = prepareUnityCliBatches([{
+      mode: 'EditMode',
+      scope: { kind: 'assembly', value: 'One.dll' },
+      expectedFullNames: ['Tests.One.A']
+    }], tests, []);
+    const mode = prepareUnityCliBatches([{
+      mode: 'EditMode',
+      scope: { kind: 'mode' },
+      expectedFullNames: ['Tests.One.A', 'Tests.Two.B']
+    }], tests, []);
+
+    assert.deepStrictEqual(assembly.batches[0], {
+      mode: 'EditMode', filter: 'One.dll', filterType: 'assembly',
+      expectedFullNames: ['Tests.One.A'], includeExplicit: false
+    });
+    assert.deepStrictEqual(mode.batches[0], {
+      mode: 'EditMode', expectedFullNames: ['Tests.One.A', 'Tests.Two.B'], includeExplicit: false
+    });
+  });
+
+  it('splits an ambiguous namespace while preserving its intended leaves', () => {
+    const result = prepareUnityCliBatches([parentBatch('Tests.Combat', ['Tests.Combat.A'])], [
+      cliTest('Tests.Combat.A'),
+      cliTest('Tests.CombatExtra.A')
+    ], []);
+
+    assert.strictEqual(result.error, undefined);
+    assert.deepStrictEqual(result.batches.map(batch => batch.filter), ['Tests.Combat.A']);
+  });
 });
 
 function createStatusEnvelope(result: Record<string, unknown>): string {
@@ -163,10 +204,10 @@ function createObjectEnvelope(result: Record<string, unknown>): string {
   });
 }
 
-function cliTest(fullName: string, explicit = false): UnityCliTestCase {
+function cliTest(fullName: string, explicit = false, assembly = 'Tests.dll'): UnityCliTestCase {
   return {
     mode: 'EditMode',
-    assembly: 'Tests.dll',
+    assembly,
     fullName,
     label: fullName.split('.').at(-1) ?? fullName,
     categories: [],
@@ -177,8 +218,7 @@ function cliTest(fullName: string, explicit = false): UnityCliTestCase {
 function parentBatch(fullName: string, expectedFullNames: readonly string[]): UnityTestExecutionBatch {
   return {
     mode: 'EditMode',
-    fullName,
-    expectedFullNames,
-    includeExplicit: false
+    scope: { kind: 'testName', value: fullName },
+    expectedFullNames
   };
 }
