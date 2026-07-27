@@ -34,6 +34,12 @@ export interface UnityCliTestResult {
   readonly stackTrace?: string;
 }
 
+/** Result of converting shared selections into safe Pipeline filter batches. */
+export interface UnityCliBatchPreparation {
+  readonly batches: readonly UnityTestExecutionBatch[];
+  readonly error?: string;
+}
+
 /** Parses a successful list_tests envelope and its exact data.result.Tests array. */
 export function parseUnityCliDiscovery(raw: string): UnityCliDiscoveryData {
   const result = parseSuccessfulResult(raw, 'list_tests');
@@ -83,21 +89,29 @@ export function parseUnityCliTestStatus(raw: string): UnityCliTestStatus {
   }
 
   const nested = parseJsonRecord(outer.result, 'test_status.data.result');
-  const statusValue = readRequiredString(nested, 'Status', 'test_status result').toLowerCase();
+  const statusValue = readRequiredString(nested, 'status', 'test_status result').toLowerCase();
   if (!isUnityCliTestStatus(statusValue)) {
     throw new UnityCliCommandError(`Unity CLI test_status returned unsupported status "${statusValue}".`);
+  }
+  if (statusValue === 'completed' && !Array.isArray(nested.results)) {
+    throw new UnityCliCommandError('Unity CLI completed test_status result is missing results.');
   }
 
   return {
     status: statusValue,
-    message: readOptionalString(nested, 'Message'),
+    message: readNullableString(nested, 'message'),
     results: parseTestResults(nested)
   };
 }
 
 /** Parses a successful cancel_tests envelope. */
 export function parseUnityCliCancel(raw: string): void {
-  parseSuccessfulResult(raw, 'cancel_tests');
+  const outer = parseOuterSuccess(raw, 'cancel_tests');
+  const result = asRecord(outer.result, 'cancel_tests.data.result');
+  const status = readRequiredString(result, 'status', 'cancel_tests result');
+  if (status !== 'cancelled' && status !== 'no_tests') {
+    throw new UnityCliCommandError(`Unity CLI cancel_tests returned unsupported status "${status}".`);
+  }
 }
 
 /** Matches Pipeline's case-insensitive FullName substring filter exactly enough for preflight. */
@@ -111,6 +125,58 @@ export function matchPipelineFilter(
     test.fullName.toLocaleLowerCase().includes(needle) &&
     (batch.includeExplicit || !test.explicit)
   );
+}
+
+/** Prepares safe Pipeline batches, splitting an over-broad parent scope into leaves. */
+export function prepareUnityCliBatches(
+  batches: readonly UnityTestExecutionBatch[],
+  editTests: readonly UnityCliTestCase[],
+  playTests: readonly UnityCliTestCase[]
+): UnityCliBatchPreparation {
+  const prepared: UnityTestExecutionBatch[] = [];
+  for (const batch of batches) {
+    const tests = batch.mode === 'EditMode' ? editTests : playTests;
+    const expectedNames = new Set(batch.expectedFullNames);
+    const expectedTests = tests.filter(test => expectedNames.has(test.fullName));
+    const effectiveBatch = {
+      ...batch,
+      includeExplicit: batch.includeExplicit || expectedTests.some(test => test.explicit)
+    };
+
+    const parentMatch = compareBatchMatch(tests, effectiveBatch);
+    if (parentMatch.safe) {
+      prepared.push(effectiveBatch);
+      continue;
+    }
+
+    if (batch.expectedFullNames.length === 0) {
+      return { batches: [], error: parentMatch.message };
+    }
+
+    for (const fullName of batch.expectedFullNames) {
+      const expectedTest = tests.find(test => test.fullName === fullName);
+      if (!expectedTest) {
+        return {
+          batches: [],
+          error: `Unity CLI selection was rejected before dispatch because expected test "${fullName}" was not present in the latest discovery snapshot.`
+        };
+      }
+
+      const leafBatch: UnityTestExecutionBatch = {
+        mode: batch.mode,
+        fullName,
+        expectedFullNames: [fullName],
+        includeExplicit: expectedTest.explicit
+      };
+      const leafMatch = compareBatchMatch(tests, leafBatch);
+      if (!leafMatch.safe) {
+        return { batches: [], error: leafMatch.message };
+      }
+      prepared.push(leafBatch);
+    }
+  }
+
+  return { batches: prepared };
 }
 
 /** Returns a stable leaf label from a full test name. */
@@ -177,7 +243,7 @@ function mergeCliTestCase(current: MutableCliTestCase, record: JsonRecord): void
 
 /** Parses result records from a terminal status payload. */
 function parseTestResults(record: JsonRecord): UnityCliTestResult[] {
-  const values = record.Tests;
+  const values = record.results;
   if (values === undefined) {
     return [];
   }
@@ -191,15 +257,43 @@ function parseTestResults(record: JsonRecord): UnityCliTestResult[] {
     if (typeof duration !== 'number' || !Number.isFinite(duration)) {
       throw new UnityCliCommandError('Unity CLI test_status result contains invalid Duration.');
     }
+    const fullName = readRequiredString(result, 'FullName', 'test_status test');
     return {
-      fullName: readRequiredString(result, 'FullName', 'test_status test'),
-      label: readOptionalString(result, 'Name') ?? getLeafLabel(readRequiredString(result, 'FullName', 'test_status test')),
-      status: readRequiredString(result, 'TestStatus', 'test_status test'),
+      fullName,
+      label: getLeafLabel(fullName),
+      status: readRequiredString(result, 'Status', 'test_status test'),
       durationSeconds: duration,
-      message: readOptionalString(result, 'ResultState'),
-      stackTrace: readOptionalString(result, 'StackTrace')
+      message: readNullableString(result, 'Message'),
+      stackTrace: readNullableString(result, 'StackTrace')
     };
   });
+}
+
+/** Compares one Pipeline substring filter with the exact expected logical leaves. */
+function compareBatchMatch(
+  tests: readonly UnityCliTestCase[],
+  batch: UnityTestExecutionBatch
+): { safe: boolean; message: string } {
+  const matched = matchPipelineFilter(tests, batch);
+  const expected = new Set(batch.expectedFullNames);
+  const actual = new Set(matched.map(test => test.fullName));
+  const extra = [...actual].filter(fullName => !expected.has(fullName));
+  const missing = [...expected].filter(fullName => !actual.has(fullName));
+  if (extra.length === 0 && missing.length === 0) {
+    return { safe: true, message: '' };
+  }
+
+  const examples = extra.slice(0, 3);
+  const extraText = examples.length > 0
+    ? ` Extra matches: ${examples.join(', ')}${extra.length > examples.length ? ', ...' : ''}.`
+    : '';
+  const missingText = missing.length > 0
+    ? ` Missing expected leaves: ${missing.slice(0, 3).join(', ')}.`
+    : '';
+  return {
+    safe: false,
+    message: `Unity CLI selection was rejected before dispatch because Pipeline substring filter "${batch.fullName}" matched an unsafe set.${extraText}${missingText}`
+  };
 }
 
 /** Validates top-level/data/result success fields and returns the object result. */
@@ -259,6 +353,18 @@ function readRequiredString(record: JsonRecord, field: string, description: stri
 function readOptionalString(record: JsonRecord, field: string): string | undefined {
   const value = record[field];
   if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw new UnityCliCommandError(`Unity CLI response contains invalid string field ${field}.`);
+  }
+  return value;
+}
+
+/** Reads a nullable optional string from Pipeline result records. */
+function readNullableString(record: JsonRecord, field: string): string | undefined {
+  const value = record[field];
+  if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value !== 'string') {

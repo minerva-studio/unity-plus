@@ -8,11 +8,11 @@ import type {
 import type { UnityTestExecutionBatch } from '../testModel';
 import { buildUnityCliTestTree } from './unityCliTree';
 import {
-  matchPipelineFilter,
   parseUnityCliCancel,
   parseUnityCliDiscovery,
   parseUnityCliRunStarted,
   parseUnityCliTestStatus,
+  prepareUnityCliBatches,
   type UnityCliTestCase,
   type UnityCliTestResult,
   type UnityCliTestStatus
@@ -68,9 +68,16 @@ export class UnityCliTestBackend implements UnityTestBackend {
       throw new UnityCliCommandError('Refresh Unity CLI tests before running a selection.');
     }
 
-    const validationError = validateBatches(request.projectRoot, request.batches, snapshot);
-    if (validationError) {
-      markAllItemsErrored(request.run, request.itemByFullName, validationError);
+    if (snapshot.projectRoot !== request.projectRoot) {
+      const message = 'Unity CLI discovery belongs to a different Unity project; refresh the test tree before running.';
+      markAllItemsErrored(request.run, request.itemByFullName, message);
+      request.run.end();
+      return;
+    }
+
+    const preparation = prepareUnityCliBatches(request.batches, snapshot.edit, snapshot.play);
+    if (preparation.error) {
+      markAllItemsErrored(request.run, request.itemByFullName, preparation.error);
       request.run.end();
       return;
     }
@@ -82,7 +89,7 @@ export class UnityCliTestBackend implements UnityTestBackend {
     });
 
     try {
-      for (const batch of request.batches) {
+      for (const batch of preparation.batches) {
         if (cancellationRequested || request.token.isCancellationRequested) {
           break;
         }
@@ -126,39 +133,6 @@ function buildGlobalArgs(projectRoot: string, commandArgs: readonly string[]): s
     projectRoot,
     ...commandArgs
   ];
-}
-
-/** Validates every batch against the latest discovery snapshot without dispatching any command. */
-function validateBatches(
-  projectRoot: string,
-  batches: readonly UnityTestExecutionBatch[],
-  snapshot: CliDiscoverySnapshot
-): string | undefined {
-  if (snapshot.projectRoot !== projectRoot) {
-    return 'Unity CLI discovery belongs to a different Unity project; refresh the test tree before running.';
-  }
-
-  for (const batch of batches) {
-    const tests = batch.mode === 'EditMode' ? snapshot.edit : snapshot.play;
-    const matched = matchPipelineFilter(tests, batch);
-    const expected = new Set(batch.expectedFullNames);
-    const actual = new Set(matched.map(test => test.fullName));
-    const extra = [...actual].filter(fullName => !expected.has(fullName));
-    const missing = [...expected].filter(fullName => !actual.has(fullName));
-    if (extra.length === 0 && missing.length === 0) {
-      continue;
-    }
-
-    const examples = extra.slice(0, 3);
-    const extraText = examples.length > 0
-      ? ` Extra matches: ${examples.join(', ')}${extra.length > examples.length ? ', ...' : ''}.`
-      : '';
-    const missingText = missing.length > 0
-      ? ` Missing expected leaves: ${missing.slice(0, 3).join(', ')}.`
-      : '';
-    return `Unity CLI selection was rejected before dispatch because Pipeline substring filter "${batch.fullName}" matched an unsafe set.${extraText}${missingText}`;
-  }
-  return undefined;
 }
 
 /** Runs one validated batch and polls its run-free Pipeline status to a terminal state. */
