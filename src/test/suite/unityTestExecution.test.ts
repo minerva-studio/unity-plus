@@ -153,8 +153,22 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
       );
 
       assert.deepStrictEqual(await discovery, {
-        editModeTests: [editTest],
-        playModeTests: [playTest]
+        editModeTests: [{
+          id: 'edit',
+          label: 'EditTest',
+          fullName: 'Tests.EditTest',
+          assembly: 'Tests.dll',
+          kind: 'method',
+          children: []
+        }],
+        playModeTests: [{
+          id: 'play',
+          label: 'PlayTest',
+          fullName: 'Tests.PlayTest',
+          assembly: 'Tests.dll',
+          kind: 'method',
+          children: []
+        }]
       });
       assert.deepStrictEqual(bridge.connectedProjectRoots, ['C:/Unity/Project']);
     } finally {
@@ -186,7 +200,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
       const execution = backend.run({
         projectRoot: 'C:/Unity/First',
         run: createMockRun(state),
-        batches: [{ mode: 'EditMode', fullName: name, expectedFullNames: [name] }],
+        batches: [{ mode: 'EditMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
         token: cancellation.token,
         itemByFullName: new Map([[name, item]])
       });
@@ -204,7 +218,7 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
       await backend.run({
         projectRoot: 'C:/Unity/Second',
         run: createMockRun(state),
-        batches: [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name] }],
+        batches: [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
         token: cancelled.token,
         itemByFullName: new Map([[name, item]])
       });
@@ -241,7 +255,8 @@ suite('IdePackageUnityTestBackend - protocol fixture', () => {
           batches: [{
             mode: 'EditMode',
             fullName: 'Tests.Sample.Unavailable',
-            expectedFullNames: ['Tests.Sample.Unavailable']
+            expectedFullNames: ['Tests.Sample.Unavailable'],
+            includeExplicit: false
           }],
           token: cancellation.token
         }),
@@ -270,7 +285,7 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name] }],
+        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
         cancellation.token,
         undefined,
         new Map([[name, item]]),
@@ -310,7 +325,8 @@ suite('unityTestExecution - protocol fixture', () => {
         [{
           mode: 'EditMode',
           fullName: 'Tests.Sample.Cancelled',
-          expectedFullNames: ['Tests.Sample.Cancelled']
+          expectedFullNames: ['Tests.Sample.Cancelled'],
+          includeExplicit: false
         }],
         cancellation.token,
         undefined,
@@ -338,7 +354,7 @@ suite('unityTestExecution - protocol fixture', () => {
       const execution = executeUnityTests(
         bridge,
         createMockRun(state),
-        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name] }],
+        [{ mode: 'EditMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
         cancellation.token,
         undefined,
         new Map([[name, item]]),
@@ -370,7 +386,7 @@ suite('unityTestExecution - protocol fixture', () => {
         executeUnityTests(
           bridge,
           createMockRun(state),
-          [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name] }],
+          [{ mode: 'PlayMode', fullName: name, expectedFullNames: [name], includeExplicit: false }],
           cancellation.token,
           undefined,
           new Map([[name, item]]),
@@ -400,8 +416,8 @@ suite('unityTestExecution - protocol fixture', () => {
         bridge,
         createMockRun(state),
         [
-          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName] },
-          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName] }
+          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName], includeExplicit: false },
+          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName], includeExplicit: false }
         ],
         cancellation.token,
         undefined,
@@ -450,8 +466,8 @@ suite('unityTestExecution - protocol fixture', () => {
         bridge,
         createMockRun(state),
         [
-          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName] },
-          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName] }
+          { mode: 'EditMode', fullName: firstName, expectedFullNames: [firstName], includeExplicit: false },
+          { mode: 'EditMode', fullName: secondName, expectedFullNames: [secondName], includeExplicit: false }
         ],
         cancellation.token,
         undefined,

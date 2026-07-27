@@ -15,9 +15,13 @@ import {
   decodeUnityIdeMessage
 } from '../unity/visualStudioMessaging';
 import {
-  buildUnityTestTree,
   type UnityTestInfo
 } from '../features/unity-test-runner/ide-package/testModel';
+import { mapUnityTestAdaptorsToNodes } from '../features/unity-test-runner/ide-package/testTree';
+import {
+  collectUnityTestLeafFullNames,
+  flattenUnityTestNodes
+} from '../features/unity-test-runner/testTree';
 import { parseTestListResponse } from '../features/unity-test-runner/ide-package/testDiscovery';
 import { discoverUnityTests } from '../features/unity-test-runner/ide-package/testDiscovery';
 import {
@@ -193,8 +197,8 @@ describe('unityTestBridge', () => {
   });
 });
 
-describe('testModel', () => {
-  describe('buildUnityTestTree', () => {
+describe('testTree', () => {
+  describe('mapUnityTestAdaptorsToNodes', () => {
     it('builds a tree from flat test list', () => {
       const tests: UnityTestInfo[] = [
         { Id: '1', Name: 'RootSuite', FullName: 'RootSuite', Type: '', Method: '', Assembly: 'Test.dll', Parent: -1 },
@@ -202,15 +206,16 @@ describe('testModel', () => {
         { Id: '3', Name: 'LeafTest', FullName: 'RootSuite.ChildTest.LeafTest', Type: '', Method: 'LeafTest', Assembly: 'Test.dll', Parent: 1 }
       ];
 
-      const tree = buildUnityTestTree(tests);
+      const roots = mapUnityTestAdaptorsToNodes(tests);
 
-      assert.strictEqual(tree.roots.length, 1);
-      assert.strictEqual(tree.roots[0].Id, '1');
-      assert.strictEqual(tree.byId.size, 3);
-      assert.strictEqual(tree.childrenByParent.get(0)?.length, 1);
-      assert.strictEqual(tree.childrenByParent.get(0)?.[0].Id, '2');
-      assert.strictEqual(tree.childrenByParent.get(1)?.length, 1);
-      assert.strictEqual(tree.childrenByParent.get(1)?.[0].Id, '3');
+      assert.strictEqual(roots.length, 1);
+      assert.strictEqual(roots[0].id, '1');
+      assert.strictEqual(roots[0].children.length, 1);
+      assert.strictEqual(roots[0].children[0].id, '2');
+      assert.strictEqual(roots[0].children[0].children.length, 1);
+      assert.strictEqual(roots[0].children[0].children[0].id, '3');
+      assert.deepStrictEqual(flattenUnityTestNodes(roots).map(node => node.id), ['1', '2', '3']);
+      assert.deepStrictEqual(collectUnityTestLeafFullNames(roots[0]), ['RootSuite.ChildTest.LeafTest']);
     });
 
     it('handles multiple root items', () => {
@@ -221,17 +226,16 @@ describe('testModel', () => {
         { Id: '4', Name: 'TestB', FullName: 'SuiteB.TestB', Type: '', Method: 'TestB', Assembly: 'Test.dll', Parent: 1 }
       ];
 
-      const tree = buildUnityTestTree(tests);
+      const roots = mapUnityTestAdaptorsToNodes(tests);
 
-      assert.strictEqual(tree.roots.length, 2);
-      assert.strictEqual(tree.childrenByParent.get(0)?.length, 1);
-      assert.strictEqual(tree.childrenByParent.get(1)?.length, 1);
+      assert.strictEqual(roots.length, 2);
+      assert.strictEqual(roots[0].children.length, 1);
+      assert.strictEqual(roots[1].children.length, 1);
     });
 
     it('handles empty list', () => {
-      const tree = buildUnityTestTree([]);
-      assert.strictEqual(tree.roots.length, 0);
-      assert.strictEqual(tree.byId.size, 0);
+      const roots = mapUnityTestAdaptorsToNodes([]);
+      assert.strictEqual(roots.length, 0);
     });
 
     it('handles orphan items (out-of-range parent index) by placing them at root', () => {
@@ -239,10 +243,10 @@ describe('testModel', () => {
         { Id: '1', Name: 'Orphan', FullName: 'Orphan', Type: '', Method: '', Assembly: 'Test.dll', Parent: 999 }
       ];
 
-      const tree = buildUnityTestTree(tests);
+      const roots = mapUnityTestAdaptorsToNodes(tests);
 
-      assert.strictEqual(tree.roots.length, 1);
-      assert.strictEqual(tree.roots[0].Id, '1');
+      assert.strictEqual(roots.length, 1);
+      assert.strictEqual(roots[0].id, '1');
     });
   });
 });

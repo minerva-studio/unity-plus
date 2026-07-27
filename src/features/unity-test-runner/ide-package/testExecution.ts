@@ -7,20 +7,12 @@ import {
   unityIdeMessageTypeTestFinished
 } from '../../../unity/visualStudioMessaging';
 import type { UnityTestBridgeClient } from './unityTestBridge';
-import type {
-  UnityTestMode,
-  UnityTestResultContainer
-} from './testModel';
+import type { UnityTestResultContainer } from './testModel';
+import type { UnityTestExecutionBatch } from '../testModel';
 import { mapTestStatus } from './testModel';
 import type { UnityPlusLogger } from '../../../unity/logger';
 
 const defaultTestStartTimeoutMs = 8000;
-
-export interface UnityTestExecutionBatch {
-  mode: UnityTestMode;
-  fullName: string;
-  expectedFullNames: readonly string[];
-}
 
 export class UnityTestStartTimeoutError extends Error {
   /** Creates the explicit failure used when Unity accepts no test-run activity. */

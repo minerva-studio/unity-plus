@@ -2,8 +2,10 @@ import {
   unityIdeMessageTypeRetrieveTestList,
   unityIdeMessageTypeTestListRetrieved
 } from '../../../unity/visualStudioMessaging';
+import type { UnityTestDiscoveryResult } from '../testModel';
 import type { UnityTestBridgeClient } from './unityTestBridge';
 import type { UnityTestInfo, UnityTestAdaptorContainer } from './testModel';
+import { mapUnityTestAdaptorsToNodes } from './testTree';
 
 /**
  * Parses a TestListRetrieved message body.
@@ -41,7 +43,7 @@ export function parseTestListResponse(value: string):
 export function discoverUnityTests(
   bridge: UnityTestBridgeClient,
   timeoutMs = 8000
-): Promise<{ editModeTests: UnityTestInfo[]; playModeTests: UnityTestInfo[] }> {
+): Promise<UnityTestDiscoveryResult> {
   return new Promise((resolve, reject) => {
     const editModeTests: UnityTestInfo[] = [];
     const playModeTests: UnityTestInfo[] = [];
@@ -57,7 +59,10 @@ export function discoverUnityTests(
       }
 
       // Preserve a valid partial response if only one test mode is available.
-      resolve({ editModeTests, playModeTests });
+      resolve({
+        editModeTests: mapUnityTestAdaptorsToNodes(editModeTests),
+        playModeTests: mapUnityTestAdaptorsToNodes(playModeTests)
+      });
     }, timeoutMs);
 
     function cleanup(): void {
@@ -72,7 +77,10 @@ export function discoverUnityTests(
     function checkDone(): void {
       if (editReceived && playReceived) {
         cleanup();
-        resolve({ editModeTests, playModeTests });
+        resolve({
+          editModeTests: mapUnityTestAdaptorsToNodes(editModeTests),
+          playModeTests: mapUnityTestAdaptorsToNodes(playModeTests)
+        });
       }
     }
 

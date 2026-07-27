@@ -1,12 +1,10 @@
 import type * as vscode from 'vscode';
-import type { UnityTestExecutionBatch } from './ide-package/testExecution';
-import type { UnityTestInfo } from './ide-package/testModel';
+import type {
+  UnityTestDiscoveryResult,
+  UnityTestExecutionBatch
+} from './testModel';
 
-/** Result returned by the active Unity test backend after discovery. */
-export interface UnityTestDiscoveryResult {
-  editModeTests: UnityTestInfo[];
-  playModeTests: UnityTestInfo[];
-}
+export type { UnityTestDiscoveryResult } from './testModel';
 
 /** Existing execution context passed to one complete backend. */
 export interface UnityTestBackendRunRequest {

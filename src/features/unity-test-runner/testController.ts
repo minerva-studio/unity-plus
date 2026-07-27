@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
-import type { UnityTestInfo, UnityTestMode, UnityTestTree } from './ide-package/testModel';
-import { buildUnityTestTree } from './ide-package/testModel';
+import type { UnityTestMode, UnityTestNode } from './testModel';
 
 export const testControllerId = 'unity-plus-tests';
 export const testControllerLabel = 'Unity Tests';
@@ -20,10 +19,13 @@ export function createUnityTestController(
   // Route the Testing view's native refresh action through the same visible workflow.
   controller.refreshHandler = onRefresh;
 
-  function updateTestTree(editModeTests: UnityTestInfo[], playModeTests: UnityTestInfo[]): void {
+  function updateTestTree(
+    editModeTests: readonly UnityTestNode[],
+    playModeTests: readonly UnityTestNode[]
+  ): void {
     controller.items.replace([]);
-    controller.items.add(buildRoot(controller, 'EditMode', buildUnityTestTree(editModeTests)));
-    controller.items.add(buildRoot(controller, 'PlayMode', buildUnityTestTree(playModeTests)));
+    controller.items.add(buildRoot(controller, 'EditMode', editModeTests));
+    controller.items.add(buildRoot(controller, 'PlayMode', playModeTests));
   }
 
   return {
@@ -33,15 +35,18 @@ export function createUnityTestController(
   };
 }
 
-function buildRoot(ctrl: vscode.TestController, mode: UnityTestMode, tree: UnityTestTree): vscode.TestItem {
+function buildRoot(
+  ctrl: vscode.TestController,
+  mode: UnityTestMode,
+  nodes: readonly UnityTestNode[]
+): vscode.TestItem {
   const root = ctrl.createTestItem(`unity:${mode}`, mode, undefined);
-  for (const n of tree.roots) root.children.add(buildItem(ctrl, n, tree));
+  for (const node of nodes) root.children.add(buildItem(ctrl, node));
   return root;
 }
 
-function buildItem(ctrl: vscode.TestController, info: UnityTestInfo, tree: UnityTestTree): vscode.TestItem {
-  const item = ctrl.createTestItem(`unity:${info.Id}`, info.Name, undefined);
-  const kids = tree.childrenById.get(info.Id);
-  if (kids) for (const k of kids) item.children.add(buildItem(ctrl, k, tree));
+function buildItem(ctrl: vscode.TestController, node: UnityTestNode): vscode.TestItem {
+  const item = ctrl.createTestItem(`unity:${node.id}`, node.label, undefined);
+  for (const child of node.children) item.children.add(buildItem(ctrl, child));
   return item;
 }
