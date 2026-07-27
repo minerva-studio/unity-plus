@@ -214,6 +214,10 @@ describe('testTree', () => {
       assert.strictEqual(roots[0].children[0].id, '2');
       assert.strictEqual(roots[0].children[0].children.length, 1);
       assert.strictEqual(roots[0].children[0].children[0].id, '3');
+      assert.deepStrictEqual(roots[0].executionScope, { kind: 'testName', value: 'RootSuite' });
+      assert.deepStrictEqual(roots[0].children[0].executionScope, {
+        kind: 'testName', value: 'RootSuite.ChildTest'
+      });
       assert.deepStrictEqual(flattenUnityTestNodes(roots).map(node => node.id), ['1', '2', '3']);
       assert.deepStrictEqual(collectUnityTestLeafFullNames(roots[0]), ['RootSuite.ChildTest.LeafTest']);
     });
@@ -231,6 +235,21 @@ describe('testTree', () => {
       assert.strictEqual(roots.length, 2);
       assert.strictEqual(roots[0].children.length, 1);
       assert.strictEqual(roots[1].children.length, 1);
+    });
+
+    it('keeps namespaces as display containers and makes their fixtures executable scopes', () => {
+      const roots = mapUnityTestAdaptorsToNodes([
+        { Id: '1', Name: 'Tests', FullName: 'Tests', Type: '', Method: '', Assembly: 'Test.dll', Parent: -1 },
+        { Id: '2', Name: 'Combat', FullName: 'Tests.Combat', Type: '', Method: '', Assembly: 'Test.dll', Parent: 0 },
+        { Id: '3', Name: 'Fixture', FullName: 'Tests.Combat.Fixture', Type: '', Method: '', Assembly: 'Test.dll', Parent: 1 },
+        { Id: '4', Name: 'Passes', FullName: 'Tests.Combat.Fixture.Passes', Type: '', Method: 'Passes', Assembly: 'Test.dll', Parent: 2 }
+      ]);
+
+      assert.strictEqual(roots[0].executionScope, undefined);
+      assert.strictEqual(roots[0].children[0].executionScope, undefined);
+      assert.deepStrictEqual(roots[0].children[0].children[0].executionScope, {
+        kind: 'testName', value: 'Tests.Combat.Fixture'
+      });
     });
 
     it('handles empty list', () => {

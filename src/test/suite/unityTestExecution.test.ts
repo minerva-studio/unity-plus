@@ -77,6 +77,7 @@ interface MockRunState {
   errored: string[];
   passed: string[];
   passedItems?: vscode.TestItem[];
+  failureMessages?: string[];
 }
 
 /** Creates the smallest TestRun fixture needed to verify lifecycle behavior. */
@@ -89,7 +90,9 @@ function createMockRun(state: MockRunState): vscode.TestRun {
       state.passedItems?.push(item);
     },
     started: () => undefined,
-    failed: () => undefined,
+    failed: (_item: vscode.TestItem, message: vscode.TestMessage) => {
+      state.failureMessages?.push(String(message.message));
+    },
     skipped: () => undefined
   } as unknown as vscode.TestRun;
 }
@@ -100,17 +103,17 @@ function createTestItem(fullName: string): vscode.TestItem {
 }
 
 /** Creates the logger surface consumed by the backend and execution helper. */
-function createMockLogger(): UnityPlusLogger {
+function createMockLogger(messages: string[] = []): UnityPlusLogger {
   return {
-    info: () => undefined,
+    info: (message: string) => { messages.push(message); },
     warn: () => undefined
   } as unknown as UnityPlusLogger;
 }
 
 /** Lets async backend setup reach the expected number of protocol sends. */
 async function waitForSentCount(bridge: MockExecutionBridge, count: number): Promise<void> {
-  for (let attempt = 0; attempt < 10 && bridge.sent.length < count; attempt += 1) {
-    await Promise.resolve();
+  for (let attempt = 0; attempt < 20 && bridge.sent.length < count; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.strictEqual(bridge.sent.length, count);
 }
@@ -408,6 +411,7 @@ suite('unityTestExecution - protocol fixture', () => {
     const secondName = 'Tests.Sample.Second';
     const firstItem = createTestItem(firstName);
     const secondItem = createTestItem(secondName);
+    const logs: string[] = [];
 
     try {
       const execution = executeUnityTests(
@@ -418,7 +422,7 @@ suite('unityTestExecution - protocol fixture', () => {
           testNameBatch('EditMode', secondName)
         ],
         cancellation.token,
-        undefined,
+        createMockLogger(logs),
         new Map([[firstName, firstItem], [secondName, secondItem]]),
         1000
       );
@@ -438,6 +442,7 @@ suite('unityTestExecution - protocol fixture', () => {
         [`EditMode:${firstName}`, `EditMode:${secondName}`]
       );
       assert.deepStrictEqual(state.errored, []);
+      assert.strictEqual(state.ended, 0);
 
       bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
         TestResultAdaptors: [{ FullName: secondName, Name: 'Second', TestStatus: 0 }]
@@ -447,6 +452,8 @@ suite('unityTestExecution - protocol fixture', () => {
       assert.deepStrictEqual(state.passed, [firstItem.id, secondItem.id]);
       assert.deepStrictEqual(state.errored, []);
       assert.strictEqual(state.ended, 1);
+      assert.ok(logs.some(message => message.includes('executeBatch 1/2 mode=EditMode')));
+      assert.ok(logs.some(message => message.includes('batch 1/2 results expected=1 reported=1 missing=0')));
     } finally {
       cancellation.dispose();
     }
@@ -480,6 +487,75 @@ suite('unityTestExecution - protocol fixture', () => {
       await execution;
 
       assert.deepStrictEqual(bridge.sent.map(message => message.value), [`EditMode:${firstName}`]);
+      assert.strictEqual(state.ended, 1);
+    } finally {
+      cancellation.dispose();
+    }
+  });
+
+  test('waits for an EditMode batch before dispatching a PlayMode batch', async () => {
+    const bridge = new MockExecutionBridge();
+    const cancellation = new vscode.CancellationTokenSource();
+    const state: MockRunState = { ended: 0, errored: [], passed: [] };
+    const editName = 'Tests.Sample.Edit';
+    const playName = 'Tests.Sample.Play';
+
+    try {
+      const execution = executeUnityTests(
+        bridge,
+        createMockRun(state),
+        [testNameBatch('EditMode', editName), testNameBatch('PlayMode', playName)],
+        cancellation.token,
+        undefined,
+        undefined,
+        1000
+      );
+      await waitForSentCount(bridge, 1);
+      assert.deepStrictEqual(bridge.sent.map(message => message.value), [`EditMode:${editName}`]);
+
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: editName, Name: 'Edit', TestStatus: 0 }]
+      }));
+      await waitForSentCount(bridge, 2);
+      assert.deepStrictEqual(bridge.sent.map(message => message.value), [`EditMode:${editName}`, `PlayMode:${playName}`]);
+
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: playName, Name: 'Play', TestStatus: 0 }]
+      }));
+      await execution;
+      assert.strictEqual(state.ended, 1);
+    } finally {
+      cancellation.dispose();
+    }
+  });
+
+  test('explains failed results when the IDE Package omits failure details', async () => {
+    const bridge = new MockExecutionBridge();
+    const cancellation = new vscode.CancellationTokenSource();
+    const failureMessages: string[] = [];
+    const state: MockRunState = { ended: 0, errored: [], passed: [], failureMessages };
+    const name = 'Tests.Sample.FailedWithoutDetails';
+    const item = createTestItem(name);
+
+    try {
+      const execution = executeUnityTests(
+        bridge,
+        createMockRun(state),
+        [testNameBatch('EditMode', name)],
+        cancellation.token,
+        undefined,
+        new Map([[name, item]]),
+        1000
+      );
+
+      bridge.emit(unityIdeMessageTypeRunFinished, JSON.stringify({
+        TestResultAdaptors: [{ FullName: name, Name: 'FailedWithoutDetails', TestStatus: 3 }]
+      }));
+      await execution;
+
+      assert.deepStrictEqual(failureMessages, [
+        `${name}: Unity reported Failed, but the IDE Package provided no failure details.`
+      ]);
       assert.strictEqual(state.ended, 1);
     } finally {
       cancellation.dispose();

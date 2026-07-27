@@ -9,9 +9,7 @@ export function mapUnityTestAdaptorsToNodes(tests: readonly UnityTestInfo[]): Un
     label: test.Name,
     fullName: test.FullName || undefined,
     assembly: test.Assembly || undefined,
-    executionScope: test.FullName
-      ? { kind: 'testName' as const, value: test.FullName }
-      : undefined,
+    executionScope: undefined as UnityTestNode['executionScope'],
     kind: (test.Method ? 'method' : undefined) as UnityTestNode['kind'],
     children: childrenByIndex[index]
   }));
@@ -29,6 +27,13 @@ export function mapUnityTestAdaptorsToNodes(tests: readonly UnityTestInfo[]): Un
   for (const node of nodes) {
     if (node.children.length === 0 && !node.kind) {
       node.kind = 'case';
+    }
+  }
+
+  for (const node of nodes) {
+    // Unity's testNames filter accepts methods and fixtures, but not namespace containers.
+    if (node.fullName && (node.kind === 'method' || node.children.some(child => child.kind === 'method'))) {
+      node.executionScope = { kind: 'testName', value: node.fullName };
     }
   }
 

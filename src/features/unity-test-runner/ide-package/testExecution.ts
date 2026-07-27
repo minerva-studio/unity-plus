@@ -12,7 +12,8 @@ import type { UnityTestExecutionBatch } from '../testModel';
 import { mapTestStatus } from './testModel';
 import type { UnityPlusLogger } from '../../../unity/logger';
 
-const defaultTestStartTimeoutMs = 8000;
+const defaultTestStartTimeoutMs = 60000;
+const missingFailureDetails = 'Unity reported Failed, but the IDE Package provided no failure details.';
 
 export class UnityTestStartTimeoutError extends Error {
   /** Creates the explicit failure used when Unity accepts no test-run activity. */
@@ -48,6 +49,7 @@ export async function executeUnityTests(
     let cancelled = token.isCancellationRequested;
     let batchIndex = 0;
     let batchStarted = false;
+    let batchDispatchTime: number | undefined;
     let pending = new Set<string>();
     let expected = new Set<string>();
     const reportedParents = new Set<string>();
@@ -76,10 +78,20 @@ export async function executeUnityTests(
       }
 
       batchStarted = true;
+      if (batchDispatchTime !== undefined) {
+        log?.info(`Unity batch ${batchIndex + 1}/${batches.length} first activity after ${Date.now() - batchDispatchTime}ms`);
+      }
       if (startTimer) {
         clearTimeout(startTimer);
         startTimer = undefined;
       }
+    }
+
+    /** Logs result convergence for the current independently executed batch. */
+    function logBatchSummary(): void {
+      log?.info(
+        `Unity batch ${batchIndex + 1}/${batches.length} results expected=${expected.size} reported=${expected.size - pending.size} missing=${pending.size}`
+      );
     }
 
     /** Sends one Unity execution command and starts its independent startup timeout. */
@@ -89,11 +101,13 @@ export async function executeUnityTests(
       expected = new Set(batch.expectedFullNames);
       pending = new Set(expected);
       batchStarted = false;
+      batchDispatchTime = Date.now();
       log?.info(
         `executeBatch ${batchIndex + 1}/${batches.length} mode=${batch.mode} pending=${pending.size} name="${fullName}"`
       );
       startTimer = setTimeout(() => {
         const error = new UnityTestStartTimeoutError();
+        logBatchSummary();
         markPendingErrored(run, pending, itemByFullName, error.message);
         settle(error);
       }, startTimeoutMs);
@@ -102,6 +116,7 @@ export async function executeUnityTests(
 
     const cancelListener = token.onCancellationRequested(() => {
       cancelled = true;
+      log?.info(`Unity batch ${batchIndex + 1}/${batches.length} cancellation requested`);
     });
     const messageHandler = (message: { type: number; value: string }): void => {
       if (done) return;
@@ -132,6 +147,7 @@ export async function executeUnityTests(
           // Unity serializes RunFinished as the same complete result tree as TestFinished.
           markStarted();
           handleTestFinished(run, message.value, pending, () => undefined, log, itemByFullName, expected, true, reportedParents);
+          logBatchSummary();
           // Only results absent from this batch's final tree are genuinely unreported.
           markPendingErrored(run, pending, itemByFullName, 'Unity finished without reporting this test result.');
           if (cancelled || batchIndex + 1 >= batches.length) {
@@ -182,7 +198,9 @@ function handleTestFinished(
       if (parentItem && payload.TestStatus !== undefined) {
         const st = mapTestStatus(payload.TestStatus);
         if (st === 'passed') run.passed(parentItem);
-        else if (st === 'failed') run.failed(parentItem, new vscode.TestMessage(payload.ResultState || ''));
+        else if (st === 'failed') {
+          run.failed(parentItem, new vscode.TestMessage(payload.ResultState || missingFailureDetails));
+        }
         else if (st === 'skipped') run.skipped(parentItem);
         reportedParents?.add(payload.FullName);
       }
@@ -198,7 +216,7 @@ function handleTestFinished(
     switch (status) {
       case 'passed': run.passed(item); break;
       case 'failed': {
-        const reason = payload.ResultState || `TestStatus=${payload.TestStatus}`;
+        const reason = payload.ResultState || missingFailureDetails;
         const stack = payload.StackTrace ? '\n' + payload.StackTrace.trim() : '';
         run.failed(item, new vscode.TestMessage(`${payload.FullName}: ${reason}${stack}`));
         break;
