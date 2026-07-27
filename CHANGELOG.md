@@ -8,7 +8,7 @@ All notable changes to Unity Plus are documented in this file.
 
 ### Changed
 
-- Moved the existing Visual Studio Editor package test discovery and execution workflow behind a dedicated backend without changing its Test Explorer behavior.
+- Moved the existing Unity IDE package test discovery and execution workflow behind a dedicated backend without changing its Test Explorer behavior.
 
 ## 0.5.2 - 2026-07-22
 

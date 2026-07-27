@@ -7,7 +7,7 @@ import {
   unityIdeMessageTypeTcp,
   unityIdeMessageTypePing,
   type UnityIdeMessage
-} from '../../unity/visualStudioMessaging';
+} from '../../../unity/visualStudioMessaging';
 
 const maxUdpPayload = 50000;
 const pingIntervalMs = 3000;

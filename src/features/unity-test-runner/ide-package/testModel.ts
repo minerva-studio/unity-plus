@@ -1,5 +1,5 @@
 /**
- * Data model types for Unity test discovery and execution.
+ * IDE package protocol model types for Unity test discovery and execution.
  *
  * Mirrors the JSON structures that com.unity.ide.visualstudio's
  * TestRunnerCallbacks serializes via TestAdaptor / TestResultAdaptor.

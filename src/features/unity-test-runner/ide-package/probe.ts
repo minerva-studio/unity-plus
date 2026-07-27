@@ -1,6 +1,6 @@
 /**
  * Probe v2 — discovers tests THEN tries to execute one.
- * Usage: node out/features/unity-test-runner/probe.js "C:/path/to/UnityProject"
+ * Usage: node out/features/unity-test-runner/ide-package/probe.js "C:/path/to/UnityProject"
  */
 
 import * as dgram from "node:dgram";

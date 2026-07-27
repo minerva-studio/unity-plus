@@ -8,7 +8,7 @@ import { registerRenameFeature } from './features/rename/renameSync';
 import { registerSerializedInstancesFeature } from './features/serialized-instances/serializedInstances';
 import { registerUnityYamlCodeLensFeature } from './features/unity-yaml-code-lens/unityYamlCodeLens';
 import { registerUnityTestRunnerFeature } from './features/unity-test-runner/unityTestRunner';
-import { createUnityTestBridge } from './features/unity-test-runner/unityTestBridge';
+import { createUnityTestBridge } from './features/unity-test-runner/ide-package/unityTestBridge';
 import { createLogger } from './unity/logger';
 import { createLazyUnityMetadataIndex } from './unity/metadataIndex';
 import { checkUnityVisualStudioEditorPackage } from './unity/visualStudioEditorPackage';

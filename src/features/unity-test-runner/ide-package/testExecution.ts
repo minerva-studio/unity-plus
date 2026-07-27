@@ -5,14 +5,14 @@ import {
   unityIdeMessageTypeRunFinished,
   unityIdeMessageTypeTestStarted,
   unityIdeMessageTypeTestFinished
-} from '../../unity/visualStudioMessaging';
+} from '../../../unity/visualStudioMessaging';
 import type { UnityTestBridgeClient } from './unityTestBridge';
 import type {
   UnityTestMode,
   UnityTestResultContainer
 } from './testModel';
 import { mapTestStatus } from './testModel';
-import type { UnityPlusLogger } from '../../unity/logger';
+import type { UnityPlusLogger } from '../../../unity/logger';
 
 const defaultTestStartTimeoutMs = 8000;
 

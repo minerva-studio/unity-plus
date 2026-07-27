@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import type { UnityTestInfo, UnityTestMode, UnityTestTree } from './testModel';
-import { buildUnityTestTree } from './testModel';
+import type { UnityTestInfo, UnityTestMode, UnityTestTree } from './ide-package/testModel';
+import { buildUnityTestTree } from './ide-package/testModel';
 
 export const testControllerId = 'unity-plus-tests';
 export const testControllerLabel = 'Unity Tests';

@@ -1,7 +1,7 @@
 import {
   unityIdeMessageTypeRetrieveTestList,
   unityIdeMessageTypeTestListRetrieved
-} from '../../unity/visualStudioMessaging';
+} from '../../../unity/visualStudioMessaging';
 import type { UnityTestBridgeClient } from './unityTestBridge';
 import type { UnityTestInfo, UnityTestAdaptorContainer } from './testModel';
 

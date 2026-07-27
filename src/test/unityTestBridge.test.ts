@@ -14,10 +14,16 @@ import {
   encodeUnityIdeMessage,
   decodeUnityIdeMessage
 } from '../unity/visualStudioMessaging';
-import { buildUnityTestTree, type UnityTestInfo } from '../features/unity-test-runner/testModel';
-import { parseTestListResponse } from '../features/unity-test-runner/testDiscovery';
-import { discoverUnityTests } from '../features/unity-test-runner/testDiscovery';
-import { createUnityTestBridge, type UnityTestBridgeClient } from '../features/unity-test-runner/unityTestBridge';
+import {
+  buildUnityTestTree,
+  type UnityTestInfo
+} from '../features/unity-test-runner/ide-package/testModel';
+import { parseTestListResponse } from '../features/unity-test-runner/ide-package/testDiscovery';
+import { discoverUnityTests } from '../features/unity-test-runner/ide-package/testDiscovery';
+import {
+  createUnityTestBridge,
+  type UnityTestBridgeClient
+} from '../features/unity-test-runner/ide-package/unityTestBridge';
 
 class MockPersistentSocket extends EventEmitter {
   readonly sends: Array<{ port: number; value: Buffer }> = [];

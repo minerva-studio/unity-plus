@@ -1,10 +1,15 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
-import { EditorPackageUnityTestBackend } from '../../features/unity-test-runner/editorPackageTestBackend';
-import { executeUnityTests, UnityTestStartTimeoutError } from '../../features/unity-test-runner/testExecution';
+import { IdePackageUnityTestBackend } from '../../features/unity-test-runner/ide-package/idePackageTestBackend';
+import {
+  executeUnityTests,
+  UnityTestStartTimeoutError
+} from '../../features/unity-test-runner/ide-package/testExecution';
 import { UnityTestRunScheduler } from '../../features/unity-test-runner/unityTestRunner';
-import type { UnityTestBridgeClient } from '../../features/unity-test-runner/unityTestBridge';
+import type {
+  UnityTestBridgeClient
+} from '../../features/unity-test-runner/ide-package/unityTestBridge';
 import {
   unityIdeMessageTypeExecuteTests,
   unityIdeMessageTypeRunFinished,
@@ -104,10 +109,10 @@ async function waitForSentCount(bridge: MockExecutionBridge, count: number): Pro
   assert.strictEqual(bridge.sent.length, count);
 }
 
-suite('EditorPackageUnityTestBackend - protocol fixture', () => {
-  test('revalidates the exact project and preserves editor-package discovery', async () => {
+suite('IdePackageUnityTestBackend - protocol fixture', () => {
+  test('revalidates the exact project and preserves IDE package discovery', async () => {
     const bridge = new MockExecutionBridge();
-    const backend = new EditorPackageUnityTestBackend(createMockLogger(), () => bridge);
+    const backend = new IdePackageUnityTestBackend(createMockLogger(), () => bridge);
     const editTest = {
       Id: 'edit',
       Name: 'EditTest',
@@ -162,7 +167,7 @@ suite('EditorPackageUnityTestBackend - protocol fixture', () => {
   test('reuses the bridge and reports results with the real TestItem identity', async () => {
     const bridge = new MockExecutionBridge();
     let bridgeCreationCount = 0;
-    const backend = new EditorPackageUnityTestBackend(createMockLogger(), () => {
+    const backend = new IdePackageUnityTestBackend(createMockLogger(), () => {
       bridgeCreationCount += 1;
       return bridge;
     });
@@ -224,7 +229,7 @@ suite('EditorPackageUnityTestBackend - protocol fixture', () => {
 
   test('ends the TestRun once when project connection fails before execution', async () => {
     const bridge = new MockExecutionBridge(new Error('Project endpoint unavailable.'));
-    const backend = new EditorPackageUnityTestBackend(createMockLogger(), () => bridge);
+    const backend = new IdePackageUnityTestBackend(createMockLogger(), () => bridge);
     const cancellation = new vscode.CancellationTokenSource();
     const state: MockRunState = { ended: 0, errored: [], passed: [] };
 

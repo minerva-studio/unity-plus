@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import type { UnityPlusLogger } from '../../unity/logger';
-import type { UnityTestBridgeClient } from './unityTestBridge';
+import type { UnityTestBridgeClient } from './ide-package/unityTestBridge';
 import { createUnityTestController } from './testController';
-import { EditorPackageUnityTestBackend } from './editorPackageTestBackend';
-import type { UnityTestExecutionBatch } from './testExecution';
-import type { UnityTestInfo, UnityTestMode } from './testModel';
+import { IdePackageUnityTestBackend } from './ide-package/idePackageTestBackend';
+import type { UnityTestExecutionBatch } from './ide-package/testExecution';
+import type { UnityTestInfo, UnityTestMode } from './ide-package/testModel';
 import type { UnityTestBackend } from './unityTestBackend';
 
 export interface UnityTestRunnerFeatureOptions {
@@ -64,7 +64,7 @@ export function registerUnityTestRunnerFeature(
   let editTests: UnityTestInfo[] = [];
   let playTests: UnityTestInfo[] = [];
   const testRunScheduler = new UnityTestRunScheduler();
-  const backend: UnityTestBackend = new EditorPackageUnityTestBackend(logger, options.createBridge);
+  const backend: UnityTestBackend = new IdePackageUnityTestBackend(logger, options.createBridge);
 
   const { updateTestTree, createTestRun, dispose: disposeController } =
     createUnityTestController(

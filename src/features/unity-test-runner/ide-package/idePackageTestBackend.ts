@@ -1,4 +1,4 @@
-import type { UnityPlusLogger } from '../../unity/logger';
+import type { UnityPlusLogger } from '../../../unity/logger';
 import { discoverUnityTests } from './testDiscovery';
 import { executeUnityTests } from './testExecution';
 import { createUnityTestBridge, type UnityTestBridgeClient } from './unityTestBridge';
@@ -6,10 +6,10 @@ import type {
   UnityTestBackend,
   UnityTestBackendRunRequest,
   UnityTestDiscoveryResult
-} from './unityTestBackend';
+} from '../unityTestBackend';
 
-/** Runs Unity tests through the Visual Studio Editor package IDE messaging protocol. */
-export class EditorPackageUnityTestBackend implements UnityTestBackend {
+/** Runs Unity tests through the Unity IDE package messaging protocol. */
+export class IdePackageUnityTestBackend implements UnityTestBackend {
   private bridge: UnityTestBridgeClient | undefined;
 
   /** Creates a backend while preserving the existing injectable bridge fixture. */
