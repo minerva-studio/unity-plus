@@ -2,7 +2,7 @@
   "name": "unity-plus",
   "displayName": "%extension.displayName%",
   "description": "%extension.description%",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "l10n": "./l10n",
   "publisher": "minerva-game-studio",

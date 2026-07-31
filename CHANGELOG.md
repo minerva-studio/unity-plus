@@ -4,6 +4,10 @@ All notable changes to Unity Plus are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Show each Unity CLI parameterized test case by its arguments beneath the shared method node.
+
 ## 0.5.3 - 2026-07-26
 
 ### Changed

@@ -75,7 +75,9 @@ export function parseUnityCliDiscovery(raw: string): UnityCliDiscoveryData {
       mode,
       assembly,
       fullName,
-      label: readOptionalString(record, 'Name') ?? getLeafLabel(fullName),
+      label: parameterizedMethodFullName
+        ? getParameterizedCaseLabel(fullName)
+        : readOptionalString(record, 'Name') ?? getLeafLabel(fullName),
       categories: readCategories(record),
       explicit: readExplicit(record),
       parameterizedMethodFullName
@@ -239,6 +241,13 @@ function getParameterizedMethodFullName(fullName: string): string | undefined {
     return undefined;
   }
   return fullName.slice(0, open);
+}
+
+/** Returns the argument text used to distinguish a parameterized test case. */
+function getParameterizedCaseLabel(fullName: string): string {
+  const open = fullName.indexOf('(');
+  const argumentsText = fullName.slice(open + 1, -1);
+  return argumentsText.length > 0 ? argumentsText : '()';
 }
 
 /** Appends `.dll` to CLI assembly labels without changing already-qualified names. */
