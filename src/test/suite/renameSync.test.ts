@@ -10,6 +10,7 @@ import {
   buildAssetMetaRenameOperations,
   applyScriptFilenameSyncPlan,
   runRenameTypeCommand,
+  showRenameInput,
   ScriptFilenameSyncPlan,
   ScriptFileRenameOperation,
 } from '../../features/rename/renameSync';
@@ -65,6 +66,61 @@ function createFile(filePath: string, content = '// test'): void {
     mkdirSync(dir, { recursive: true });
   }
   writeFileSync(filePath, content, 'utf-8');
+}
+
+/** Creates a minimal Quick Pick runtime for rename-input interaction tests. */
+function createRenameInputQuickPickRuntime(): {
+  runtime: typeof vscode;
+  quickPick: vscode.QuickPick<vscode.QuickPickItem>;
+  fireValueChange(): void;
+  fireAccept(): void;
+} {
+  let onDidChangeValue: (() => void) | undefined;
+  let onDidAccept: (() => void) | undefined;
+  let onDidHide: (() => void) | undefined;
+  let onDidChangeSelection: ((items: readonly vscode.QuickPickItem[]) => void) | undefined;
+
+  const quickPick = {
+    title: '',
+    placeholder: '',
+    canSelectMany: false,
+    matchOnDescription: false,
+    matchOnDetail: false,
+    value: '',
+    items: [] as readonly vscode.QuickPickItem[],
+    selectedItems: [] as readonly vscode.QuickPickItem[],
+    onDidChangeValue: (listener: () => void) => {
+      onDidChangeValue = listener;
+      return { dispose: () => undefined };
+    },
+    onDidChangeSelection: (listener: (items: readonly vscode.QuickPickItem[]) => void) => {
+      onDidChangeSelection = listener;
+      return { dispose: () => undefined };
+    },
+    onDidAccept: (listener: () => void) => {
+      onDidAccept = listener;
+      return { dispose: () => undefined };
+    },
+    onDidHide: (listener: () => void) => {
+      onDidHide = listener;
+      return { dispose: () => undefined };
+    },
+    show: () => undefined,
+    hide: () => onDidHide?.(),
+    dispose: () => undefined,
+  } as unknown as vscode.QuickPick<vscode.QuickPickItem>;
+
+  return {
+    runtime: {
+      l10n: { t: (message: string) => message },
+      window: {
+        createQuickPick: () => quickPick,
+      },
+    } as unknown as typeof vscode,
+    quickPick,
+    fireValueChange: () => onDidChangeValue?.(),
+    fireAccept: () => onDidAccept?.(),
+  };
 }
 
 /** Removes a VS Code-backed temp directory after file watchers release handles. */
@@ -178,6 +234,32 @@ suite('renameSync — Pure Functions', () => {
     assert.strictEqual(undoPlan.oldMetaPath, plan.newMetaPath);
     assert.strictEqual(undoPlan.newMetaPath, plan.oldMetaPath);
     assert.strictEqual(undoPlan.isUndo, true);
+  });
+});
+
+suite('renameSync — Rename Input', () => {
+  test('keeps operation selections stable while the type name changes', async () => {
+    const harness = createRenameInputQuickPickRuntime();
+    const result = showRenameInput(harness.runtime, {
+      oldTypeName: 'PlayerController',
+      filePath: '/Project/Assets/PlayerController.cs',
+      previewMode: 'ask',
+      hasMetaFile: true,
+    });
+    const initialItems = harness.quickPick.items;
+    const initialSelection = harness.quickPick.selectedItems;
+
+    harness.quickPick.value = 'HeroController';
+    harness.fireValueChange();
+
+    assert.strictEqual(harness.quickPick.items, initialItems);
+    assert.strictEqual(harness.quickPick.selectedItems, initialSelection);
+
+    harness.fireAccept();
+    assert.deepStrictEqual(await result, {
+      newTypeName: 'HeroController',
+      operationKinds: ['script', 'meta'],
+    });
   });
 });
 

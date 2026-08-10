@@ -526,15 +526,6 @@ export function showRenameInput(
       return items;
     };
 
-    const updateItems = () => {
-      const selectedKinds = new Set(quickPick.selectedItems.map(item => item.operationKind));
-      const items = buildItems();
-      quickPick.items = items;
-      quickPick.selectedItems = items.filter(item =>
-        selectedKinds.size === 0 ? item.picked : selectedKinds.has(item.operationKind)
-      );
-    };
-
     quickPick.title = runtimeVscode.l10n.t('Rename C# Type and Script');
     quickPick.placeholder = runtimeVscode.l10n.t('New C# type name');
     quickPick.canSelectMany = true;
@@ -544,7 +535,6 @@ export function showRenameInput(
     quickPick.items = buildItems();
     quickPick.selectedItems = quickPick.items.filter(item => item.picked);
 
-    quickPick.onDidChangeValue(() => updateItems());
     quickPick.onDidChangeSelection(selectedItems => {
       const selectedKinds = new Set(selectedItems.map(item => item.operationKind));
       if (!selectedKinds.has('script')) {
