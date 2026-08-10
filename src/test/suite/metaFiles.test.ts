@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 
 /**
  * Integration tests for meta file operations.
@@ -84,6 +84,73 @@ suite('metaFiles — File System Operations', () => {
     assert.strictEqual(existsSync(oldPath), false);
     assert.strictEqual(existsSync(newPath), true);
     assert.strictEqual(existsSync(newMetaPath), true);
+  });
+
+  test('moves a Unity meta file during the same direct asset WorkspaceEdit', async () => {
+    const oldPath = join(tempDir, 'direct-icon.png');
+    const oldMetaPath = `${oldPath}.meta`;
+    const newPath = join(tempDir, 'direct-icon-renamed.png');
+    const newMetaPath = `${newPath}.meta`;
+    const guid = 'guid: direct-png-guid';
+
+    writeFileSync(oldPath, 'fake-png-data', 'utf-8');
+    writeFileSync(oldMetaPath, guid, 'utf-8');
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(vscode.Uri.file(oldPath), vscode.Uri.file(newPath));
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    assert.strictEqual(applied, true);
+    assert.strictEqual(existsSync(oldPath), false);
+    assert.strictEqual(existsSync(oldMetaPath), false);
+    assert.strictEqual(existsSync(newPath), true);
+    assert.strictEqual(existsSync(newMetaPath), true);
+    assert.strictEqual(readFileSync(newMetaPath, 'utf-8'), guid);
+  });
+
+  test('keeps asset and meta identity during a Windows case-only direct rename', async function () {
+    if (process.platform !== 'win32') {
+      this.skip();
+    }
+
+    const oldPath = join(tempDir, 'case-texture.png');
+    const oldMetaPath = `${oldPath}.meta`;
+    const newPath = join(tempDir, 'Case-Texture.png');
+    const newMetaPath = `${newPath}.meta`;
+    const guid = 'guid: case-only-guid';
+
+    writeFileSync(oldPath, 'fake-png-data', 'utf-8');
+    writeFileSync(oldMetaPath, guid, 'utf-8');
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(vscode.Uri.file(oldPath), vscode.Uri.file(newPath));
+    const applied = await vscode.workspace.applyEdit(edit);
+
+    assert.strictEqual(applied, true);
+    assert.strictEqual(existsSync(newPath), true);
+    assert.strictEqual(existsSync(newMetaPath), true);
+    assert.strictEqual(readFileSync(newMetaPath, 'utf-8'), guid);
+  });
+
+  test('leaves every meta file untouched when a direct asset rename has a meta conflict', async () => {
+    const oldPath = join(tempDir, 'conflicting-icon.png');
+    const oldMetaPath = `${oldPath}.meta`;
+    const newPath = join(tempDir, 'conflicting-icon-renamed.png');
+    const newMetaPath = `${newPath}.meta`;
+
+    writeFileSync(oldPath, 'fake-png-data', 'utf-8');
+    writeFileSync(oldMetaPath, 'guid: conflicting-source', 'utf-8');
+    writeFileSync(newMetaPath, 'guid: conflicting-destination', 'utf-8');
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(vscode.Uri.file(oldPath), vscode.Uri.file(newPath));
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    assert.strictEqual(applied, true);
+    assert.strictEqual(existsSync(oldPath), false);
+    assert.strictEqual(existsSync(newPath), true);
+    assert.strictEqual(readFileSync(oldMetaPath, 'utf-8'), 'guid: conflicting-source');
+    assert.strictEqual(readFileSync(newMetaPath, 'utf-8'), 'guid: conflicting-destination');
   });
 
   test('can rename a .prefab and its .meta together', async () => {

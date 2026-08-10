@@ -98,6 +98,7 @@ describe('package manifest', () => {
     assert.ok(bundle['Unity Plus: Open a Unity project before creating a C# script.']);
     assert.ok(bundle['Unity Plus: Unity CLI was not found on PATH. Install Unity CLI or reload VS Code after updating PATH.']);
     assert.ok(bundle['Unity Plus: Unity CLI backend failed: {message}']);
+    assert.ok(bundle['Unity Plus: The asset rename will continue, but no Unity meta files were moved because this batch has conflicts:\n{details}']);
     assert.ok(bundle['{count} UnityEvent references']);
     assert.strictEqual(bundle['{count} UnityEvent targets'], '{count} UnityEvent 目标');
     assert.strictEqual(bundle['- UnityEvent targets'], '- UnityEvent 目标');

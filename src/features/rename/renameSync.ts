@@ -69,6 +69,15 @@ export interface ScriptFileMove {
   newPath: string;
 }
 
+export type AssetMetaRenameRisk =
+  | { kind: 'missing-source-meta'; assetPath: string; metaPath: string }
+  | { kind: 'destination-meta-exists'; assetPath: string; metaPath: string };
+
+export interface AssetMetaRenamePreflightResult {
+  operations: readonly ScriptFileRenameOperation[];
+  risks: readonly AssetMetaRenameRisk[];
+}
+
 export interface RecentScriptFilenameSync {
   plan: ScriptFilenameSyncPlan;
 }
@@ -246,9 +255,40 @@ export function registerRenameFeature(
   }));
 
   if (isUnityWorkspace && (getMode() !== 'off' || getMoveMetaWithAsset())) {
+    disposables.push(runtimeVscode.workspace.onWillRenameFiles(event => {
+      if (!getMoveMetaWithAsset()) {
+        return;
+      }
+
+      const moves = event.files.map(file => ({
+        oldPath: file.oldUri.fsPath,
+        newPath: file.newUri.fsPath
+      }));
+
+      // waitUntil must be called during event dispatch. The promise performs
+      // the asynchronous preflight before VS Code applies the original rename.
+      event.waitUntil(buildAssetMetaRenameOperations(moves, {
+        fileExists: async path => await fileExists(runtimeVscode, path)
+      }).then(result => {
+        const edit = new runtimeVscode.WorkspaceEdit();
+        if (result.risks.length > 0) {
+          showAssetMetaRenameWarning(runtimeVscode, result.risks, logger);
+          return edit;
+        }
+
+        for (const operation of result.operations) {
+          edit.renameFile(
+            runtimeVscode.Uri.file(operation.oldPath),
+            runtimeVscode.Uri.file(operation.newPath),
+            { overwrite: false }
+          );
+        }
+        return edit;
+      }));
+    }));
+
     disposables.push(runtimeVscode.workspace.onDidRenameFiles(event => {
       const mode = getMode();
-      const moveMetaWithAsset = getMoveMetaWithAsset();
 
       const csharpMoves = event.files.filter(file => file.oldUri.path.endsWith('.cs') || file.newUri.path.endsWith('.cs'));
       if (mode !== 'off' && csharpMoves.length > 0) {
@@ -265,12 +305,6 @@ export function registerRenameFeature(
         }
       }
 
-      if (moveMetaWithAsset) {
-        void moveAssetMetaFilesForDirectRename(runtimeVscode, event.files.map(file => ({
-          oldPath: file.oldUri.fsPath,
-          newPath: file.newUri.fsPath
-        })), logger);
-      }
     }));
   }
 
@@ -1019,10 +1053,14 @@ export async function buildScriptFilenameSyncOperations(
 
 export async function buildAssetMetaRenameOperations(
   moves: readonly ScriptFileMove[],
-  operations: Pick<ScriptFilenameSyncOperations, 'fileExists' | 'logger'>
-): Promise<ScriptFileRenameOperation[]> {
+  operations: Pick<ScriptFilenameSyncOperations, 'fileExists'>
+): Promise<AssetMetaRenamePreflightResult> {
   const eventMoveKeys = new Set(moves.map(move => scriptMoveKey(move.oldPath, move.newPath)));
-  const renameOperations: ScriptFileRenameOperation[] = [];
+  const candidateOperations: ScriptFileRenameOperation[] = [];
+  const risks: AssetMetaRenameRisk[] = [];
+  const explicitMetaSourcePaths = new Set(
+    moves.filter(isMetaFileMove).map(move => pathComparisonKey(move.oldPath))
+  );
 
   for (const move of moves) {
     if (isMetaFileMove(move)) {
@@ -1038,22 +1076,48 @@ export async function buildAssetMetaRenameOperations(
     }
 
     if (!await operations.fileExists(oldMetaPath)) {
-      operations.logger.debug(`Unity meta file was not found for ${basename(oldMetaPath)}.`);
+      if (!isUnityAssetsPath(move.oldPath)) {
+        continue;
+      }
+
+      risks.push({
+        kind: 'missing-source-meta',
+        assetPath: move.oldPath,
+        metaPath: oldMetaPath
+      });
       continue;
     }
 
-    if (await operations.fileExists(newMetaPath)) {
-      operations.logger.warn(`Unity meta rename skipped because ${basename(newMetaPath)} already exists.`);
-      continue;
-    }
-
-    renameOperations.push({
+    candidateOperations.push({
       oldPath: oldMetaPath,
       newPath: newMetaPath
     });
   }
 
-  return renameOperations;
+  const vacatedMetaSourcePaths = new Set([
+    ...explicitMetaSourcePaths,
+    ...candidateOperations.map(operation => pathComparisonKey(operation.oldPath))
+  ]);
+
+  for (const operation of candidateOperations) {
+    const destinationIsVacated = vacatedMetaSourcePaths.has(pathComparisonKey(operation.newPath));
+    if (isCaseOnlyRename(operation) || destinationIsVacated) {
+      continue;
+    }
+
+    if (await operations.fileExists(operation.newPath)) {
+      risks.push({
+        kind: 'destination-meta-exists',
+        assetPath: operation.oldPath.slice(0, -'.meta'.length),
+        metaPath: operation.newPath
+      });
+    }
+  }
+
+  return {
+    operations: risks.length === 0 ? candidateOperations : [],
+    risks
+  };
 }
 
 async function fileExists(runtimeVscode: typeof vscode, path: string): Promise<boolean> {
@@ -1082,32 +1146,53 @@ async function applyRenameOperations(
   return await runtimeVscode.workspace.applyEdit(edit, { isRefactoring: true });
 }
 
-async function moveAssetMetaFilesForDirectRename(
-  runtimeVscode: typeof vscode,
-  moves: readonly ScriptFileMove[],
-  logger: UnityPlusLogger
-): Promise<void> {
-  const renameOperations = await buildAssetMetaRenameOperations(moves, {
-    fileExists: async path => await fileExists(runtimeVscode, path),
-    logger
-  });
-
-  if (renameOperations.length === 0) {
-    return;
-  }
-
-  const applied = await applyRenameOperations(runtimeVscode, renameOperations);
-  if (applied) {
-    logger.info(`Moved ${renameOperations.length} Unity meta file(s) after asset rename.`);
-  }
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 function isMetaFileMove(move: ScriptFileMove): boolean {
   return move.oldPath.endsWith('.meta') || move.newPath.endsWith('.meta');
+}
+
+/** Returns whether a path is managed as an authored Unity asset. */
+function isUnityAssetsPath(path: string): boolean {
+  return /(^|[\\/])Assets([\\/]|$)/i.test(path);
+}
+
+/** Returns a stable key for batch comparisons across case-insensitive file systems. */
+function pathComparisonKey(path: string): string {
+  return path.toLocaleLowerCase();
+}
+
+/** Returns whether the companion meta move changes only path casing. */
+function isCaseOnlyRename(operation: ScriptFileRenameOperation): boolean {
+  return operation.oldPath !== operation.newPath
+    && pathComparisonKey(operation.oldPath) === pathComparisonKey(operation.newPath);
+}
+
+/** Shows one warning for an unsafe batch instead of one notification per asset. */
+function showAssetMetaRenameWarning(
+  runtimeVscode: typeof vscode,
+  risks: readonly AssetMetaRenameRisk[],
+  logger: UnityPlusLogger
+): void {
+  const visibleRisks = risks.slice(0, 3);
+  const details = visibleRisks.map(risk => risk.kind === 'missing-source-meta'
+    ? runtimeVscode.l10n.t('Missing source meta file: {path}', { path: risk.metaPath })
+    : runtimeVscode.l10n.t('Destination meta file already exists: {path}', { path: risk.metaPath }));
+
+  if (risks.length > visibleRisks.length) {
+    details.push(runtimeVscode.l10n.t('... and {count} more meta file issue(s).', {
+      count: risks.length - visibleRisks.length
+    }));
+  }
+
+  const message = runtimeVscode.l10n.t(
+    'Unity Plus: The asset rename will continue, but no Unity meta files were moved because this batch has conflicts:\n{details}',
+    { details: details.join('\n') }
+  );
+  logger.warn(message);
+  void runtimeVscode.window.showWarningMessage(message);
 }
 
 function getAtomicRenameFallbackReason(

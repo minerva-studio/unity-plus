@@ -275,38 +275,46 @@ suite('renameSync — Real Filesystem Operations', () => {
     assert.strictEqual(existsSync(plan.newMetaPath), true);
   });
 
-  test('builds Unity meta rename operation for a direct asset rename', async () => {
+  test('preflights a Unity meta rename operation for a direct asset rename', async () => {
     const oldPath = normalize(join(tempDir, 'Assets', 'Texture.png'));
     const newPath = normalize(join(tempDir, 'Assets', 'Texture-Renamed.png'));
     createFile(`${oldPath}.meta`, 'guid: meta123');
 
-    const operations = await buildAssetMetaRenameOperations(
+    const result = await buildAssetMetaRenameOperations(
       [{ oldPath, newPath }],
       {
         fileExists: async p => existsSync(p),
-        logger: createTestLogger(),
       }
     );
 
-    assert.deepStrictEqual(operations, [
-      { oldPath: `${oldPath}.meta`, newPath: `${newPath}.meta` },
-    ]);
+    assert.deepStrictEqual(result, {
+      operations: [{ oldPath: `${oldPath}.meta`, newPath: `${newPath}.meta` }],
+      risks: [],
+    });
   });
 
-  test('does not build Unity meta rename operation when the old meta file is missing', async () => {
+  test('reports a missing source meta file and clears the complete batch', async () => {
     const oldPath = normalize(join(tempDir, 'Assets', 'Missing.png'));
     const newPath = normalize(join(tempDir, 'Assets', 'Missing-Renamed.png'));
     // deliberately do NOT create the .meta file
 
-    const operations = await buildAssetMetaRenameOperations(
-      [{ oldPath, newPath }],
-      {
-        fileExists: async p => existsSync(p),
-        logger: createTestLogger(),
-      }
+    const safeOldPath = normalize(join(tempDir, 'Assets', 'Safe.png'));
+    const safeNewPath = normalize(join(tempDir, 'Assets', 'Safe-Renamed.png'));
+    createFile(`${safeOldPath}.meta`);
+
+    const result = await buildAssetMetaRenameOperations(
+      [{ oldPath: safeOldPath, newPath: safeNewPath }, { oldPath, newPath }],
+      { fileExists: async p => existsSync(p) }
     );
 
-    assert.deepStrictEqual(operations, []);
+    assert.deepStrictEqual(result, {
+      operations: [],
+      risks: [{
+        kind: 'missing-source-meta',
+        assetPath: oldPath,
+        metaPath: `${oldPath}.meta`,
+      }],
+    });
   });
 
   test('applies undo as reverse script and Unity meta rename operations', async () => {
@@ -336,22 +344,33 @@ suite('renameSync — Real Filesystem Operations', () => {
     const newPath = plan.newFilePath;
     createFile(`${oldPath}.meta`);
 
-    const operations = await buildAssetMetaRenameOperations(
+    const result = await buildAssetMetaRenameOperations(
       [
         { oldPath, newPath },
         { oldPath: `${oldPath}.meta`, newPath: `${newPath}.meta` },
       ],
       {
         fileExists: async p => existsSync(p),
-        logger: createTestLogger(),
       }
     );
 
-    assert.deepStrictEqual(operations, []);
+    assert.deepStrictEqual(result, { operations: [], risks: [] });
+  });
+
+  test('ignores missing meta files outside the Unity Assets directory', async () => {
+    const oldPath = normalize(join(tempDir, 'README.md'));
+    const newPath = normalize(join(tempDir, 'README-Renamed.md'));
+
+    const result = await buildAssetMetaRenameOperations(
+      [{ oldPath, newPath }],
+      { fileExists: async p => existsSync(p) }
+    );
+
+    assert.deepStrictEqual(result, { operations: [], risks: [] });
   });
 
   test('does not build Unity meta rename operation for meta file moves', async () => {
-    const operations = await buildAssetMetaRenameOperations(
+    const result = await buildAssetMetaRenameOperations(
       [
         {
           oldPath: normalize(join(tempDir, 'Assets', 'icon.png.meta')),
@@ -360,11 +379,88 @@ suite('renameSync — Real Filesystem Operations', () => {
       ],
       {
         fileExists: async () => true,
-        logger: createTestLogger(),
       }
     );
 
-    assert.deepStrictEqual(operations, []);
+    assert.deepStrictEqual(result, { operations: [], risks: [] });
+  });
+
+  test('reports a destination meta conflict and clears the complete batch', async () => {
+    const oldPath = normalize(join(tempDir, 'Assets', 'Texture.png'));
+    const newPath = normalize(join(tempDir, 'Assets', 'Texture-Renamed.png'));
+    const safeOldPath = normalize(join(tempDir, 'Assets', 'Safe.mat'));
+    const safeNewPath = normalize(join(tempDir, 'Assets', 'Safe-Renamed.mat'));
+    createFile(`${oldPath}.meta`);
+    createFile(`${newPath}.meta`);
+    createFile(`${safeOldPath}.meta`);
+
+    const result = await buildAssetMetaRenameOperations(
+      [{ oldPath, newPath }, { oldPath: safeOldPath, newPath: safeNewPath }],
+      { fileExists: async p => existsSync(p) }
+    );
+
+    assert.deepStrictEqual(result, {
+      operations: [],
+      risks: [{
+        kind: 'destination-meta-exists',
+        assetPath: oldPath,
+        metaPath: `${newPath}.meta`,
+      }],
+    });
+  });
+
+  test('allows a destination meta file that the same batch moves away', async () => {
+    const firstOldPath = normalize(join(tempDir, 'Assets', 'A.png'));
+    const firstNewPath = normalize(join(tempDir, 'Assets', 'B.png'));
+    const secondOldPath = firstNewPath;
+    const secondNewPath = normalize(join(tempDir, 'Assets', 'C.png'));
+    createFile(`${firstOldPath}.meta`);
+    createFile(`${secondOldPath}.meta`);
+
+    const result = await buildAssetMetaRenameOperations(
+      [{ oldPath: firstOldPath, newPath: firstNewPath }, { oldPath: secondOldPath, newPath: secondNewPath }],
+      { fileExists: async p => existsSync(p) }
+    );
+
+    assert.deepStrictEqual(result, {
+      operations: [
+        { oldPath: `${firstOldPath}.meta`, newPath: `${firstNewPath}.meta` },
+        { oldPath: `${secondOldPath}.meta`, newPath: `${secondNewPath}.meta` },
+      ],
+      risks: [],
+    });
+  });
+
+  test('allows a case-only asset rename without reporting its existing meta as a conflict', async () => {
+    const oldPath = normalize(join(tempDir, 'Assets', 'texture.png'));
+    const newPath = normalize(join(tempDir, 'Assets', 'Texture.png'));
+    createFile(`${oldPath}.meta`);
+
+    const result = await buildAssetMetaRenameOperations(
+      [{ oldPath, newPath }],
+      { fileExists: async p => existsSync(p) }
+    );
+
+    assert.deepStrictEqual(result, {
+      operations: [{ oldPath: `${oldPath}.meta`, newPath: `${newPath}.meta` }],
+      risks: [],
+    });
+  });
+
+  test('preflights a folder move using the folder meta file', async () => {
+    const oldPath = normalize(join(tempDir, 'Assets', 'OriginalFolder'));
+    const newPath = normalize(join(tempDir, 'Assets', 'RenamedFolder'));
+    createFile(`${oldPath}.meta`);
+
+    const result = await buildAssetMetaRenameOperations(
+      [{ oldPath, newPath }],
+      { fileExists: async p => existsSync(p) }
+    );
+
+    assert.deepStrictEqual(result, {
+      operations: [{ oldPath: `${oldPath}.meta`, newPath: `${newPath}.meta` }],
+      risks: [],
+    });
   });
 });
 
