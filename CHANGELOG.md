@@ -2,11 +2,13 @@
 
 All notable changes to Unity Plus are documented in this file.
 
-## Unreleased
+## 0.5.4 - 2026-08-10
 
 ### Fixed
 
 - Show each Unity CLI parameterized test case by its arguments beneath the shared method node.
+- Warn before a direct Unity asset rename when companion `.meta` files are missing or would conflict, without partially moving the batch.
+- Preserve selected rename operations while typing a new C# type name.
 
 ## 0.5.3 - 2026-07-26
 
